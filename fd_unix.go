@@ -79,7 +79,42 @@ func redirectStdout(w *os.File) (restore func(), err error) {
 	}, nil
 }
 
-// canRedirectStdout reports whether stdout can be redirected in place. It is
-// false on platforms without a dup2 equivalent, where the caller must capture
-// output through a subprocess pipe instead.
+// redirectStderr points the process's standard error at w for the duration of
+// a command, and returns a function that puts it back.
+//
+// This is not optional. A tool prints a substantial part of what the operator
+// asked for on standard error: a capability table, a resolved configuration, a
+// warning, the explanation of a failure. Leaving stderr attached to the
+// terminal while the interface owns the screen means that text lands in the
+// middle of the interface's own frames and tears the display apart.
+func redirectStderr(w *os.File) (restore func(), err error) {
+	saved, err := syscall.Dup(syscall.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	syscall.CloseOnExec(saved)
+	backing := os.NewFile(uintptr(saved), "/dev/tty-stderr-saved")
+
+	if err := syscall.Dup2(int(w.Fd()), syscall.Stderr); err != nil {
+		_ = backing.Close()
+		return nil, err
+	}
+	previous := os.Stderr
+	os.Stderr = w
+
+	var once bool
+	return func() {
+		if once {
+			return
+		}
+		once = true
+		os.Stderr = previous
+		_ = syscall.Dup2(int(backing.Fd()), syscall.Stderr)
+		_ = backing.Close()
+	}, nil
+}
+
+// canRedirectStdout reports whether the output streams can be redirected in
+// place. It is false on platforms without a dup2 equivalent, where the caller
+// must capture output through a subprocess pipe instead.
 func canRedirectStdout() bool { return true }

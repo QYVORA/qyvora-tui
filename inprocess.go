@@ -81,12 +81,30 @@ func (r *InProcessRunner) Run(ctx context.Context, args []string, events io.Writ
 	// writing to the original handle however the variable is later assigned,
 	// so its output would appear on the terminal in the middle of the
 	// interface's own frames. Moving the descriptor catches every writer.
-	restore, err := redirectStdout(pw)
+	// Both streams are captured, and both end up in the same transcript. A tool
+	// writes much of what the operator asked for to standard error -- a
+	// capability table, a warning, the reason a run failed -- so capturing only
+	// stdout would leave that text drawing straight over the interface.
+	restoreOut, err := redirectStdout(pw)
 	if err != nil {
 		_ = pw.Close()
 		<-done
 		_ = pr.Close()
 		return 1, fmt.Errorf("tui: cannot capture tool output: %w", err)
+	}
+	restoreErr, err := redirectStderr(pw)
+	if err != nil {
+		// Undo the first half before giving up, or the tool's output would keep
+		// going to a pipe nobody is reading.
+		restoreOut()
+		_ = pw.Close()
+		<-done
+		_ = pr.Close()
+		return 1, fmt.Errorf("tui: cannot capture tool diagnostics: %w", err)
+	}
+	restore := func() {
+		restoreErr()
+		restoreOut()
 	}
 
 	full := append([]string{}, r.Prefix...)

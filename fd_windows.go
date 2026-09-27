@@ -35,6 +35,22 @@ func redirectStdout(w *os.File) (restore func(), err error) {
 	}, nil
 }
 
-// canRedirectStdout reports whether stdout can be redirected at the descriptor
-// level. On Windows it cannot, so the caller must capture through a subprocess.
+// redirectStderr points the process's standard error at w for the duration of
+// a command, and returns a function that puts it back.
+func redirectStderr(w *os.File) (restore func(), err error) {
+	previous := os.Stderr
+	os.Stderr = w
+	var once bool
+	return func() {
+		if once {
+			return
+		}
+		once = true
+		os.Stderr = previous
+	}, nil
+}
+
+// canRedirectStdout reports whether the output streams can be redirected at the
+// descriptor level. On Windows they cannot, so the caller must capture through
+// a subprocess.
 func canRedirectStdout() bool { return false }

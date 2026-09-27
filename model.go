@@ -26,9 +26,11 @@ type Config struct {
 	// In, Out and Err are the streams the TUI owns. Out defaults to stdout.
 	In  io.Reader
 	Out io.Writer
-	// Err receives the tool's human-readable output during execution. Nil
-	// discards it: the transcript renders events, and the tool's prose
-	// interleaved with redrawn frames is unreadable.
+	// Err receives the tool's human-readable output during execution. Nil keeps
+	// it in the transcript, which is the default and normally what is wanted:
+	// a capability table, a resolved configuration and the explanation of a
+	// failure are all things the operator asked to see. Set it only to divert
+	// that text somewhere else entirely.
 	Err io.Writer
 	// NoColor forces plain output regardless of terminal detection.
 	NoColor bool
