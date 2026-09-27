@@ -42,7 +42,7 @@ func TestReadEventsDecodesTheSevenFieldEnvelope(t *testing.T) {
 	emit(t, &buf, "e1", EventFindingDiscovered, map[string]any{"title": "weak TLS", "severity": "high"})
 
 	var got []Event
-	stats := readEvents(&buf, func(ev Event) { got = append(got, ev) })
+	stats := readEvents(&buf, func(ev Event) { got = append(got, ev) }, nil)
 
 	if stats.Decoded != 2 {
 		t.Fatalf("decoded %d events, want 2", stats.Decoded)
@@ -71,7 +71,7 @@ func TestReadEventsSkipsMalformedLinesAndKeepsGoing(t *testing.T) {
 	emit(t, &buf, "e1", EventExecutionCompleted, nil)
 
 	var got []Event
-	stats := readEvents(&buf, func(ev Event) { got = append(got, ev) })
+	stats := readEvents(&buf, func(ev Event) { got = append(got, ev) }, nil)
 
 	if stats.Decoded != 2 {
 		t.Fatalf("decoded %d, want 2 -- a bad line must not end the stream", stats.Decoded)
@@ -587,7 +587,7 @@ func TestExecRunnerDeliversACompletedRun(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit = %d, want 0", code)
 	}
-	stats := readEvents(&out, func(Event) {})
+	stats := readEvents(&out, func(Event) {}, nil)
 	if stats.Decoded != 3 {
 		t.Errorf("decoded %d events from the child, want 3: %q", stats.Decoded, out.String())
 	}

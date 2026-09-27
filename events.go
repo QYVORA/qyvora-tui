@@ -41,13 +41,24 @@ const (
 	EventTargetDiscovered  = "target.discovered"
 )
 
-// readEvents decodes JSONL from r and calls fn for each event.
+// readEvents decodes JSONL from r, calling fn for each event and text for each
+// line of plain output the tool wrote alongside them.
+//
+// The second callback matters. A tool is not only a source of events: it also
+// prints things that *are* the answer -- a version block, a capability table, a
+// dry-run listing. Because the TUI points the tool's standard output at the
+// stream it reads, that text arrives here, and discarding it would leave a
+// command that ran correctly looking like one that produced nothing.
+//
+// A line that is not JSON is passed to text; a line that is JSON but is not a
+// well-formed envelope is counted as malformed and skipped. The distinction is
+// deliberate: one is a tool's output, the other is a bug or a truncated write.
 //
 // It returns when r reaches EOF or errors. Decoding is deliberately lenient:
 // a line that is not a well-formed envelope is counted and skipped rather
 // than aborting the run, because a tool that crashes mid-write should still
 // let the user see everything that arrived before the failure.
-func readEvents(r io.Reader, fn func(Event)) (stats eventStats) {
+func readEvents(r io.Reader, fn func(Event), text func(string)) (stats eventStats) {
 	sc := bufio.NewScanner(r)
 	// Event data can be large (a finding with full evidence, a list of
 	// endpoints), so raise the line limit well past bufio's 64KiB default.
@@ -56,6 +67,15 @@ func readEvents(r io.Reader, fn func(Event)) (stats eventStats) {
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
+			continue
+		}
+		// A JSON-shaped line is an envelope or a defect; anything else is the
+		// tool's own output.
+		if !strings.HasPrefix(line, "{") {
+			stats.Text++
+			if text != nil {
+				text(line)
+			}
 			continue
 		}
 		var ev Event
@@ -81,7 +101,9 @@ func readEvents(r io.Reader, fn func(Event)) (stats eventStats) {
 type eventStats struct {
 	Decoded   int
 	Malformed int
-	Err       error
+	// Text counts lines of the tool's own output rather than events.
+	Text int
+	Err  error
 }
 
 // sortedKeys gives deterministic iteration over an event's data map, which

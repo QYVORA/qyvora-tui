@@ -47,6 +47,9 @@ type Theme struct {
 
 	// Session.
 	Command lipgloss.Style
+	// Output is the tool's own printed text. It is deliberately unadorned: the
+	// interface did not interpret it, so it does not dress it up.
+	Output  lipgloss.Style
 	Arg     lipgloss.Style
 	Group   lipgloss.Style
 	Label   lipgloss.Style
@@ -82,7 +85,7 @@ func newTheme(color bool) Theme {
 			Color: false, Title: plain, Version: plain, Rule: plain,
 			Ready: plain, Running: plain, Failed: plain, Cancelled: plain,
 			Command: plain, Arg: plain, Group: plain, Label: plain,
-			Value: plain, Detail: plain, Success: plain, Prompt: plain,
+			Value: plain, Detail: plain, Success: plain, Prompt: plain, Output: plain,
 			Hint: plain, Badge: plain, Critical: plain, High: plain,
 			Medium: plain, Low: plain, Info: plain, BarFill: plain,
 			BarEmpty: plain,
@@ -105,6 +108,7 @@ func newTheme(color bool) Theme {
 		Group:   lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)),
 		Label:   lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)),
 		Value:   lipgloss.NewStyle().Foreground(lipgloss.Color(textHex)),
+		Output:  lipgloss.NewStyle().Foreground(lipgloss.Color(textHex)),
 		Detail:  lipgloss.NewStyle().Foreground(lipgloss.Color(faintHex)),
 		Success: lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)),
 

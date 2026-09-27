@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -63,3 +64,6 @@ func refresh(m model) model {
 	m.refreshViewport()
 	return m
 }
+
+// nowish returns a timestamp for tests that need a plausible duration.
+func nowish() time.Time { return time.Now() }

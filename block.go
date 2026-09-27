@@ -69,6 +69,18 @@ type eventRow struct {
 	Data   map[string]any
 }
 
+// addOutput records a line of the tool's printed output.
+func (b *block) addOutput(line string) {
+	// Bound it: a command that prints without limit must not grow the
+	// transcript until the interface stalls. The tail is kept, because that is
+	// where a failure and its explanation end up.
+	const maxOutputLines = 500
+	if len(b.output) >= maxOutputLines {
+		b.output = b.output[len(b.output)-maxOutputLines+1:]
+	}
+	b.output = append(b.output, line)
+}
+
 // block is one execution: a command the user ran, the events it produced, and
 // its result. This is the unit the transcript renders, rather than a flat
 // wall of events.
@@ -81,7 +93,11 @@ type block struct {
 	status   Status
 	exitCode int
 
-	rows      []eventRow
+	rows []eventRow
+	// output holds the tool's own printed output, verbatim. It is kept apart
+	// from the event rows because it is not an event: it is whatever the
+	// command chose to print, shown as written rather than interpreted.
+	output    []string
 	findings  []Finding
 	artifacts []Artifact
 	progress  progressLine

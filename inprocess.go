@@ -76,8 +76,18 @@ func (r *InProcessRunner) Run(ctx context.Context, args []string, events io.Writ
 		close(done)
 	}()
 
-	saved := os.Stdout
-	os.Stdout = pw
+	// Capture at the descriptor level, not by reassigning os.Stdout. A tool
+	// that captured stdout into a variable during package initialisation keeps
+	// writing to the original handle however the variable is later assigned,
+	// so its output would appear on the terminal in the middle of the
+	// interface's own frames. Moving the descriptor catches every writer.
+	restore, err := redirectStdout(pw)
+	if err != nil {
+		_ = pw.Close()
+		<-done
+		_ = pr.Close()
+		return 1, fmt.Errorf("tui: cannot capture tool output: %w", err)
+	}
 
 	full := append([]string{}, r.Prefix...)
 	full = append(full, r.eventFlag()...)
@@ -88,7 +98,7 @@ func (r *InProcessRunner) Run(ctx context.Context, args []string, events io.Writ
 	// work rather than merely the UI.
 	code := r.Execute(ctx, full)
 
-	os.Stdout = saved
+	restore()
 	// Closing the write end is what lets the copy goroutine observe EOF.
 	_ = pw.Close()
 	wg.Wait()

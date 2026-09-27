@@ -193,6 +193,7 @@ func (m model) renderBlockBody(b *block) []string {
 	}
 
 	lines = append(lines, m.renderSummary(b))
+	lines = append(lines, m.renderOutput(b)...)
 	lines = append(lines, m.renderGroups(b)...)
 	lines = append(lines, m.renderEvents(b)...)
 	return lines
@@ -350,6 +351,68 @@ func (m model) renderEvents(b *block) []string {
 		}
 	}
 	return lines
+}
+
+// renderOutput shows what the command printed, as written.
+//
+// It is wrapped rather than clipped, because clipping throws away the far end
+// of a table, which is the part holding the answer to the question the operator
+// asked. Wrapping keeps every column reachable and is what makes a wide
+// capability list readable in a narrow terminal.
+func (m model) renderOutput(b *block) []string {
+	if len(b.output) == 0 {
+		return nil
+	}
+	// A printed block is quoted under a rule rather than mixed into the tree:
+	// the tree is for results the interface understood, and this is the tool
+	// speaking for itself.
+	lines := []string{"  " + m.theme.Group.Render("Output")}
+	width := m.contentWidth() - 2
+	for _, raw := range b.output {
+		for _, line := range wrapText(raw, width) {
+			lines = append(lines, "  "+m.theme.Output.Render(line))
+		}
+	}
+	return lines
+}
+
+// wrapText breaks a line at width, preferring spaces so words stay intact.
+// A single word longer than the width is hard-split rather than dropped,
+// because losing content silently is worse than an awkward break.
+func wrapText(s string, width int) []string {
+	s = strings.ReplaceAll(strings.TrimRight(s, "\r"), "\t", "    ")
+	if width < 8 {
+		return []string{s}
+	}
+	if len([]rune(s)) <= width {
+		return []string{s}
+	}
+	var out []string
+	var line []rune
+	for _, word := range strings.Fields(s) {
+		switch {
+		case len(line) == 0:
+			line = []rune(word)
+		case len(line)+1+len([]rune(word)) <= width:
+			line = append(line, ' ')
+			line = append(line, []rune(word)...)
+		default:
+			out = append(out, string(line))
+			line = []rune(word)
+		}
+		// A single token wider than the line: break it by hand.
+		for len(line) > width {
+			out = append(out, string(line[:width]))
+			line = line[width:]
+		}
+	}
+	if len(line) > 0 {
+		out = append(out, string(line))
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	return out
 }
 
 func (m model) renderRow(row eventRow, branch string) string {

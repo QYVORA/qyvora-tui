@@ -89,6 +89,10 @@ type (
 	tickMsg time.Time
 	// noticeMsg is a transient transcript line the TUI generated.
 	noticeMsg struct{ text string }
+	// outputMsg is one line of the tool's own printed output. It is kept
+	// separate from an event because it has no envelope: the interface shows
+	// it as written rather than claiming to have interpreted it.
+	outputMsg struct{ line string }
 )
 
 // model is the application state.
@@ -141,6 +145,10 @@ func Run(cfg Config) (int, error) {
 	if cfg.Runner == nil {
 		return 1, fmt.Errorf("tui: Config.Runner is required")
 	}
+	in := cfg.In
+	if in == nil {
+		in = os.Stdin
+	}
 
 	// Refuse to draw into a pipe. This is the most important safety property
 	// of the TUI: `tool scan target | tee log` must keep producing the same
@@ -151,9 +159,21 @@ func Run(cfg Config) (int, error) {
 
 	m := newModel(cfg, newTheme(!cfg.NoColor && colorEnabled(os.Stdout)))
 
+	// The renderer draws to a private duplicate of stdout. Command execution
+	// redirects the process's real stdout into a capture pipe, and without this
+	// the renderer would follow it there and overwrite the transcript with its
+	// own frames.
+	render, releaseRender, err := detachTerminal()
+	if err != nil {
+		return 1, fmt.Errorf("tui: cannot claim the terminal for rendering: %w", err)
+	}
+	defer releaseRender()
+
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
 		tea.WithContext(context.Background()),
+		tea.WithOutput(render),
+		tea.WithInput(in),
 	)
 	final, err := p.Run()
 	if err != nil {
@@ -243,6 +263,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if ev, ok := inner.(evMsg); ok {
 				if b := m.blockByID(m.activeID); b != nil {
 					b.addEvent(Event(ev))
+				}
+				continue
+			}
+			if out, ok := inner.(outputMsg); ok {
+				if b := m.blockByID(m.activeID); b != nil {
+					b.addOutput(out.line)
 				}
 				continue
 			}
@@ -536,6 +562,8 @@ func (m model) consume(r io.Reader) tea.Cmd {
 		var msgs []tea.Msg
 		stats := readEvents(r, func(ev Event) {
 			msgs = append(msgs, evMsg(ev))
+		}, func(line string) {
+			msgs = append(msgs, outputMsg{line})
 		})
 		if len(msgs) == 0 {
 			if stats.Malformed > 0 {
