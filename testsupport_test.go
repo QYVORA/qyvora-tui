@@ -3,7 +3,6 @@ package tui
 import (
 	"bytes"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -13,12 +12,6 @@ import (
 // windowSizeMsg adapts a width and height into the resize message bubbletea
 // delivers, so tests can exercise the resize path without a real terminal.
 func windowSizeMsg(w, h int) tea.WindowSizeMsg { return tea.WindowSizeMsg{Width: w, Height: h} }
-
-var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
-
-// stripANSI removes escape sequences, so a test can measure the visible width
-// of a rendered line.
-func stripANSI(s string) string { return ansiPattern.ReplaceAllString(s, "") }
 
 var _ = os.Stdout
 var _ = strings.TrimSpace
