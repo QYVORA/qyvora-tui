@@ -10,99 +10,103 @@ import (
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// View renders the whole interface: header, transcript, and the input line.
+// tree glyphs, matching the shape a reader expects from a file tree.
+const (
+	treeBranch = "├─"
+	treeLeaf   = "└─"
+	treePipe   = "│ "
+	treeBlank  = "  "
+)
+
+// View renders the whole interface: a compact header, the scrolling session,
+// and the composer pinned to the bottom.
 //
-// The layout is computed from the current terminal size on every render.
-// Nothing about the width is baked in, so a resize is handled by the next
-// frame rather than needing a special path.
+// The terminal session is the workspace. There is no panel grid and no
+// permanent dashboard: the middle of the screen is history, and the only fixed
+// furniture is the prompt the user types into.
 func (m model) View() string {
 	if m.quitting {
 		return ""
 	}
 	if m.width <= 0 || m.height <= 0 {
-		// Before the first WindowSizeMsg there is no size to lay out
-		// against; render the input alone rather than guessing.
-		return m.renderInput()
+		// Before the first resize there is no geometry to lay out against;
+		// render the composer alone rather than guessing at widths.
+		return m.renderComposer()
 	}
 
 	var b strings.Builder
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
-	b.WriteString(m.renderDivider())
+	// A hairline rule under the header separates identity from content without
+	// drawing a box around everything.
+	b.WriteString(m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))))
 	b.WriteString("\n")
 
-	// The transcript fills whatever is left after the header, divider and
-	// input line, so the scroll viewport never overlaps the prompt.
-	viewHeight := m.height - 3
-	if viewHeight < 1 {
-		viewHeight = 1
-	}
-	transcript := m.renderTranscript(viewHeight)
-	b.WriteString(transcript)
+	// The viewport takes everything between the header rule and the composer.
+	// It scrolls independently, so history stays reachable while a command runs.
+	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
-	b.WriteString(m.renderDivider())
-	b.WriteString("\n")
-	b.WriteString(m.renderInput())
+
+	b.WriteString(m.renderComposer())
 	return b.String()
 }
 
-// renderHeader draws the title and the current status.
+// renderHeader draws the tool identity and session state on one line.
 func (m model) renderHeader() string {
 	title := m.cfg.Title
 	if title == "" {
-		title = "QYVORA / " + strings.ToUpper(m.runner.Name())
+		title = "QYVORA"
 	}
 	if m.cfg.Version != "" {
 		title += "  " + m.cfg.Version
 	}
 
-	label := m.state.String()
-	if m.state == stateRunning {
-		label = spinnerFrames[m.spinner] + " " + label
-	}
-	if m.running && !m.started.IsZero() {
-		label += "  " + duration(time.Since(m.started))
-	}
+	left := m.theme.Title.Render(title)
 
-	dot := m.theme.statusStyle(m.statusForDot()).Render("●")
-
-	left := m.theme.HeaderTitle.Render(title)
-	right := m.theme.statusStyle(m.statusForDot()).Render(label)
-
-	// Both the single-row and stacked layouts are clamped: at a very narrow
-	// width a long tool name would otherwise push the status off screen or
-	// wrap, breaking the header's alignment.
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
-	if gap < 1 {
-		// Too narrow for a comfortable row: stack the status under the title
-		// rather than truncating either into unreadability.
-		return clampLine(left, m.width) + "\n" + clampLine(dot+" "+right, m.width)
-	}
-	return clampLine(left+strings.Repeat(" ", gap)+dot+" "+right, m.width)
-}
-
-func (m model) statusForDot() Status {
-	switch m.state {
-	case stateRunning:
-		return StatusRunning
-	case stateFailed:
-		return StatusFailed
-	case stateCancelled:
-		return StatusCancelled
+	right := ""
+	switch {
+	case m.running:
+		right = m.theme.Running.Render(spinnerFrames[m.spinner] + " running " + duration(time.Since(m.started)))
+	case len(m.notices) > 0 && m.lastNoticeIsError():
+		right = m.theme.Failed.Render("error")
+	case m.following == false:
+		// The user has scrolled back; say so, because new output is arriving
+		// below the fold and silently not being seen is disorienting.
+		right = m.theme.Hint.Render("paused · Ctrl+End to follow")
 	default:
-		return StatusDone
+		right = m.theme.Ready.Render("ready")
 	}
+
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		// Too narrow to sit side by side. The identity matters more than the
+		// status, so the status gives way rather than both being clipped.
+		return clampLine(left, m.width)
+	}
+	return clampLine(left+strings.Repeat(" ", gap)+right, m.width)
 }
 
-func (m model) renderDivider() string {
-	return m.theme.Border.Render(strings.Repeat("─", max(1, m.width)))
+func (m model) lastNoticeIsError() bool {
+	if len(m.notices) == 0 {
+		return false
+	}
+	return strings.HasPrefix(m.notices[len(m.notices)-1], "Error:") ||
+		strings.Contains(m.notices[len(m.notices)-1], "failed")
 }
 
-// renderInput draws the prompt line and the key hints.
-func (m model) renderInput() string {
-	input := m.input.View()
-	line := input
+// renderComposer draws the bottom input bar.
+//
+// The composer is the one element that must never move, because it is the only
+// part of the interface the user is always addressing. Everything above it
+// scrolls.
+func (m model) renderComposer() string {
+	// The bar is visually distinct from the transcript without being a boxed
+	// panel: a rule above it and a green prompt are enough.
+	var b strings.Builder
+	b.WriteString(m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))))
+	b.WriteString("\n")
 
+	line := m.input.View()
 	if hint := m.hint(); hint != "" {
 		hint = m.theme.Hint.Render(hint)
 		space := m.width - lipgloss.Width(line) - lipgloss.Width(hint)
@@ -110,178 +114,265 @@ func (m model) renderInput() string {
 			line += strings.Repeat(" ", space) + hint
 		}
 	}
-	return clampLine(line, m.width)
+	b.WriteString(clampLine(line, m.width))
+	return b.String()
 }
 
-// hint returns the context-sensitive key hint shown at the right of the prompt.
+// hint returns the context-sensitive key hint on the right of the composer.
 func (m model) hint() string {
 	switch {
 	case m.running:
-		return "Ctrl+C stop"
-	case m.blocks == nil:
-		return "help  Ctrl+D quit"
+		return "ctrl+c stop"
+	case m.following:
+		return "tab complete · ↑↓ history · ctrl+o events"
 	default:
-		return "Tab complete  ↑↓ history"
+		return "ctrl+end latest"
 	}
 }
 
-// renderTranscript lays out the session blocks into the available height,
-// keeping the newest content visible.
-func (m model) renderTranscript(height int) string {
-	lines := m.transcriptLines()
-	if len(lines) == 0 {
-		lines = []string{m.theme.Dim.Render("Type a command, or help for what is available.")}
-	}
-	// Clip horizontally as well as vertically. A line wider than the terminal
-	// would wrap and break the block layout, so every line is constrained to
-	// the real width rather than trusted to fit.
-	for i, l := range lines {
-		lines[i] = clampLine(l, m.width)
-	}
-	if len(lines) > height {
-		lines = lines[len(lines)-height:]
-	}
-	return strings.Join(lines, "\n")
-}
-
-// clampLine shortens a rendered line to the terminal width, preserving the
-// styling already applied to its prefix.
-func clampLine(line string, width int) string {
-	if width <= 0 || lipgloss.Width(line) <= width {
-		return line
-	}
-	// Truncating styled text by measuring visible width is fiddly; a plain
-	// truncation is acceptable here because the clipped region is the tail of
-	// a detail value, not the label the reader scans.
-	r := []rune(stripANSI(line))
-	if width >= 1 && len(r) > width {
-		return string(r[:width-1]) + "…"
-	}
-	return line
-}
-
-// transcriptLines renders every block into a flat list of terminal lines.
+// transcriptLines renders the whole session as terminal lines.
 //
-// Rendering to lines first, then clipping, is what makes scrolling and
-// resizing behave: the layout is computed for the real content, and the
-// viewport simply shows the tail of it.
+// The transcript is a flat list of lines rather than a set of widgets, which is
+// what lets the viewport scroll it and the composer stay put. A completed
+// command collapses to a compact summary; a running one shows its live state.
 func (m model) transcriptLines() []string {
 	var lines []string
-	for i, blk := range m.blocks {
+	for i, b := range m.blocks {
 		if i > 0 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, m.renderBlock(blk)...)
+		lines = append(lines, m.renderBlock(b)...)
 	}
 	if len(m.notices) > 0 {
 		lines = append(lines, "")
-		for _, n := range m.notices {
-			lines = append(lines, n)
-		}
+		lines = append(lines, m.notices...)
 	}
 	return lines
 }
 
-// renderBlock renders one execution as a coherent block.
+// renderBlock renders one command and its execution as a session entry.
 func (m model) renderBlock(b *block) []string {
-	marker := "▸"
-	heading := fmt.Sprintf("%s Execution", marker)
-	switch b.status {
-	case StatusDone:
-		heading = marker + " Execution"
-	case StatusFailed:
-		heading = marker + " Execution  " + m.theme.Failed.Render("✗")
-	case StatusCancelled:
-		heading = marker + " Execution  " + m.theme.Cancelled.Render("⊘")
-	}
+	lines := m.renderCommand(b)
+	return append(lines, m.renderBlockBody(b)...)
+}
 
-	title := m.theme.BlockTitle.Render(heading)
-	timing := m.theme.Dim.Render(duration(b.elapsed()))
-	gap := m.width - lipgloss.Width(title) - lipgloss.Width(timing) - 2
-	if gap < 1 {
-		lines := []string{title, m.theme.Dim.Render("  " + duration(b.elapsed()))}
-		lines = append(lines, m.renderBlockBody(b)...)
+// renderCommand echoes the command the way a terminal agent does: the user sees
+// what they ran, so the history reads as a transcript of their own session
+// rather than a log.
+func (m model) renderCommand(b *block) []string {
+	out := m.theme.Prompt.Render("> ") + m.renderCommandText(b.command, m.contentWidth())
+	return []string{out, "  "}
+}
+
+// renderCommandText highlights the command word and leaves the arguments
+// readable, so a glance identifies what was run.
+func (m model) renderCommandText(command string, width int) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(m.theme.Command.Render(fields[0]))
+	for _, f := range fields[1:] {
+		b.WriteString(" ")
+		b.WriteString(m.theme.Arg.Render(f))
+	}
+	return clampLine(b.String(), max(8, width))
+}
+
+// renderBlockBody renders the state of an execution beneath its command.
+func (m model) renderBlockBody(b *block) []string {
+	var lines []string
+
+	// A running command leads with what it is doing right now, which is the
+	// only thing that changes while it works.
+	if b.status == StatusRunning {
+		lines = append(lines, m.renderLive(b))
+		lines = append(lines, m.renderProgress(b)...)
 		return lines
 	}
 
-	lines := []string{title + strings.Repeat(" ", gap) + timing}
-	lines = append(lines, m.renderBlockBody(b)...)
+	lines = append(lines, m.renderSummary(b))
+	lines = append(lines, m.renderGroups(b)...)
+	lines = append(lines, m.renderEvents(b)...)
 	return lines
 }
 
-// renderBlockBody renders the fields of a block beneath its heading.
-func (m model) renderBlockBody(b *block) []string {
-	var lines []string
-	indent := "  "
-
-	add := func(label, value string) {
-		if value == "" {
-			return
+// renderLive is the one-line status of a running execution.
+func (m model) renderLive(b *block) string {
+	what := "running"
+	if b.progress.Message != "" {
+		what = b.progress.Message
+	} else if len(b.rows) > 0 {
+		// The most recent event is the best available description of what the
+		// tool is doing right now.
+		last := b.rows[len(b.rows)-1]
+		if last.Detail != "" {
+			what = last.Label
+		} else {
+			what = last.Label
 		}
-		lines = append(lines, indent+m.theme.Label.Render(pad(label, 11))+m.theme.Value.Render(value))
 	}
-
-	add("Command", m.theme.Command.Render("$ "+b.command))
-	add("Status", m.statusText(b))
-	if b.status == StatusRunning && b.progress.Message != "" {
-		add("Progress", m.renderProgress(b.progress))
-	} else if b.progress.HasBar {
-		add("Progress", m.renderProgress(b.progress))
-	}
-	if len(b.findings) > 0 {
-		add("Findings", plural(len(b.findings), "finding", "findings"))
-	}
-	if len(b.artifacts) > 0 {
-		add("Artifacts", plural(len(b.artifacts), "artifact", "artifacts"))
-	}
-	add("Events", plural(b.known, "event", "events"))
-	if b.err != "" {
-		lines = append(lines, indent+m.theme.Error.Render("Error     "+b.err))
-	}
-
-	lines = append(lines, m.renderBlockDetails(b)...)
-	return lines
+	return "  " + m.theme.Running.Render(spinnerFrames[m.spinner]) + " " +
+		m.theme.Value.Render(truncate(what, max(16, m.contentWidth()-8)))
 }
 
-func (m model) statusText(b *block) string {
-	switch b.status {
-	case StatusRunning:
-		return spinnerFrames[m.spinner] + " Running"
-	case StatusDone:
-		return m.theme.Success.Render("Done")
-	case StatusFailed:
-		if b.exitCode != 0 {
-			return m.theme.Failed.Render(fmt.Sprintf("Failed (exit %d)", b.exitCode))
-		}
-		return m.theme.Failed.Render("Failed")
-	case StatusCancelled:
-		return m.theme.Cancelled.Render(fmt.Sprintf("Cancelled (exit %d)", b.exitCode))
+// renderProgress draws a bar only when the tool reported a percentage. An
+// invented bar would be a guess about work the tool never reported.
+func (m model) renderProgress(b *block) []string {
+	if !b.progress.HasBar {
+		return nil
 	}
-	return ""
-}
-
-// renderProgress draws a progress bar when the tool reported a percentage.
-func (m model) renderProgress(p progressLine) string {
-	if !p.HasBar {
-		return p.Message
+	pct := clampPercent(b.progress.Percent)
+	width := 20
+	if avail := m.contentWidth() - 22; avail < width {
+		width = max(4, avail)
 	}
-	pct := clampPercent(p.Percent)
-	barWidth := 24
-	if m.width > 0 && m.width < 60 {
-		// A narrow terminal cannot afford a long bar; shrink it rather than
-		// letting the line wrap and break the block layout.
-		barWidth = max(6, m.width/3)
-	}
-	filled := int(pct / 100 * float64(barWidth))
+	filled := int(pct / 100 * float64(width))
 	bar := m.theme.BarFill.Render(strings.Repeat("█", filled)) +
-		m.theme.BarEmpty.Render(strings.Repeat("░", barWidth-filled))
-	out := fmt.Sprintf("%s %3.0f%%", bar, pct)
-	if p.Message != "" {
-		out += "  " + p.Message
-	}
-	return out
+		m.theme.BarEmpty.Render(strings.Repeat("░", max(0, width-filled)))
+	return []string{"  " + bar + " " + m.theme.Detail.Render(fmt.Sprintf("%3.0f%%", pct))}
 }
 
+// renderSummary is the compact one-line outcome of a finished execution.
+func (m model) renderSummary(b *block) string {
+	mark := m.theme.Success.Render("✓")
+	verb := "completed"
+	var style lipgloss.Style = m.theme.Success
+
+	switch b.status {
+	case StatusFailed:
+		mark = m.theme.Failed.Render("✗")
+		verb = "failed"
+		style = m.theme.Failed
+	case StatusCancelled:
+		mark = m.theme.Cancelled.Render("⊘")
+		verb = "cancelled"
+		style = m.theme.Cancelled
+	}
+
+	elapsed := duration(b.elapsed())
+	// A failed run should say why without the user having to expand it.
+	reason := ""
+	if b.err != "" {
+		reason = " · " + truncate(b.err, max(12, m.contentWidth()-34))
+	}
+	// Findings are the outcome a security tool exists to produce, so they are
+	// named on the summary line rather than only inside the expanded group.
+	note := ""
+	if n := len(b.findings); n > 0 {
+		note = fmt.Sprintf(" · %s", plural(n, "finding", "findings"))
+		if b.status == StatusFailed {
+			note = ""
+		}
+	}
+	return "  " + mark + " " + style.Render(verb+" in "+elapsed) + reason +
+		m.theme.Detail.Render(note)
+}
+
+// renderGroups renders the findings and artifacts of a finished execution as
+// compact trees, the way a terminal agent lists work it did.
+func (m model) renderGroups(b *block) []string {
+	var lines []string
+
+	if len(b.findings) > 0 {
+		fs := make([]Finding, len(b.findings))
+		copy(fs, b.findings)
+		sortFindings(fs)
+		lines = append(lines, "  "+m.theme.Group.Render("Findings"))
+		for i, f := range fs {
+			lines = append(lines, m.renderFinding(f, i == len(fs)-1))
+		}
+	}
+
+	if len(b.artifacts) > 0 {
+		lines = append(lines, "  "+m.theme.Group.Render("Artifacts"))
+		for i, a := range b.artifacts {
+			lines = append(lines, m.renderArtifact(a, i == len(b.artifacts)-1))
+		}
+	}
+	return lines
+}
+
+func (m model) renderFinding(f Finding, last bool) string {
+	branch := treeBranch
+	if last {
+		branch = treeLeaf
+	}
+	tag := m.theme.severityStyle(f.Severity).Render(m.theme.severityTag(f.Severity))
+
+	// The title is padded so every target starts in the same column. A ragged
+	// target position is what makes a list of findings hard to scan, and
+	// scanning them quickly is the whole point of showing them.
+	titleWidth := 34
+	if avail := m.contentWidth() - 14; avail < titleWidth {
+		titleWidth = max(8, avail)
+	}
+	line := "  " + m.theme.Detail.Render(branch) + " " + tag + "  " +
+		m.theme.Value.Render(pad(truncate(f.Title, titleWidth), titleWidth))
+	if f.Target != "" {
+		line += " " + m.theme.Detail.Render(truncate(f.Target, max(8, m.contentWidth()-titleWidth-12)))
+	}
+	return clampLine(line, m.contentWidth())
+}
+
+func (m model) renderArtifact(a Artifact, last bool) string {
+	branch := treeBranch
+	if last {
+		branch = treeLeaf
+	}
+	line := "  " + m.theme.Detail.Render(branch) + " " + m.theme.Value.Render(a.Name)
+	if a.Size != "" {
+		line += " " + m.theme.Detail.Render(a.Size)
+	}
+	return clampLine(line, m.contentWidth())
+}
+
+// renderEvents renders the optional raw event log.
+//
+// The event stream is kept in full and can be inspected, but it is hidden by
+// default: a wall of JSON is the thing an agent terminal exists to avoid, and
+// it is one keystroke away when it is actually wanted.
+func (m model) renderEvents(b *block) []string {
+	if !m.showEvents || len(b.rows) == 0 {
+		return nil
+	}
+	lines := []string{"  " + m.theme.Group.Render("Events")}
+	for i, row := range b.rows {
+		branch := treeBranch
+		if i == len(b.rows)-1 {
+			branch = treeLeaf
+		}
+		lines = append(lines, m.renderRow(row, branch))
+		for _, k := range sortedKeys(row.Data) {
+			lines = append(lines, "      "+m.theme.Detail.Render(pad(k, 18))+
+				m.theme.Detail.Render(truncate(dataString(row.Data, k), max(16, m.contentWidth()-30))))
+		}
+	}
+	return lines
+}
+
+func (m model) renderRow(row eventRow, branch string) string {
+	level := strings.ToUpper(row.Level)
+	style := m.theme.Detail
+	switch level {
+	case "ERROR", "FATAL":
+		style = m.theme.Failed
+	case "WARN", "WARNING":
+		style = m.theme.Medium
+	case "INFO":
+		style = m.theme.Info
+	}
+	out := "  " + m.theme.Detail.Render(branch) + " " + style.Render(pad(level, 5)) +
+		m.theme.Value.Render(pad(row.Label, 24))
+	if row.Detail != "" {
+		out += " " + m.theme.Detail.Render(truncate(row.Detail, max(16, m.contentWidth()-40)))
+	}
+	return clampLine(out, m.contentWidth())
+}
+
+// clampPercent keeps a reported percentage inside its natural bounds. A tool
+// reporting 140% should not draw a bar that overflows its track.
 func clampPercent(p float64) float64 {
 	if p < 0 {
 		return 0
@@ -292,97 +383,28 @@ func clampPercent(p float64) float64 {
 	return p
 }
 
-// renderBlockDetails renders the expanded sections of a block: the events, the
-// findings and the artifacts.
-//
-// Raw event payloads are preserved here rather than only being summarised, so
-// nothing the tool reported is lost to the display layer.
-func (m model) renderBlockDetails(b *block) []string {
-	var lines []string
-	indent := "  "
-
-	if len(b.findings) > 0 {
-		lines = append(lines, indent+m.theme.Dim.Render("Findings"))
-		fs := make([]Finding, len(b.findings))
-		copy(fs, b.findings)
-		sortFindings(fs)
-		for _, f := range fs {
-			lines = append(lines, m.renderFinding(f))
-		}
-	}
-
-	if len(b.artifacts) > 0 {
-		lines = append(lines, indent+m.theme.Dim.Render("Artifacts"))
-		for _, a := range b.artifacts {
-			line := a.Name
-			if a.Kind != "" {
-				line += m.theme.Dim.Render("  (" + a.Kind + ")")
-			}
-			if a.Size != "" {
-				line += m.theme.Dim.Render("  " + a.Size)
-			}
-			lines = append(lines, indent+"  "+line)
-		}
-	}
-
-	if m.expanded[b.id] {
-		lines = append(lines, indent+m.theme.Dim.Render("Events"))
-		for _, row := range b.rows {
-			lines = append(lines, indent+"  "+m.renderRow(row))
-			if row.Data != nil {
-				for _, k := range sortedKeys(row.Data) {
-					lines = append(lines, indent+"      "+
-						m.theme.Label.Render(pad(k, 16))+
-						m.theme.Dim.Render(truncate(dataString(row.Data, k), m.detailWidth())))
-				}
-			}
-		}
-	} else if b.known > 0 {
-		lines = append(lines, indent+m.theme.Dim.Render(
-			fmt.Sprintf("%s -- press Tab on the command line to inspect raw event data", b.summarise())))
-	}
-	return lines
+// contentWidth is the usable width of the transcript area, inside its indent.
+func (m model) contentWidth() int {
+	return max(24, m.width-2)
 }
 
-func (m model) renderFinding(f Finding) string {
-	line := "  "
-	if f.Severity != "" {
-		line += m.theme.severityStyle(f.Severity).Render(pad(f.Severity, 9))
-	} else {
-		line += strings.Repeat(" ", 9)
+// clampLine shortens a rendered line to fit the terminal.
+//
+// Left as a visible truncation rather than a wrap: a wrapped tree line breaks
+// the alignment that makes the shape readable, and the information is still
+// available in the expanded event view.
+func clampLine(line string, width int) string {
+	if width <= 0 || lipgloss.Width(line) <= width {
+		return line
 	}
-	line += f.Title
-	if f.Target != "" {
-		line += m.theme.Dim.Render("  " + f.Target)
-	}
-	if f.Detail != "" {
-		line += m.theme.Dim.Render("  " + truncate(f.Detail, max(20, m.detailWidth())))
+	r := []rune(stripANSI(line))
+	if len(r) > width {
+		if width == 1 {
+			return string(r[:1])
+		}
+		return string(r[:width-1]) + "…"
 	}
 	return line
-}
-
-func (m model) renderRow(row eventRow) string {
-	level := strings.ToUpper(row.Level)
-	style := m.theme.Dim
-	switch level {
-	case "ERROR", "FATAL":
-		style = m.theme.Error
-	case "WARN", "WARNING":
-		style = m.theme.Medium
-	case "INFO":
-		style = m.theme.Info
-	}
-	out := style.Render(pad(level, 7)) + m.theme.BlockTitle.Render(pad(row.Label, 26))
-	if row.Detail != "" {
-		out += m.theme.Dim.Render(truncate(row.Detail, max(20, m.detailWidth())))
-	}
-	return out
-}
-
-// detailWidth is how much room a detail value gets, derived from the terminal
-// so long values wrap instead of overflowing.
-func (m model) detailWidth() int {
-	return max(24, m.width-34)
 }
 
 // truncate shortens a value for single-line display. Multi-line values are

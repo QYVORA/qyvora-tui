@@ -258,7 +258,7 @@ func TestThemeRendersWithoutColor(t *testing.T) {
 	if !strings.Contains(out, "QYVORA / TEST") {
 		t.Errorf("header missing from view:\n%s", out)
 	}
-	if !strings.Contains(out, "READY") {
+	if !strings.Contains(out, "ready") {
 		t.Errorf("status missing from view:\n%s", out)
 	}
 }
@@ -289,15 +289,16 @@ func TestViewRendersAnExecutionBlock(t *testing.T) {
 	m := newModel(Config{Title: "QYVORA / TEST", Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
 	m = resize(m, 100, 40)
 
-	m.blocks = append(m.blocks, newBlock(1, []string{"scan", "example.com"}))
+	m = addBlock(m, newBlock(1, []string{"scan", "example.com"}))
 	b := m.blocks[0]
 	b.addEvent(Event{Event: EventFindingDiscovered, Level: "warn", Data: map[string]any{"title": "open redirect", "severity": "high", "target": "example.com"}})
 	b.addEvent(Event{Event: EventArtifactCreated, Level: "info", Data: map[string]any{"path": "report.json"}})
 	b.finished = time.Now()
 	b.status = StatusDone
+	m = refresh(m)
 
 	out := m.View()
-	for _, want := range []string{"Execution", "scan example.com", "Findings", "open redirect", "Artifacts", "report.json"} {
+	for _, want := range []string{"scan", "example.com", "Findings", "open redirect", "Artifacts", "report.json", "completed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q:\n%s", want, out)
 		}
@@ -310,14 +311,17 @@ func TestCancelledBlockReportsItself(t *testing.T) {
 	m.width, m.height = 100, 30
 	m.Update(windowSizeMsg(100, 30))
 
-	m.blocks = append(m.blocks, newBlock(1, []string{"scan", "x"}))
+	m = addBlock(m, newBlock(1, []string{"scan", "x"}))
 	m.activeID = 1
 	m.running = true
 
 	upd, _ := m.Update(runDoneMsg{exitCode: ExitCancelled, cancel: true})
 	m2 := upd.(model)
-	if got := m2.statusText(m2.blocks[0]); !strings.Contains(got, "Cancelled") {
-		t.Errorf("status = %q, want Cancelled", got)
+	if got := m2.renderSummary(m2.blocks[0]); !strings.Contains(got, "cancelled") {
+		t.Errorf("summary = %q, want it to report the cancellation", got)
+	}
+	if m2.blocks[0].status != StatusCancelled {
+		t.Errorf("block status = %v, want Cancelled", m2.blocks[0].status)
 	}
 	if !strings.Contains(m2.View(), "partial results were kept") {
 		t.Errorf("cancellation notice missing:\n%s", m2.View())
@@ -329,7 +333,7 @@ func TestFailedExecutionRecordsTheExitStatus(t *testing.T) {
 	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 2 }, ToolName: "test"}}, th)
 	m.width, m.height = 100, 30
 	m.Update(windowSizeMsg(100, 30))
-	m.blocks = append(m.blocks, newBlock(1, []string{"analyze", "x"}))
+	m = addBlock(m, newBlock(1, []string{"analyze", "x"}))
 	m.activeID = 1
 	m.running = true
 
@@ -338,8 +342,12 @@ func TestFailedExecutionRecordsTheExitStatus(t *testing.T) {
 	if m2.blocks[0].status != StatusFailed {
 		t.Errorf("status = %v, want Failed", m2.blocks[0].status)
 	}
-	if !strings.Contains(m2.View(), "exit 2") {
-		t.Errorf("exit status not surfaced:\n%s", m2.View())
+	view := m2.View()
+	if !strings.Contains(view, "exit status 2") {
+		t.Errorf("exit status not surfaced:\n%s", view)
+	}
+	if !strings.Contains(view, "failed") {
+		t.Errorf("failure not surfaced:\n%s", view)
 	}
 }
 

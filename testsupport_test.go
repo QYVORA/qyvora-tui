@@ -48,3 +48,18 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// addBlock appends a block and pushes it into the viewport, mirroring what the
+// model does when a command starts.
+func addBlock(m model, b *block) model {
+	m.blocks = append(m.blocks, b)
+	m.activeID = b.id
+	m.refreshViewport()
+	return m
+}
+
+// refresh re-renders the transcript into the viewport.
+func refresh(m model) model {
+	m.refreshViewport()
+	return m
+}

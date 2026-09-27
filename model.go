@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -98,6 +99,15 @@ type model struct {
 
 	input   textinput.Model
 	history *History
+	// viewport is the scrolling session area. It scrolls independently of the
+	// composer, so history stays reachable while a command runs.
+	viewport viewport.Model
+	// following is true when the viewport is pinned to the newest output. It is
+	// released when the user scrolls back, so arriving events do not yank the
+	// view away from what they were reading.
+	following bool
+	// showEvents reveals the raw event log beneath each execution.
+	showEvents bool
 
 	width  int
 	height int
@@ -105,7 +115,6 @@ type model struct {
 	blocks   []*block
 	nextID   int
 	activeID int
-	expanded map[int]bool
 	notices  []string
 
 	state    runState
@@ -163,23 +172,28 @@ func newModel(cfg Config, theme Theme) model {
 	ti.Placeholder = "command"
 	ti.Focus()
 
+	vp := viewport.New(80, 20)
+
 	m := model{
 		cfg:      cfg,
 		runner:   cfg.Runner,
 		theme:    theme,
 		input:    ti,
 		history:  NewHistory(),
-		width:    80,
-		height:   24,
-		expanded: map[int]bool{},
-		state:    stateReady,
+		viewport: vp,
+		// The session starts pinned to the newest output, so the first command
+		// is visible without the user having to scroll.
+		following: true,
+		width:     80,
+		height:    24,
+		state:     stateReady,
 	}
 	m.input.Width = 60
-	m.input.PlaceholderStyle = m.theme.Dim
+	m.input.PlaceholderStyle = m.theme.Detail
 	m.input.PromptStyle = m.theme.Prompt
 	m.input.TextStyle = m.theme.Value
 	if theme.Color {
-		m.input.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("212"))
+		m.input.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
 	} else {
 		m.input.Cursor.Style = lipgloss.NewStyle()
 	}
@@ -201,6 +215,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.input.Width = max(8, msg.Width-lipgloss.Width(m.input.Prompt)-2)
+		// The viewport owns everything between the header rule and the
+		// composer: header, rule, viewport, composer.
+		vpHeight := msg.Height - 4
+		if vpHeight < 1 {
+			vpHeight = 1
+		}
+		m.viewport = viewport.New(max(1, msg.Width), vpHeight)
+		m.refreshViewport()
 		return m, nil
 
 	case tickMsg:
@@ -210,7 +232,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// redraws four times a second is needlessly noisy.
 		if m.running {
 			m.spinner = (m.spinner + 1) % len(spinnerFrames)
-			cmds = append(cmds, m.input.Cursor.BlinkCmd())
+			// The spinner and elapsed clock live in the transcript, so the
+			// running line has to be re-rendered for the animation to show.
+			m.refreshViewport()
 		}
 		return m, tea.Batch(cmds...)
 
@@ -226,6 +250,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.notices = append(m.notices, nt.text)
 			}
 		}
+		// Re-render after the batch, not per event: a scan emits events far
+		// faster than a person reads, and a redraw per line makes the
+		// interface the bottleneck.
+		m.refreshViewport()
 		return m, nil
 
 	case runDoneMsg:
@@ -270,6 +298,7 @@ func (m *model) finish(msg runDoneMsg) {
 			m.state = stateReady
 		}
 	}
+	m.refreshViewport()
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -277,9 +306,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyCtrlC:
 		// The documented behaviour: Ctrl+C stops the work in flight and keeps
-		// the session, rather than tearing the interface down. Tearing down
-		// on the first press would discard the very partial results
-		// cancellation preserves.
+		// the session, rather than tearing the interface down. Tearing down on
+		// the first press would discard the very partial results cancellation
+		// preserves.
 		switch {
 		case m.running:
 			m.cancelExecution()
@@ -296,6 +325,50 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
+
+	case tea.KeyCtrlO:
+		// Reveal the raw event log. The structured stream is always retained;
+		// this only decides whether it is on screen.
+		m.showEvents = !m.showEvents
+		m.refreshViewport()
+		return m, nil
+
+	case tea.KeyCtrlEnd, tea.KeyF15:
+		// Return to the newest output, the way a chat log's "jump to latest"
+		// does.
+		m.following = true
+		m.gotoBottom()
+		return m, nil
+
+	case tea.KeyPgUp:
+		m.scrollUp(m.viewport.Height / 2)
+		return m, nil
+
+	case tea.KeyPgDown:
+		m.scrollDown(m.viewport.Height / 2)
+		return m, nil
+
+	case tea.KeyHome:
+		if m.input.Value() == "" {
+			m.following = false
+			m.viewport.GotoTop()
+			return m, nil
+		}
+
+	case tea.KeyEnd:
+		if m.input.Value() == "" {
+			m.following = true
+			m.gotoBottom()
+			return m, nil
+		}
+
+	case tea.KeyShiftUp:
+		m.scrollUp(1)
+		return m, nil
+
+	case tea.KeyShiftDown:
+		m.scrollDown(1)
+		return m, nil
 
 	case tea.KeyUp:
 		if v, ok := m.history.Prev(m.input.Value()); ok {
@@ -323,6 +396,50 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// scrollUp moves the session viewport back, releasing follow mode so arriving
+// output does not immediately pull the view forward again.
+func (m *model) scrollUp(n int) {
+	if m.viewport.YOffset <= 0 {
+		return
+	}
+	m.viewport.LineUp(n)
+	m.syncFollow()
+}
+
+// scrollDown moves the session viewport forward, re-pinning to the newest
+// output once it reaches the end.
+func (m *model) scrollDown(n int) {
+	m.viewport.LineDown(n)
+	m.syncFollow()
+}
+
+func (m *model) syncFollow() {
+	atBottom := m.viewport.AtBottom()
+	m.following = atBottom
+	if atBottom {
+		m.gotoBottom()
+	}
+}
+
+func (m *model) gotoBottom() {
+	m.viewport.GotoBottom()
+	m.following = true
+}
+
+// refreshViewport re-renders the transcript into the viewport.
+//
+// It is called after any change to the session, so the scroll position and
+// content never drift apart.
+func (m *model) refreshViewport() {
+	content := strings.Join(m.transcriptLines(), "\n")
+	m.viewport.SetContent(content)
+	// While the user is following the newest output, keep them there as it
+	// grows. While they are reading history, leave them where they are.
+	if m.following {
+		m.viewport.GotoBottom()
+	}
+}
+
 // submit runs the entered command line.
 func (m *model) submit() tea.Cmd {
 	line := strings.TrimSpace(m.input.Value())
@@ -335,10 +452,12 @@ func (m *model) submit() tea.Cmd {
 	switch strings.ToLower(line) {
 	case "help", "?":
 		m.notices = append(m.notices, m.helpLines()...)
+		m.refreshViewport()
 		return nil
 	case "clear", "cls":
 		m.blocks = nil
 		m.notices = nil
+		m.refreshViewport()
 		return nil
 	case "quit", "exit", ":q":
 		m.quitting = true
@@ -348,6 +467,7 @@ func (m *model) submit() tea.Cmd {
 	args, err := tokenize(line)
 	if err != nil {
 		m.notices = append(m.notices, "Error: "+err.Error())
+		m.refreshViewport()
 		return nil
 	}
 	if len(args) == 0 {
@@ -367,10 +487,14 @@ func (m *model) start(args []string) tea.Cmd {
 	// do it safely at all, since both would write to the captured stdout.
 	if m.running {
 		m.notices = append(m.notices, "An execution is already running; Ctrl+C stops it")
+		m.refreshViewport()
 		return nil
 	}
 
 	m.nextID++
+	// Notices belong to the command that raised them; carrying them into the
+	// next command would make a resolved error look permanent.
+	m.notices = nil
 	b := newBlock(m.nextID, args)
 	m.blocks = append(m.blocks, b)
 	m.activeID = b.id
@@ -383,6 +507,10 @@ func (m *model) start(args []string) tea.Cmd {
 	// from a clean context rather than inheriting a previous cancellation.
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
+
+	// The new command is on screen before it starts, so the session reads in
+	// the order it happened.
+	m.refreshViewport()
 
 	reader, writer := io.Pipe()
 	runner := m.runner
@@ -429,6 +557,7 @@ func (m *model) cancelExecution() {
 	}
 	m.state = stateCancelled
 	m.notices = append(m.notices, "Cancelling...")
+	m.refreshViewport()
 	// The context is cancelled, not the interface. The runner shuts the work
 	// down, the tool persists what it already produced, and the transcript
 	// records the outcome.
@@ -455,6 +584,7 @@ func (m *model) complete() tea.Cmd {
 			return nil
 		default:
 			m.notices = append(m.notices, strings.Join(subs, "   "))
+			m.refreshViewport()
 			return nil
 		}
 	}
@@ -477,6 +607,7 @@ func (m *model) complete() tea.Cmd {
 	// Ambiguous: list the options. Silently taking the first would run a
 	// command the user did not mean to type.
 	m.notices = append(m.notices, strings.Join(cands, "   "))
+	m.refreshViewport()
 	return nil
 }
 
@@ -559,8 +690,14 @@ func (m *model) candidates(word string) []string {
 
 func (m *model) helpLines() []string {
 	return []string{
-		m.theme.Dim.Render("Built-ins:") + " help, clear, quit  (Ctrl+D quits, Ctrl+C stops a run)",
-		m.theme.Dim.Render("Commands: ") + strings.Join(commandNames(m.runner.Commands()), ", "),
+		m.theme.Group.Render("Keys"),
+		"  " + m.theme.Detail.Render("ctrl+c") + "   stop the running command · " + m.theme.Detail.Render("ctrl+d") + "   leave",
+		"  " + m.theme.Detail.Render("ctrl+o") + "   show or hide the raw event log",
+		"  " + m.theme.Detail.Render("pgup/pgdn") + "   scroll the session · " + m.theme.Detail.Render("ctrl+end") + "   jump to newest",
+		"  " + m.theme.Detail.Render("tab") + "         complete · " + m.theme.Detail.Render("↑/↓") + "         history",
+		"",
+		m.theme.Group.Render("Built-ins") + "  " + m.theme.Detail.Render("help · clear · quit"),
+		m.theme.Group.Render("Commands ") + strings.Join(commandNames(m.runner.Commands()), " · "),
 	}
 }
 
