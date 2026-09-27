@@ -145,3 +145,59 @@ func TestLongToolOutputIsWrappedNotTruncated(t *testing.T) {
 		t.Errorf("output was cut off instead of wrapped; transcript was:\n%s", body)
 	}
 }
+
+// A character device is not a terminal.
+//
+// This is a regression test for a wrong answer that mattered. The check used
+// to ask whether the stream was a character device, which /dev/null, /dev/zero
+// and every similar device satisfy. A session was therefore launched into
+// streams with nobody watching, drew nothing, consumed the operator's
+// keystrokes, and reported a failure for a command that had run correctly --
+// and `tool tui >/dev/null 2>/dev/null` behaved differently from the same
+// command with its output sent to a file.
+func TestIsTerminalRejectsNonTerminalCharacterDevices(t *testing.T) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Skipf("cannot open %s: %v", os.DevNull, err)
+	}
+	defer devNull.Close()
+
+	// Confirm the premise: this really is a character device, so the old check
+	// really would have accepted it.
+	info, err := devNull.Stat()
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		t.Skipf("%s is not a character device on this platform", os.DevNull)
+	}
+
+	if isTerminal(devNull) {
+		t.Errorf("isTerminal(%s) = true; a character device is not a terminal", os.DevNull)
+	}
+	if IsInteractive(devNull) {
+		t.Errorf("IsInteractive(%s) = true; nothing is watching that stream", os.DevNull)
+	}
+}
+
+// Run must refuse a non-terminal even when the caller did not pre-check, and it
+// must say so in the way tools are expected to recognise.
+func TestRunRefusesWhenOutputIsNotATerminal(t *testing.T) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Skipf("cannot open %s: %v", os.DevNull, err)
+	}
+	defer devNull.Close()
+
+	code, err := Run(Config{
+		Title:  "QYVORA / PROBE",
+		Runner: &InProcessRunner{ToolName: "probe", Execute: func(context.Context, []string) int { return 0 }},
+		Out:    devNull,
+	})
+	if !IsNotInteractive(err) {
+		t.Errorf("Run into %s: err = %v, want a not-interactive error", os.DevNull, err)
+	}
+	if code != 1 {
+		t.Errorf("Run into %s: code = %d, want 1", os.DevNull, code)
+	}
+}
