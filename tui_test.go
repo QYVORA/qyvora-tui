@@ -105,12 +105,13 @@ func TestReadEventsCollapsesInPlaceRedrawsToTheLastState(t *testing.T) {
 	var buf bytes.Buffer
 	buf.WriteString("\rProbing [===] 10% (5/50)\rProbing [=====] 40% (20/50)\rProbing [========] 100% (50/50)\n")
 	buf.WriteString("plain line\n")
+	buf.WriteString("\x1b[38;2;255;0;0mColoured banner\x1b[0m trailing\n")
 
 	var text []string
 	readEvents(&buf, func(Event) {}, func(line string) { text = append(text, line) })
 
-	if len(text) != 2 {
-		t.Fatalf("text lines = %d, want 2", len(text))
+	if len(text) != 3 {
+		t.Fatalf("text lines = %d, want 3", len(text))
 	}
 	want := "Probing [========] 100% (50/50)"
 	if text[0] != want {
@@ -118,6 +119,9 @@ func TestReadEventsCollapsesInPlaceRedrawsToTheLastState(t *testing.T) {
 	}
 	if text[1] != "plain line" {
 		t.Errorf("plain line changed: %q", text[1])
+	}
+	if text[2] != "Coloured banner trailing" {
+		t.Errorf("colour codes were not stripped: %q", text[2])
 	}
 }
 

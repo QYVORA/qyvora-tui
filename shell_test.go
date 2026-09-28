@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -379,3 +380,49 @@ func TestShellWritesNoLineWiderThanTheTerminal(t *testing.T) {
 // adds. Comparing len() would report a styled line as far wider than the
 // terminal and make every assertion here useless.
 func visibleWidth(s string) int { return lipgloss.Width(s) }
+
+// The live views come from a stream that arrives in chunks while the command
+// is still running. Each chunk must land immediately (not be held until the
+// run ends), and the carried continuation is what keeps the reader fed.
+func TestStreamDeliversChunksLiveWhileTheCommandRuns(t *testing.T) {
+	th := newTheme(false, nil)
+	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
+	m = resize(m, 200, 40)
+	// start sets everything a live run needs: the fresh activity view, the
+	// block, the running flag and the layout.
+	m.start([]string{"scan", "example.com"})
+
+	// First chunk arrives while the command is still in flight.
+	upd, cmd := m.Update(streamMsg{items: []tea.Msg{
+		evMsg(ev("scan.started", "info", nil)),
+		outputMsg{line: "Querying crt.sh ..."},
+	}, next: func() tea.Msg { return streamMsg{} }})
+	m = upd.(model)
+	if cmd == nil {
+		t.Fatal("a live stream did not re-arm the reader")
+	}
+	if m.activity.Total != 1 {
+		t.Errorf("activity total = %d, want 1 after the first chunk", m.activity.Total)
+	}
+	if n := len(m.blocks[0].output); n != 1 || m.blocks[0].output[0] != "Querying crt.sh ..." {
+		t.Errorf("running block output = %v, want the streamed line", m.blocks[0].output)
+	}
+	if len(m.blocks[0].rows) != 1 {
+		t.Errorf("running block rows = %d, want 1", len(m.blocks[0].rows))
+	}
+	if !strings.Contains(m.View(), "Querying crt.sh") {
+		t.Error("the streamed line is not on screen while running")
+	}
+
+	// A nil continuation ends the chain, the way EOF does.
+	upd, cmd = m.Update(streamMsg{items: []tea.Msg{
+		evMsg(ev("scan.completed", "info", nil)),
+	}})
+	m = upd.(model)
+	if cmd != nil {
+		t.Error("the final chunk re-armed the reader")
+	}
+	if m.activity.Total != 2 {
+		t.Errorf("activity total = %d, want 2 after both chunks", m.activity.Total)
+	}
+}

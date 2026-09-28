@@ -99,9 +99,19 @@ func (s runState) String() string {
 // Messages delivered into the model.
 type (
 	// batchMsg applies several messages in order. Events arrive faster than a
-	// human reads them, so the consumer batches rather than queuing a
-	// redraw per line.
+	// human reads them, so the consumer batches rather than queuing a redraw
+	// per line.
 	batchMsg []tea.Msg
+	// streamMsg delivers one chunk of a run's decoded stream, and the command
+	// that continues reading the rest of it. Delivering in chunks while the
+	// run is still going is what the live views need: the activity region and
+	// a running block's output come from the stream as it happens, not in one
+	// lump when the run ends. The last chunk carries a nil next, which ends
+	// the chain.
+	streamMsg struct {
+		items []tea.Msg
+		next  tea.Cmd
+	}
 	// evMsg carries one decoded event envelope.
 	evMsg Event
 	// runDoneMsg reports an execution's outcome.
@@ -315,29 +325,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
-	case batchMsg:
-		for _, inner := range msg {
-			if ev, ok := inner.(evMsg); ok {
-				if b := m.blockByID(m.activeID); b != nil {
-					b.addEvent(Event(ev))
-				}
-				// The activity view counts every event, whatever its topic.
-				// An event type the TUI has never seen is recorded like any
-				// other: discarding it would throw away exactly the
-				// information the tool took the trouble to emit.
-				m.activity.record(Event(ev))
-				continue
-			}
-			if out, ok := inner.(outputMsg); ok {
-				if b := m.blockByID(m.activeID); b != nil {
-					b.addOutput(out.line)
-				}
-				continue
-			}
-			if nt, ok := inner.(noticeMsg); ok {
-				m.notices = append(m.notices, nt.text)
-			}
+	case streamMsg:
+		// A chunk of a live stream. The activity region and the running
+		// block's output rows are fed from here, so a long scan reads as
+		// activity rather than as a frozen screen that fills in at the end.
+		// The chunk carries the command to read on (or nil, at the end of
+		// the stream), which turns version of the old blocking reader into
+		// a chain that stays one chunk ahead of a running tool.
+		m.applyStream(msg.items)
+		if len(msg.items) > 0 {
+			m.refreshViewport()
 		}
+		return m, msg.next
+
+	case batchMsg:
+		m.applyStream(msg)
 		// Re-render after the batch, not per event: a scan emits events far
 		// faster than a person reads, and a redraw per line makes the
 		// interface the bottleneck.
@@ -668,23 +670,96 @@ func (m *model) start(args []string) tea.Cmd {
 // writer blocked on a full pipe would never return and the execution would
 // appear to hang.
 func (m model) consume(r io.Reader) tea.Cmd {
-	return func() tea.Msg {
-		var msgs []tea.Msg
+	ch := make(chan tea.Msg, streamBuffer)
+	go func() {
 		stats := readEvents(r, func(ev Event) {
-			msgs = append(msgs, evMsg(ev))
+			ch <- evMsg(ev)
 		}, func(line string) {
-			msgs = append(msgs, outputMsg{line})
+			ch <- outputMsg{line: line}
 		})
-		if len(msgs) == 0 {
-			if stats.Malformed > 0 {
-				return noticeMsg{text: fmt.Sprintf("%d event line(s) could not be parsed and were skipped", stats.Malformed)}
-			}
-			return nil
-		}
 		if stats.Malformed > 0 {
-			msgs = append(msgs, noticeMsg{text: fmt.Sprintf("%d event line(s) could not be parsed and were skipped", stats.Malformed)})
+			ch <- noticeMsg{text: fmt.Sprintf("%d event line(s) could not be parsed and were skipped", stats.Malformed)}
 		}
-		return batchMsg(msgs)
+		close(ch)
+	}()
+	return m.drain(ch)
+}
+
+// streamBuffer is how many decoded messages the reader goroutine can hand
+// over while the interface is busy rendering, before it has to wait.
+const streamBuffer = 1024
+
+// streamChunk is how many messages one delivery carries at most, and streamWait
+// how long a quiet stream is left alone before the reader re-checks. Together
+// they bound redraws: the elapsed clock and spinner already repaint while a
+// command runs, so a busy stream is delivered often enough to feel live and a
+// silent one never spins the interface flat.
+const (
+	streamChunk = 256
+	streamWait  = 90 * time.Millisecond
+)
+
+// drain delivers a run's decoded stream in chunks.
+//
+// The returned command takes whatever has arrived since the last delivery --
+// up to a chunk cap, or after a short quiet wait -- and hands it over as one
+// message, re-arming itself when the stream is still open. The re-arm is what
+// makes the transcript and activity region live: without it the reader would
+// block until EOF and a long scan would paint exactly nothing until it had
+// finished.
+func (m model) drain(ch chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		open := true
+		var items []tea.Msg
+		timer := time.NewTimer(streamWait)
+		defer timer.Stop()
+	drain:
+		for {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					open = false
+					break drain
+				}
+				items = append(items, msg)
+				if len(items) >= streamChunk {
+					break drain
+				}
+			case <-timer.C:
+				break drain
+			}
+		}
+		var next tea.Cmd
+		if open {
+			next = m.drain(ch)
+		}
+		return streamMsg{items: items, next: next}
+	}
+}
+
+// applyStream folds delivered stream messages into the running execution.
+func (m *model) applyStream(items []tea.Msg) {
+	for _, inner := range items {
+		if ev, ok := inner.(evMsg); ok {
+			if b := m.blockByID(m.activeID); b != nil {
+				b.addEvent(Event(ev))
+			}
+			// The activity view counts every event, whatever its topic.
+			// An event type the TUI has never seen is recorded like any
+			// other: discarding it would throw away exactly the
+			// information the tool took the trouble to emit.
+			m.activity.record(Event(ev))
+			continue
+		}
+		if out, ok := inner.(outputMsg); ok {
+			if b := m.blockByID(m.activeID); b != nil {
+				b.addOutput(out.line)
+			}
+			continue
+		}
+		if nt, ok := inner.(noticeMsg); ok {
+			m.notices = append(m.notices, nt.text)
+		}
 	}
 }
 

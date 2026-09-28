@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -113,18 +114,29 @@ type eventStats struct {
 // on newlines those rewrites are one line full of carriage returns. Collapsing
 // to the last segment is exactly what the terminal showed, so the transcript
 // reads like the run it recorded instead of a dump of control characters.
+//
+// The tool's own colour codes are stripped for the same reason. The
+// interface's wrapper breaks a line at rune count, and slicing through the
+// middle of an escape sequence destroys the rest of the line, so a coloured
+// banner arrives as a smear rather than as the thing that was printed. The
+// transcript has its own styling; the tool's raw codes have nothing to add.
 func visibleLine(s string) string {
-	if !strings.ContainsRune(s, '\r') {
-		return s
-	}
-	last := ""
-	for _, part := range strings.Split(s, "\r") {
-		if part != "" {
-			last = part
+	if strings.ContainsRune(s, '\r') {
+		last := ""
+		for _, part := range strings.Split(s, "\r") {
+			if part != "" {
+				last = part
+			}
 		}
+		s = last
 	}
-	return strings.TrimRight(last, " \t")
+	return ansiCode.ReplaceAllString(s, "")
 }
+
+// ansiCode is one terminal escape sequence: CSI (SGR, cursor and others),
+// OSC title/hyperlink, and the charset selectors that colour wrappers emit
+// around their payloads.
+var ansiCode = regexp.MustCompile(`\x1b\[[0-9;:?]*[ -/]*[@-~]|\x1b\][^\x1b\x07]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]`)
 
 // sortedKeys gives deterministic iteration over an event's data map, which
 // JSON does not guarantee. Without this the detail panel reshuffles its rows
