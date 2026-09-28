@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -44,11 +45,204 @@ func (m model) View() string {
 
 	// The viewport takes everything between the header rule and the composer.
 	// It scrolls independently, so history stays reachable while a command runs.
-	b.WriteString(m.viewport.View())
+	//
+	// Regions are drawn only when the layout granted them width *and* there is
+	// something to put in them. A region with no content is not rendered at
+	// all: an empty column beside a working session is worse than the session
+	// being wider.
+	// The layout is resolved here, from the current state, rather than read
+	// from whatever the last resize decided. State can change between a resize
+	// and a render -- a run starting, the operator pressing F1 -- and resolving
+	// here is what keeps the region widths and the drawn regions from
+	// disagreeing.
+	//
+	// This is the pure half of applyLayout. It deliberately does not touch the
+	// viewport, because View is a value method and rebuilding the viewport would
+	// discard the scroll position the operator set.
+	m.layout = m.resolveLayout(m.width)
+	left := m.capabilitiesRegion(m.layout.Navigation)
+	right := m.activityRegion(m.layout.Activity)
+
+	// The widths come from the layout, and the regions are rendered at exactly
+	// the widths it granted them, so the columns tile the terminal.
+	// A boxed region is two columns wider than the layout granted it: the rule
+	// and the space beside it. The separator between columns is the composer's,
+	// so it is not counted here. Both numbers are the ones layout.go charged the
+	// transcript for, which is what keeps the two from disagreeing.
+	//
+	// A width is taken from the rendered text rather than from the region
+	// pointer, because a region can exist and still draw nothing: too short to
+	// render, or empty. Charging the transcript for a panel that is not on screen
+	// is how the columns end up over-running the terminal.
+	leftBox, rightBox := boxedRegion(left, m.theme, -1), boxedRegion(right, m.theme, 1)
+	navW, actW := 0, 0
+	if leftBox != "" {
+		navW = m.layout.Navigation + regionChrome
+	}
+	if rightBox != "" {
+		actW = m.layout.Activity + regionChrome
+	}
+	switch {
+	case navW > 0 && actW > 0:
+		b.WriteString(composeRegions(m.viewport.View(), m.layout.Transcript,
+			leftBox, navW, rightBox, actW, m.width))
+	case navW > 0:
+		b.WriteString(composeRegions(m.viewport.View(), m.layout.Transcript,
+			leftBox, navW, "", 0, m.width))
+	case actW > 0:
+		b.WriteString(composeRegions(m.viewport.View(), m.layout.Transcript,
+			"", 0, rightBox, actW, m.width))
+	default:
+		b.WriteString(m.viewport.View())
+	}
 	b.WriteString("\n")
 
+	if m.form != nil {
+		// The form replaces the composer while it is open. Two input lines at
+		// once would leave the operator unsure which one their keystrokes are
+		// going to.
+		b.WriteString(m.renderForm())
+		return b.String()
+	}
 	b.WriteString(m.renderComposer())
 	return b.String()
+}
+
+// renderForm draws the open form's fields.
+//
+// Only the field being edited carries a cursor. Every field shows its value
+// plainly, so a form is readable at a glance and does not need to be in edit
+// mode to be reviewed.
+func (m model) renderForm() string {
+	f := m.form
+	if f == nil {
+		return m.renderComposer()
+	}
+	var b strings.Builder
+	b.WriteString(m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))))
+	b.WriteString("\n")
+	title := m.theme.Title.Render("FILL IN  " + f.Capability.Name)
+	b.WriteString(clampLine(title, m.width))
+	b.WriteString("\n")
+
+	for i, fl := range f.fields {
+		marker := "  "
+		style := m.theme.Value
+		if i == f.focus {
+			marker = "> "
+			style = m.theme.Command
+		}
+		label := fl.param.Name
+		if fl.param.Required {
+			label += "*"
+		}
+		// The label is padded so the values line up, but the value is what
+		// matters, so a long label is truncated rather than the value.
+		value := fl.value
+		if value == "" && fl.param.Default == "" {
+			value = m.theme.Detail.Render("(unset)")
+		}
+		row := marker + m.theme.Label.Render(pad(truncate(label, 18), 19)) + style.Render(value)
+		if fl.cursor > 0 && i == f.focus {
+			row += "▏"
+		}
+		b.WriteString(clampLine(row, m.width))
+		b.WriteString("\n")
+	}
+
+	if f.Err() != "" {
+		b.WriteString(clampLine(m.theme.Failed.Render("  "+f.Err()), m.width))
+		b.WriteString("\n")
+	}
+	// The keys are drawn with the shared key hint, so the form's footer and the
+	// rest of the interface describe keys the same way.
+	hint := "  " + keyHint(m.theme, "enter", "run", m.width-2) +
+		"  " + keyHint(m.theme, "tab", "next field", m.width-2) +
+		"  " + keyHint(m.theme, "esc", "cancel", m.width-2)
+	b.WriteString(clampLine(hint, m.width))
+	return b.String()
+}
+
+// composeRegions places side regions beside the transcript at a given width.
+//
+// The column widths are given rather than measured from the rendered text. A
+// viewport's lines are exactly as wide as the viewport, so measuring the middle
+// column yields the full terminal width and then clamps it, which truncates
+// every transcript line with an ellipsis in the space the region has already
+// vacated. Measuring the regions is equally wrong: a row shorter than its
+// column would silently narrow it.
+//
+// The three widths plus their separators must tile the terminal exactly. If they
+// cannot, the transcript loses the difference, because it is the one column that
+// reflows rather than the one that wraps mid-word.
+func composeRegions(mid string, midWidth int, left string, leftWidth int, right string, rightWidth int, width int) string {
+	leftLines := regionLines(left)
+	rightLines := regionLines(right)
+	midLines := strings.Split(mid, "\n")
+
+	// The separator is a column of its own, charged only for a side that has
+	// content.
+	gap := 0
+	if leftWidth > 0 {
+		gap++
+	}
+	if rightWidth > 0 {
+		gap++
+	}
+	midWidth = max(1, min(midWidth, width-leftWidth-rightWidth-gap))
+
+	n := max(len(midLines), len(leftLines), len(rightLines))
+	lines := make([]string, n)
+	for i := range lines {
+		var b strings.Builder
+		if leftWidth > 0 {
+			b.WriteString(padTo(clampLine(pick(leftLines, i), leftWidth), leftWidth))
+			b.WriteString(" ")
+		}
+		b.WriteString(padTo(clampLine(pick(midLines, i), midWidth), midWidth))
+		if rightWidth > 0 {
+			b.WriteString(" ")
+			b.WriteString(padTo(clampLine(pick(rightLines, i), rightWidth), rightWidth))
+		}
+		lines[i] = clampLine(b.String(), width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// regionLines splits a rendered region into lines, treating an absent region as
+// no lines at all.
+func regionLines(region string) []string {
+	if region == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(region, "\n"), "\n")
+}
+
+// pick returns line i, or an empty string past the end.
+func pick(lines []string, i int) string {
+	if i < len(lines) {
+		return lines[i]
+	}
+	return ""
+}
+
+// maxLineWidth is the widest visible line in a set.
+func maxLineWidth(lines []string) int {
+	w := 0
+	for _, l := range lines {
+		if v := lipgloss.Width(l); v > w {
+			w = v
+		}
+	}
+	return w
+}
+
+// padTo pads a line to a visible width.
+func padTo(line string, width int) string {
+	if gap := width - lipgloss.Width(line); gap > 0 {
+		return line + strings.Repeat(" ", gap)
+	}
+	return line
 }
 
 // renderHeader draws the tool identity and session state on one line.
@@ -119,15 +313,28 @@ func (m model) renderComposer() string {
 }
 
 // hint returns the context-sensitive key hint on the right of the composer.
+//
+// The hint is how a key the interface has just added stays discoverable without
+// a manual. F1 is mentioned only while the region is open, and the running hint
+// leads with the fact that something is in flight, which matters more on a wide
+// terminal than the registry is.
 func (m model) hint() string {
-	switch {
-	case m.running:
-		return "ctrl+c stop"
-	case m.following:
-		return "tab complete · ↑↓ history · ctrl+o events"
-	default:
-		return "ctrl+end latest"
+	// A form takes the keyboard, so the hint describes the form's keys rather
+	// than the composer's: telling someone to press tab to complete when tab
+	// moves between fields is worse than saying nothing.
+	if m.form != nil {
+		return "tab next · ↑↓ field · esc cancel"
 	}
+	if m.running {
+		return "ctrl+c stop"
+	}
+	if m.showCapabilities {
+		return "F1 hide · form <id> · tab complete"
+	}
+	if m.following {
+		return "tab complete · ↑↓ history · F1 capabilities"
+	}
+	return "ctrl+end latest · F1 capabilities"
 }
 
 // transcriptLines renders the whole session as terminal lines.
@@ -496,4 +703,137 @@ func pad(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// applyLayout resolves the geometry for a terminal size and rebuilds the
+// viewport to match.
+//
+// The layout is resolved once here and read by everything else, so a region
+// and the transcript can never disagree about how wide they are. Regions are
+// offered rather than imposed: a tool with no capabilities and nothing running
+// is given a full-width transcript even on a wide terminal, because an empty
+// column is worse than no column.
+func (m *model) applyLayout(width, height, vpHeight int) {
+	m.layout = m.resolveLayout(width)
+	tw := m.transcriptWidth(width)
+	m.viewport = viewport.New(max(1, tw), max(1, vpHeight))
+	m.input.Width = max(8, tw-lipgloss.Width(m.input.Prompt)-2)
+}
+
+// capabilitiesRegion builds the capability region, or nil when there is nothing
+// to put in it.
+//
+// Returning nil rather than an empty region is the point: the layout is told
+// there is a navigation region only when one has content, so a tool with no
+// registry never gets a column of nothing.
+//
+// Each capability takes two lines: the name, then its detail indented beneath
+// it. The region is 16 to 24 columns wide, and a name like "Profile target
+// baseline" uses all of it, so a single line cannot carry both the name and the
+// facts that change a decision. Two lines can, and the alternative -- a row of
+// truncated fragments -- is what makes a narrow column unreadable.
+func (m model) capabilitiesRegion(width int) *Region {
+	if width <= 0 || !m.showCapabilities || m.caps == nil || len(m.caps.Items) == 0 {
+		return nil
+	}
+	r := NewRegion("CAPABILITIES", width)
+	r.Empty = "none published"
+	entries := m.caps.Entries()
+	// Fit as many complete capabilities as the terminal height allows, counting
+	// the two lines each takes. A row cut in half by the region's edge is worse
+	// than one capability less.
+	budget := max(2, m.height-10)
+	shown := 0
+	for _, e := range entries {
+		if shown+2 > budget {
+			break
+		}
+		shown++
+		marker, style := "●", m.theme.Value
+		switch {
+		case !e.Available:
+			// An unavailable capability is dimmed and says why, so the region
+			// explains the absence instead of looking like an oversight.
+			marker, style = "○", m.theme.Detail
+		case e.Note == "live provider":
+			style = m.theme.Warning
+		}
+		// The style is applied here rather than only chosen: a dimmed row that
+		// renders identically to a live one is not dimmed, and the distinction
+		// the marker makes is the only thing left carrying it.
+		r.Add(style.Render(clampLine(marker+" "+e.Name, width-2)))
+		if e.Detail != "" {
+			r.Add(m.theme.Detail.Render(clampLine("  "+e.Detail, width-2)))
+		}
+		if e.Note != "" && e.Note != "live provider" {
+			r.Add(m.theme.Hint.Render(clampLine("  "+e.Note, width-2)))
+		}
+	}
+	if len(entries) > shown {
+		remaining := len(entries) - shown
+		r.Add(m.theme.Hint.Render(clampLine(fmt.Sprintf("  +%d more", remaining), width-2)))
+	}
+	return r
+}
+
+// boxedRegion renders a region with its inner rule, or an empty string when
+// there is nothing to draw.
+//
+// The empty string is the signal, not a special case: a caller that charges the
+// transcript for a column has to know whether the panel is on screen, and a
+// region that renders nothing is not on screen.
+func boxedRegion(r *Region, t Theme, side int) string {
+	if r == nil {
+		return ""
+	}
+	return r.Boxed(t, side)
+}
+
+// activityRegion builds the activity region for a running command.
+//
+// A width of zero means the layout granted no region, and returning a region
+// anyway would charge the transcript columns for a panel that draws nothing.
+func (m model) activityRegion(width int) *Region {
+	if width <= 0 || !m.running || m.activity == nil {
+		return nil
+	}
+	return m.activity.Region(m.theme, width)
+}
+
+// resolveLayout resolves the geometry for a width from the model's current state.
+//
+// It is pure: it reads the model and returns a Layout, changing nothing. Both
+// the resize path and the render path use it, which is what stops the region
+// widths and the drawn regions from being computed from two different pictures
+// of the model.
+//
+// A region is offered only when it will actually be drawn: the tool has
+// something to put in it, and the operator has asked for it. Offering a region
+// that then renders nothing reserves a column for a blank, which is the outcome
+// the whole rule exists to prevent.
+func (m model) resolveLayout(width int) Layout {
+	l := LayoutFor(width, m.height, LayoutOptions{
+		Navigation: m.showCapabilities && m.caps != nil && len(m.caps.Items) > 0,
+		Activity:   m.running,
+	})
+	// A region that turned out to have no content gives its width back, so the
+	// transcript is not left narrower than it needs to be.
+	if l.Navigation > 0 && m.capabilitiesRegion(l.Navigation) == nil {
+		l = LayoutFor(width, m.height, LayoutOptions{Activity: m.running})
+	}
+	if l.Activity > 0 && m.activityRegion(l.Activity) == nil {
+		l = LayoutFor(width, m.height, LayoutOptions{
+			Navigation: m.showCapabilities && m.caps != nil && len(m.caps.Items) > 0,
+		})
+	}
+	return l
+}
+
+// transcriptWidth is the width the viewport is built at: the layout's share, or
+// the whole terminal when no region is drawn.
+func (m model) transcriptWidth(width int) int {
+	if !m.layout.ShowRegions {
+		return max(1, width)
+	}
+	return max(1, m.layout.Transcript)
 }

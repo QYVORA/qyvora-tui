@@ -1,0 +1,213 @@
+{
+  "framework": "kush",
+  "version": "v0.1.0",
+  "exit_codes": {
+    "interrupted": 130,
+    "runtime": 1,
+    "success": 0,
+    "usage": 2
+  },
+  "output_formats": [
+    "terminal",
+    "json",
+    "yaml",
+    "markdown",
+    "html"
+  ],
+  "event_verbs": [
+    "scan.started",
+    "scan.completed",
+    "stage.started",
+    "stage.completed",
+    "finding.discovered",
+    "sample.intaked",
+    "hash.calculated",
+    "metadata.extracted",
+    "static.analyzed",
+    "strings.analyzed",
+    "behavior.analyzed",
+    "network.indicators",
+    "ioc.extracted",
+    "threat.classified",
+    "risk.calculated",
+    "report.generated"
+  ],
+  "severity_levels": [
+    "critical",
+    "high",
+    "medium",
+    "low",
+    "informational"
+  ],
+  "confidence_levels": [
+    "confirmed",
+    "observed",
+    "probable",
+    "possible",
+    "unknown",
+    "not_observed"
+  ],
+  "authorization_model": "offline sample-document analysis requires no authorization and never executes the sample. Dynamic execution is not implemented on the developer host and is refused; behavioral data may only come from an isolated sandbox",
+  "capabilities": [
+    {
+      "id": "kush.intake",
+      "name": "sample intake",
+      "implemented": true,
+      "live": false
+    },
+    {
+      "id": "kush.hashing",
+      "name": "sample hashing",
+      "implemented": true,
+      "live": false
+    },
+    {
+      "id": "kush.metadata",
+      "name": "metadata extraction",
+      "implemented": true,
+      "live": false
+    },
+    {
+      "id": "kush.static",
+      "name": "static analysis",
+      "implemented": true,
+      "live": false
+    },
+    {
+      "id": "kush.strings",
+      "name": "strings analysis",
+      "implemented": true,
+      "live": false
+    },
+    {
+      "id": "kush.behavior",
+      "name": "behavioral surface",
+      "implemented": true,
+      "live": true,
+      "note": "reads sandbox observations; samples are never executed on the developer host"
+    },
+    {
+      "id": "kush.network",
+      "name": "network indicators",
+      "implemented": true,
+      "live": false
+    },
+    {
+      "id": "kush.ioc",
+      "name": "IOC extraction",
+      "implemented": true,
+      "live": false
+    },
+    {
+      "id": "kush.classify",
+      "name": "threat classification",
+      "implemented": true,
+      "live": false
+    },
+    {
+      "id": "kush.dynamic",
+      "name": "dynamic execution",
+      "implemented": false,
+      "live": true,
+      "note": "refused on the developer host; requires a strongly isolated sandbox"
+    }
+  ],
+  "commands": [
+    {
+      "name": "assess",
+      "summary": "run the full analysis pipeline",
+      "output_modes": [
+        "terminal",
+        "json",
+        "yaml",
+        "markdown",
+        "html"
+      ],
+      "sim_support": true
+    },
+    {
+      "name": "sample",
+      "summary": "generate a deterministic sample malware document",
+      "output_modes": [
+        "terminal",
+        "json",
+        "yaml",
+        "markdown",
+        "html"
+      ],
+      "sim_support": true
+    },
+    {
+      "name": "report",
+      "summary": "render the latest assessment report",
+      "output_modes": [
+        "terminal",
+        "markdown",
+        "json",
+        "yaml",
+        "html"
+      ],
+      "sim_support": true
+    },
+    {
+      "name": "findings",
+      "summary": "inspect the latest assessment findings",
+      "output_modes": [
+        "terminal",
+        "json",
+        "yaml",
+        "markdown",
+        "html"
+      ],
+      "sim_support": true
+    },
+    {
+      "name": "evidence",
+      "summary": "inspect the latest assessment evidence",
+      "output_modes": [
+        "terminal",
+        "json",
+        "yaml",
+        "markdown",
+        "html"
+      ],
+      "sim_support": true
+    },
+    {
+      "name": "sources",
+      "summary": "list supported sample sources and their status",
+      "output_modes": [
+        "terminal",
+        "json",
+        "yaml",
+        "markdown",
+        "html"
+      ],
+      "sim_support": true
+    },
+    {
+      "name": "target",
+      "summary": "manage assessment targets",
+      "output_modes": [
+        "terminal",
+        "json",
+        "yaml",
+        "markdown",
+        "html"
+      ],
+      "sim_support": true
+    },
+    {
+      "name": "capabilities",
+      "summary": "print this machine-readable contract",
+      "output_modes": [
+        "terminal",
+        "json",
+        "yaml",
+        "markdown",
+        "html"
+      ],
+      "sim_support": false
+    }
+  ]
+}

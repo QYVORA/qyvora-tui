@@ -229,7 +229,7 @@ func TestRunRefusesToLaunchOnANonTerminal(t *testing.T) {
 }
 
 func TestNoColorDisablesStyling(t *testing.T) {
-	th := newTheme(false)
+	th := newTheme(false, nil)
 	if th.Color {
 		t.Fatal("theme reports colour when disabled")
 	}
@@ -251,7 +251,7 @@ func TestColorEnabledHonoursNoColor(t *testing.T) {
 }
 
 func TestThemeRendersWithoutColor(t *testing.T) {
-	th := newTheme(true)
+	th := newTheme(true, nil)
 	m := newModel(Config{Title: "QYVORA / TEST", Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
 	m = resize(m, 100, 30)
 	out := m.View()
@@ -265,7 +265,7 @@ func TestThemeRendersWithoutColor(t *testing.T) {
 
 // A narrow terminal must not explode: the layout is recomputed, not fixed.
 func TestViewHandlesNarrowTerminals(t *testing.T) {
-	th := newTheme(false)
+	th := newTheme(false, nil)
 	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
 
 	for _, w := range []int{200, 100, 60, 40, 20, 10} {
@@ -285,7 +285,7 @@ func TestViewHandlesNarrowTerminals(t *testing.T) {
 }
 
 func TestViewRendersAnExecutionBlock(t *testing.T) {
-	th := newTheme(false)
+	th := newTheme(false, nil)
 	m := newModel(Config{Title: "QYVORA / TEST", Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
 	m = resize(m, 100, 40)
 
@@ -306,7 +306,7 @@ func TestViewRendersAnExecutionBlock(t *testing.T) {
 }
 
 func TestCancelledBlockReportsItself(t *testing.T) {
-	th := newTheme(false)
+	th := newTheme(false, nil)
 	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return ExitCancelled }, ToolName: "test"}}, th)
 	m.width, m.height = 100, 30
 	m.Update(windowSizeMsg(100, 30))
@@ -329,7 +329,7 @@ func TestCancelledBlockReportsItself(t *testing.T) {
 }
 
 func TestFailedExecutionRecordsTheExitStatus(t *testing.T) {
-	th := newTheme(false)
+	th := newTheme(false, nil)
 	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 2 }, ToolName: "test"}}, th)
 	m.width, m.height = 100, 30
 	m.Update(windowSizeMsg(100, 30))
@@ -352,7 +352,7 @@ func TestFailedExecutionRecordsTheExitStatus(t *testing.T) {
 }
 
 func TestSecondExecutionIsRefusedWhileOneRuns(t *testing.T) {
-	th := newTheme(false)
+	th := newTheme(false, nil)
 	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
 	m = resize(m, 100, 30)
 	m.running = true
@@ -377,7 +377,7 @@ func TestCancellationIsPerExecutionNotShared(t *testing.T) {
 }
 
 func TestBuiltinsAreHandledLocally(t *testing.T) {
-	th := newTheme(false)
+	th := newTheme(false, nil)
 	ran := false
 	m := newModel(Config{Runner: &InProcessRunner{
 		Execute:  func(context.Context, []string) int { ran = true; return 0 },
@@ -395,7 +395,7 @@ func TestBuiltinsAreHandledLocally(t *testing.T) {
 }
 
 func TestCommandCompletionComesFromTheToolRegistry(t *testing.T) {
-	th := newTheme(false)
+	th := newTheme(false, nil)
 	m := newModel(Config{Runner: &InProcessRunner{
 		Execute:  func(context.Context, []string) int { return 0 },
 		ToolName: "test",

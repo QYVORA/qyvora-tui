@@ -1,0 +1,154 @@
+[
+  {
+    "id": "sekhmet.baseline.profile",
+    "name": "Profile target baseline",
+    "description": "Measure the target's normal behaviour (timing, response, exit profiles) before fuzzing.",
+    "framework": "sekhmet",
+    "category": "baseline",
+    "output_schema": [
+      "Baseline"
+    ],
+    "risk": "S1",
+    "authorization_required": true,
+    "target_type": "any",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.campaign.fuzz",
+    "name": "Run a fuzzing campaign",
+    "description": "Run a mutation/generation campaign against a target with adaptive scheduling.",
+    "framework": "sekhmet",
+    "category": "fuzzing",
+    "output_schema": [
+      "SessionResult",
+      "Finding",
+      "Crash"
+    ],
+    "risk": "S2",
+    "authorization_required": true,
+    "target_type": "any",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.corpus.manage",
+    "name": "Manage the seed corpus",
+    "description": "Import, export, deduplicate and prioritize corpus seeds.",
+    "framework": "sekhmet",
+    "category": "corpus",
+    "output_schema": [
+      "Seed"
+    ],
+    "risk": "S1",
+    "authorization_required": false,
+    "target_type": "session",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.crash.list",
+    "name": "List crashes",
+    "description": "List deduplicated crashes from a session.",
+    "framework": "sekhmet",
+    "category": "reporting",
+    "output_schema": [
+      "Finding"
+    ],
+    "risk": "S1",
+    "authorization_required": false,
+    "target_type": "session",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.findings.list",
+    "name": "List findings",
+    "description": "List current campaign findings.",
+    "framework": "sekhmet",
+    "category": "reporting",
+    "output_schema": [
+      "Finding"
+    ],
+    "risk": "S1",
+    "authorization_required": false,
+    "target_type": "session",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.input.minimize",
+    "name": "Minimize an input",
+    "description": "Reduce an interesting input while preserving triggering behaviour.",
+    "framework": "sekhmet",
+    "category": "triage",
+    "output_schema": [
+      "Evidence"
+    ],
+    "risk": "S2",
+    "authorization_required": true,
+    "target_type": "any",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.report.generate",
+    "name": "Generate a report",
+    "description": "Generate a campaign report in a chosen format.",
+    "framework": "sekhmet",
+    "category": "reporting",
+    "output_schema": [
+      "Report"
+    ],
+    "risk": "S1",
+    "authorization_required": false,
+    "target_type": "session",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.result.replay",
+    "name": "Replay an input",
+    "description": "Reproduce an input against a target to confirm a result.",
+    "framework": "sekhmet",
+    "category": "triage",
+    "output_schema": [
+      "ExecutionResult"
+    ],
+    "risk": "S2",
+    "authorization_required": true,
+    "target_type": "any",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.target.discover",
+    "name": "Discover and validate a target",
+    "description": "Define and validate a fuzz target (process, file, http, cli, network, simulation).",
+    "framework": "sekhmet",
+    "category": "targeting",
+    "output_schema": [
+      "Target"
+    ],
+    "risk": "S1",
+    "authorization_required": true,
+    "target_type": "any",
+    "confirmation_required": false,
+    "reversible": true
+  },
+  {
+    "id": "sekhmet.wordlists.discover",
+    "name": "Discover SecLists wordlists",
+    "description": "Locate and index a local SecLists installation for payload providers.",
+    "framework": "sekhmet",
+    "category": "payload",
+    "output_schema": [
+      "Wordlist"
+    ],
+    "risk": "S1",
+    "authorization_required": false,
+    "target_type": "session",
+    "confirmation_required": false,
+    "reversible": true
+  }
+]

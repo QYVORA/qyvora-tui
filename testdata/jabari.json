@@ -1,0 +1,133 @@
+[
+  {
+    "name": "Device discovery",
+    "category": "Android Engine",
+    "status": "native",
+    "description": "USB/TCP device discovery"
+  },
+  {
+    "name": "TCP transport",
+    "category": "Android Engine",
+    "status": "native",
+    "description": "Native ADB protocol over TCP"
+  },
+  {
+    "name": "USB transport",
+    "category": "Android Engine",
+    "status": "integration",
+    "description": "ADB protocol over USB (requires adb binary for now)",
+    "binary": "adb"
+  },
+  {
+    "name": "Shell channel",
+    "category": "Android Engine",
+    "status": "native",
+    "description": "Execute shell commands"
+  },
+  {
+    "name": "Device properties",
+    "category": "Android Engine",
+    "status": "native",
+    "description": "Read system properties"
+  },
+  {
+    "name": "Package enumeration",
+    "category": "Android Engine",
+    "status": "native",
+    "description": "List installed packages"
+  },
+  {
+    "name": "APK container parsing",
+    "category": "APK Engine",
+    "status": "native",
+    "description": "ZIP-based APK structure"
+  },
+  {
+    "name": "Manifest parsing",
+    "category": "APK Engine",
+    "status": "native",
+    "description": "Binary XML manifest decoding"
+  },
+  {
+    "name": "Certificate inspection",
+    "category": "APK Engine",
+    "status": "native",
+    "description": "Extract signing certificates"
+  },
+  {
+    "name": "DEX discovery",
+    "category": "APK Engine",
+    "status": "native",
+    "description": "Identify DEX files"
+  },
+  {
+    "name": "Component analysis",
+    "category": "APK Engine",
+    "status": "native",
+    "description": "Activities, services, receivers, providers"
+  },
+  {
+    "name": "Permission analysis",
+    "category": "APK Engine",
+    "status": "native",
+    "description": "Classify permissions"
+  },
+  {
+    "name": "Security rules",
+    "category": "Analysis Engine",
+    "status": "native",
+    "description": "Rule engine with AND-001 to AND-007"
+  },
+  {
+    "name": "Evidence collection",
+    "category": "Analysis Engine",
+    "status": "native",
+    "description": "SHA-256 hashed evidence"
+  },
+  {
+    "name": "Risk scoring",
+    "category": "Analysis Engine",
+    "status": "native",
+    "description": "Severity × confidence scoring"
+  },
+  {
+    "name": "JSON reporting",
+    "category": "Analysis Engine",
+    "status": "native",
+    "description": "Machine-readable reports"
+  },
+  {
+    "name": "HTML reporting",
+    "category": "Analysis Engine",
+    "status": "native",
+    "description": "Human-readable reports"
+  },
+  {
+    "name": "Frida",
+    "category": "Optional Integrations",
+    "status": "missing",
+    "description": "Runtime instrumentation",
+    "binary": "frida"
+  },
+  {
+    "name": "JADX",
+    "category": "Optional Integrations",
+    "status": "missing",
+    "description": "DEX to Java decompiler",
+    "binary": "jadx"
+  },
+  {
+    "name": "Apktool",
+    "category": "Optional Integrations",
+    "status": "missing",
+    "description": "APK disassembly/reassembly",
+    "binary": "apktool"
+  },
+  {
+    "name": "Drozer",
+    "category": "Optional Integrations",
+    "status": "missing",
+    "description": "Attack surface testing",
+    "binary": "drozer"
+  }
+]

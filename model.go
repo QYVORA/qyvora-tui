@@ -32,8 +32,31 @@ type Config struct {
 	// failure are all things the operator asked to see. Set it only to divert
 	// that text somewhere else entirely.
 	Err io.Writer
-	// NoColor forces plain output regardless of terminal detection.
+	// NoColor forces plain output regardless of terminal detection. It is
+	// decided once at startup and is not overridable by a Theme, so a tool
+	// cannot opt out of a user's NO_COLOR request.
 	NoColor bool
+	// Capabilities is the tool's capability registry, normalised.
+	//
+	// It is produced by NormalizeCapabilities from the tool's own
+	// `capabilities -o json` output, which is the same command an operator can
+	// run by hand. Nothing here is a second hand-maintained list, so a
+	// capability added to a tool appears in the interface without a second
+	// edit -- the same property CollectCommands gives commands.
+	//
+	// A nil value is normal and means the tool publishes no registry. The
+	// interface stays fully usable without it.
+	Capabilities *Capabilities
+
+	// Theme is the tool's optional palette. A nil Theme, or one that sets
+	// nothing, resolves to QYVORA_BASE, so branding is never required and never
+	// required to be complete: a tool sets the slots it means to change and
+	// inherits the rest.
+	//
+	// A tool with no meaningful brand palette should leave this nil. An
+	// invented colour is worse than the shared one, and most tools should
+	// inherit.
+	Theme *Palette
 }
 
 // errNotInteractive means the streams cannot support a full-screen TUI. Tools
@@ -95,6 +118,11 @@ type (
 	// separate from an event because it has no envelope: the interface shows
 	// it as written rather than claiming to have interpreted it.
 	outputMsg struct{ line string }
+	// capabilitiesMsg carries a tool's capability registry, normally read once
+	// at startup from the tool's own `capabilities -o json` output. It is a
+	// message so a tool may publish capabilities that change without the
+	// interface needing a restart.
+	capabilitiesMsg struct{ caps *Capabilities }
 )
 
 // model is the application state.
@@ -133,6 +161,29 @@ type model struct {
 	// cancel stops the in-flight execution. It is non-nil only while one is
 	// running, and is cleared when that execution reports back.
 	cancel context.CancelFunc
+
+	// caps is the tool's normalised capability registry, or nil when the tool
+	// publishes none. It is read from the tool's own `capabilities -o json`
+	// output rather than authored here, so it cannot drift from the tool.
+	caps *Capabilities
+
+	// activity is the live view of the current run. It is a consumer of
+	// events: it counts and describes them and knows nothing about any
+	// scanner.
+	activity *Activity
+
+	// layout is the resolved geometry for the current terminal size, recomputed
+	// on every resize. Components read it rather than asking the terminal
+	// themselves, so a region and the transcript cannot disagree about width.
+	layout Layout
+
+	// showCapabilities toggles the capability region.
+	showCapabilities bool
+
+	// form is the structured input for one capability, or nil when none is
+	// open. A form only exists for a capability whose registry describes
+	// parameters, so most sessions never have one.
+	form *Form
 }
 
 // Run starts an interactive session and returns the process exit code.
@@ -159,7 +210,10 @@ func Run(cfg Config) (int, error) {
 		return 1, &errNotInteractive{reason: "tui: output is not a terminal"}
 	}
 
-	m := newModel(cfg, newTheme(!cfg.NoColor && colorEnabled(os.Stdout)))
+	// The palette is layered before styles are built: QYVORA_BASE, then the
+	// tool's palette if it supplied one, then the styles. NO_COLOR is decided
+	// last, so it still wins over a tool's branding.
+	m := newModel(cfg, newTheme(!cfg.NoColor && colorEnabled(os.Stdout), cfg.Theme))
 
 	// The renderer draws to a private duplicate of stdout. Command execution
 	// redirects the process's real stdout into a capture pipe, and without this
@@ -200,6 +254,7 @@ func newModel(cfg Config, theme Theme) model {
 		cfg:      cfg,
 		runner:   cfg.Runner,
 		theme:    theme,
+		caps:     cfg.Capabilities,
 		input:    ti,
 		history:  NewHistory(),
 		viewport: vp,
@@ -215,7 +270,7 @@ func newModel(cfg Config, theme Theme) model {
 	m.input.PromptStyle = m.theme.Prompt
 	m.input.TextStyle = m.theme.Value
 	if theme.Color {
-		m.input.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
+		m.input.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Palette.Accent))
 	} else {
 		m.input.Cursor.Style = lipgloss.NewStyle()
 	}
@@ -243,7 +298,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if vpHeight < 1 {
 			vpHeight = 1
 		}
-		m.viewport = viewport.New(max(1, msg.Width), vpHeight)
+		m.applyLayout(msg.Width, msg.Height, vpHeight)
 		m.refreshViewport()
 		return m, nil
 
@@ -266,6 +321,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if b := m.blockByID(m.activeID); b != nil {
 					b.addEvent(Event(ev))
 				}
+				// The activity view counts every event, whatever its topic.
+				// An event type the TUI has never seen is recorded like any
+				// other: discarding it would throw away exactly the
+				// information the tool took the trouble to emit.
+				m.activity.record(Event(ev))
 				continue
 			}
 			if out, ok := inner.(outputMsg); ok {
@@ -286,6 +346,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runDoneMsg:
 		m.finish(msg)
+		return m, nil
+
+	case capabilitiesMsg:
+		// Capabilities arriving after startup: the interface adopts them
+		// without a restart.
+		m.caps = msg.caps
+		m.applyLayout(m.width, m.height, m.viewport.Height)
+		m.refreshViewport()
 		return m, nil
 
 	case noticeMsg:
@@ -326,10 +394,21 @@ func (m *model) finish(msg runDoneMsg) {
 			m.state = stateReady
 		}
 	}
+	// With the run over the activity region goes away, and the transcript takes
+	// its width back.
+	m.applyLayout(m.width, m.height, m.viewport.Height)
 	m.refreshViewport()
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// An open form takes the keyboard. While it is up, every key belongs to it,
+	// including the ones that would otherwise scroll the session: a form the
+	// operator cannot type into because a key did something else is a form that
+	// cannot be used.
+	if m.form != nil {
+		return m.handleFormKey(msg)
+	}
+
 	switch msg.Type {
 
 	case tea.KeyCtrlC:
@@ -353,6 +432,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
+
+	case tea.KeyF1:
+		// F1 reveals the capability registry. A dedicated key rather than a
+		// built-in word, because the registry is a reference to consult, not a
+		// command to run, and it must stay discoverable.
+		m.showCapabilities = !m.showCapabilities
+		m.applyLayout(m.width, m.height, m.viewport.Height)
+		m.refreshViewport()
+		return m, nil
 
 	case tea.KeyCtrlO:
 		// Reveal the raw event log. The structured stream is always retained;
@@ -501,6 +589,17 @@ func (m *model) submit() tea.Cmd {
 	if len(args) == 0 {
 		return nil
 	}
+	if strings.EqualFold(args[0], "form") {
+		// `form` with no name opens the only capability that has one, or says
+		// which do. It is the discovery path: an operator who does not know
+		// which capabilities take parameters should not have to go looking.
+		if len(args) > 1 {
+			m.openFormFor(args[1])
+			return nil
+		}
+		m.openForm()
+		return nil
+	}
 	return m.start(args)
 }
 
@@ -529,6 +628,15 @@ func (m *model) start(args []string) tea.Cmd {
 	m.running = true
 	m.state = stateRunning
 	m.started = time.Now()
+	// Each run gets a fresh activity view. Carrying the previous run's counts
+	// into a new one would report a scan as having inherited the last scan's
+	// findings.
+	m.activity = newActivity()
+	// A run in flight changes what the layout can afford, so the viewport is
+	// rebuilt at its new width now. Deferring this to the next resize would leave
+	// the transcript clipped to the old width, with every line truncated and an
+	// ellipsis where the region now is.
+	m.applyLayout(m.width, m.height, m.viewport.Height)
 
 	// A per-execution child context, never a shared or root one. Ctrl+C
 	// cancels this execution and nothing else, and the next execution starts
@@ -719,16 +827,29 @@ func (m *model) candidates(word string) []string {
 }
 
 func (m *model) helpLines() []string {
-	return []string{
+	lines := []string{
 		m.theme.Group.Render("Keys"),
 		"  " + m.theme.Detail.Render("ctrl+c") + "   stop the running command · " + m.theme.Detail.Render("ctrl+d") + "   leave",
 		"  " + m.theme.Detail.Render("ctrl+o") + "   show or hide the raw event log",
 		"  " + m.theme.Detail.Render("pgup/pgdn") + "   scroll the session · " + m.theme.Detail.Render("ctrl+end") + "   jump to newest",
 		"  " + m.theme.Detail.Render("tab") + "         complete · " + m.theme.Detail.Render("↑/↓") + "         history",
+		"  " + m.theme.Detail.Render("F1") + "         show or hide the capability registry",
 		"",
 		m.theme.Group.Render("Built-ins") + "  " + m.theme.Detail.Render("help · clear · quit"),
 		m.theme.Group.Render("Commands ") + strings.Join(commandNames(m.runner.Commands()), " · "),
 	}
+	// The form is listed only when the tool publishes something a form can be
+	// built from. Telling someone to type `form` in a tool that publishes no
+	// parameters teaches them a word that cannot work.
+	if formable := m.caps.Formable(); len(formable) > 0 {
+		lines = append(lines,
+			"",
+			m.theme.Group.Render("Forms")+"  "+
+				m.theme.Detail.Render("form")+"  fill in a capability's parameters"+
+				"  "+m.theme.Detail.Render("form <id>")+"  a specific one",
+		)
+	}
+	return lines
 }
 
 func commandNames(cmds []Command) []string {
@@ -782,4 +903,227 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// openFormFor opens a structured input for a named capability.
+//
+// The capability is resolved through the normalised registry, so the short form
+// works: `form campaign.fuzz` finds `sekhmet.campaign.fuzz`. A capability whose
+// registry describes no parameters yields no form, and the notice says so
+// rather than opening an empty one.
+func (m *model) openFormFor(id string) {
+	// One execution at a time, as everywhere else: a form is a way of starting
+	// a run, and opening one mid-run would leave the operator with an input they
+	// cannot submit.
+	if m.running {
+		m.notices = append(m.notices, "An execution is already running; Ctrl+C stops it")
+		m.refreshViewport()
+		return
+	}
+	if m.caps == nil || len(m.caps.Items) == 0 {
+		m.notices = append(m.notices, "No capability registry is available for "+m.cfg.Title)
+		m.refreshViewport()
+		return
+	}
+	c, ok := m.caps.Find(id)
+	if !ok {
+		m.notices = append(m.notices, "No capability named "+id)
+		m.refreshViewport()
+		return
+	}
+	f := OpenForm(c)
+	if f == nil {
+		m.notices = append(m.notices, c.Name+" takes no parameters; type the command instead")
+		m.refreshViewport()
+		return
+	}
+	m.form = f
+	m.showCapabilities = true
+	m.applyLayout(m.width, m.height, m.viewport.Height)
+	m.refreshViewport()
+}
+
+// openForm opens a form without being told which capability.
+//
+// The registry decides: the capabilities that describe parameters are the only
+// ones with a form, and there is usually one. When there are several, they are
+// named rather than guessed at, because picking the first would be a choice the
+// tool never expressed.
+func (m *model) openForm() {
+	if m.running {
+		m.notices = append(m.notices, "An execution is already running; Ctrl+C stops it")
+		m.refreshViewport()
+		return
+	}
+	if m.caps == nil {
+		m.notices = append(m.notices, "No capability registry is available for "+m.cfg.Title)
+		m.refreshViewport()
+		return
+	}
+	formable := m.caps.Formable()
+	switch len(formable) {
+	case 0:
+		m.notices = append(m.notices, m.caps.Tool+" publishes no parameters; type the command instead")
+	case 1:
+		m.form = OpenForm(formable[0])
+		m.showCapabilities = true
+		m.applyLayout(m.width, m.height, m.viewport.Height)
+	default:
+		names := make([]string, 0, len(formable))
+		for _, c := range formable {
+			names = append(names, c.ID)
+		}
+		m.notices = append(m.notices,
+			"Capabilities with parameters: "+strings.Join(names, ", ")+" -- form <name>")
+	}
+	m.refreshViewport()
+}
+
+// closeForm discards the open form and returns the session to the composer.
+func (m *model) closeForm() {
+	if m.form == nil {
+		return
+	}
+	m.form = nil
+	m.refreshViewport()
+}
+
+// submitForm runs the capability the open form belongs to.
+//
+// The capability's ID is a registry identifier, not a command word: mansa
+// publishes "mansa.analyze" and its command tree has "analyze". Submitting the
+// ID verbatim would ask the tool for a command that does not exist, so the words
+// are resolved against the live tree first. When no command matches, the form
+// stays open and says so rather than running something the operator did not ask
+// for.
+func (m *model) submitForm() tea.Cmd {
+	f := m.form
+	if f == nil {
+		return nil
+	}
+	if err := f.Validate(); err != nil {
+		m.refreshViewport()
+		return nil
+	}
+	words := m.commandWordsFor(f.Capability)
+	if len(words) == 0 {
+		f.fail("No command runs " + f.Capability.ID + "; type the command instead")
+		m.refreshViewport()
+		return nil
+	}
+	m.form = nil
+	return m.start(append(words, f.Args()...))
+}
+
+// commandWordsFor resolves a capability to the command words that run it.
+//
+// The search is over the tool's own command tree, longest match first, and the
+// candidate words come from the capability's own ID. Nothing here knows any
+// tool's vocabulary: a registry whose IDs are not derived from its commands
+// simply yields no words, and the operator types the command by hand.
+func (m *model) commandWordsFor(c Capability) []string {
+	parts := strings.Split(c.ID, ".")
+	// "mansa.analyze" is a two-word candidate; the leading tool name is not
+	// something anyone types after the program name, so every suffix is tried
+	// rather than only the full ID.
+	var best []string
+	for i := range parts {
+		cand := parts[i:]
+		if w := m.resolveCommandPath(cand); len(w) > 0 && len(w) > len(best) {
+			best = w
+		}
+	}
+	return best
+}
+
+// resolveCommandPath resolves words against the live command tree, following at
+// most one level of subcommand, which is all the tree records.
+func (m *model) resolveCommandPath(words []string) []string {
+	if len(words) == 0 {
+		return nil
+	}
+	for _, c := range m.runner.Commands() {
+		if c.Name != words[0] {
+			continue
+		}
+		if len(words) == 1 {
+			return []string{c.Name}
+		}
+		for _, s := range c.Subs {
+			if s == words[1] {
+				return []string{c.Name, s}
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+// handleFormKey routes a keystroke to the open form.
+func (m model) handleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.closeForm()
+		return m, nil
+	case tea.KeyEnter:
+		return m, m.submitForm()
+	case tea.KeyCtrlC:
+		// The same rule as everywhere else: the first press abandons the form
+		// rather than the session.
+		m.closeForm()
+		return m, nil
+	case tea.KeyUp, tea.KeyShiftTab:
+		if !m.form.FocusPrev() {
+			m.closeForm()
+		}
+		m.refreshViewport()
+		return m, nil
+	case tea.KeyDown, tea.KeyTab:
+		if !m.form.FocusNext() {
+			m.closeForm()
+		}
+		m.refreshViewport()
+		return m, nil
+	case tea.KeyLeft:
+		m.form.MoveCursor(-1)
+		m.refreshViewport()
+		return m, nil
+	case tea.KeyRight:
+		m.form.MoveCursor(1)
+		m.refreshViewport()
+		return m, nil
+	case tea.KeyHome, tea.KeyCtrlA:
+		m.form.MoveToStart()
+		m.refreshViewport()
+		return m, nil
+	case tea.KeyEnd, tea.KeyCtrlE:
+		m.form.MoveToEnd()
+		m.refreshViewport()
+		return m, nil
+	case tea.KeyCtrlU:
+		// Clear the field the way a shell does, which is what an operator who
+		// has mistyped a whole value reaches for.
+		m.form.ClearField()
+		m.refreshViewport()
+		return m, nil
+	case tea.KeyBackspace:
+		m.form.Backspace()
+		m.refreshViewport()
+		return m, nil
+	case tea.KeyDelete:
+		m.form.ClearField()
+		m.refreshViewport()
+		return m, nil
+	case tea.KeySpace:
+		m.form.Insert(' ')
+		m.refreshViewport()
+		return m, nil
+	}
+	if msg.Type == tea.KeyRunes {
+		for _, r := range msg.Runes {
+			m.form.Insert(r)
+		}
+		m.refreshViewport()
+	}
+	return m, nil
 }

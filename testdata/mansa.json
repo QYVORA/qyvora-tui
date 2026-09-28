@@ -1,0 +1,341 @@
+[
+  {
+    "id": "mansa.analyze",
+    "name": "Security Analysis",
+    "description": "Analyze wireless security configuration and generate findings",
+    "framework": "mansa",
+    "category": "analysis",
+    "output": [
+      "findings",
+      "evidence"
+    ],
+    "risk": "low",
+    "authorization_required": false,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "session"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "session",
+          "type": "string",
+          "required": true,
+          "description": "session ID"
+        }
+      ],
+      "output": [
+        {
+          "name": "findings",
+          "type": "[]Finding",
+          "description": "security findings"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mansa.assess",
+    "name": "Full Assessment Pipeline",
+    "description": "Run the complete wireless security assessment pipeline",
+    "framework": "mansa",
+    "category": "assessment",
+    "output": [
+      "findings",
+      "evidence",
+      "report",
+      "risk"
+    ],
+    "risk": "medium",
+    "authorization_required": true,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "interface",
+      "simulation"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "interface",
+          "type": "string"
+        },
+        {
+          "name": "sim",
+          "type": "bool"
+        }
+      ],
+      "output": [
+        {
+          "name": "session",
+          "type": "Session",
+          "description": "completed session"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mansa.discover",
+    "name": "Discover Interfaces",
+    "description": "Discover wireless interfaces and their capabilities",
+    "framework": "mansa",
+    "category": "discovery",
+    "output": [
+      "wireless_interfaces",
+      "supported_bands",
+      "supported_channels"
+    ],
+    "risk": "low",
+    "authorization_required": false,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "interface"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "interface",
+          "type": "string",
+          "description": "specific interface to inspect"
+        }
+      ],
+      "output": [
+        {
+          "name": "interfaces",
+          "type": "[]WirelessInterface",
+          "description": "discovered interfaces"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mansa.enumerate",
+    "name": "Access Point Enumeration",
+    "description": "Enumerate detailed information about discovered access points",
+    "framework": "mansa",
+    "category": "enumeration",
+    "output": [
+      "access_points",
+      "channels",
+      "vendors"
+    ],
+    "risk": "low",
+    "authorization_required": true,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "interface"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "interface",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "ssid",
+          "type": "string"
+        },
+        {
+          "name": "bssid",
+          "type": "string"
+        },
+        {
+          "name": "band",
+          "type": "string"
+        }
+      ],
+      "output": [
+        {
+          "name": "access_points",
+          "type": "[]AccessPoint",
+          "description": "detailed AP inventory"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mansa.evidence",
+    "name": "View Evidence",
+    "description": "Display collected evidence supporting findings",
+    "framework": "mansa",
+    "category": "reporting",
+    "output": [
+      "evidence"
+    ],
+    "risk": "low",
+    "authorization_required": false,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "session"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "session",
+          "type": "string"
+        }
+      ],
+      "output": [
+        {
+          "name": "evidence",
+          "type": "[]Evidence"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mansa.findings",
+    "name": "View Findings",
+    "description": "Display security findings from the current or latest session",
+    "framework": "mansa",
+    "category": "reporting",
+    "output": [
+      "findings"
+    ],
+    "risk": "low",
+    "authorization_required": false,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "session"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "session",
+          "type": "string"
+        }
+      ],
+      "output": [
+        {
+          "name": "findings",
+          "type": "[]Finding"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mansa.observe",
+    "name": "Observe Wireless Clients",
+    "description": "Observe wireless stations and client behavior",
+    "framework": "mansa",
+    "category": "observation",
+    "output": [
+      "stations",
+      "observations"
+    ],
+    "risk": "low",
+    "authorization_required": true,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "interface"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "interface",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "output": [
+        {
+          "name": "stations",
+          "type": "[]Station",
+          "description": "wireless clients"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mansa.report",
+    "name": "Generate Report",
+    "description": "Generate a formatted security assessment report",
+    "framework": "mansa",
+    "category": "reporting",
+    "output": [
+      "report"
+    ],
+    "risk": "low",
+    "authorization_required": false,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "session"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "session",
+          "type": "string"
+        },
+        {
+          "name": "format",
+          "type": "string"
+        }
+      ],
+      "output": [
+        {
+          "name": "report",
+          "type": "string",
+          "description": "formatted report"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mansa.scan",
+    "name": "Wireless Scan",
+    "description": "Scan for wireless networks and access points",
+    "framework": "mansa",
+    "category": "enumeration",
+    "output": [
+      "access_points",
+      "stations",
+      "observations"
+    ],
+    "risk": "medium",
+    "authorization_required": true,
+    "confirmation_required": false,
+    "reversible": true,
+    "changes_state": false,
+    "target_types": [
+      "interface",
+      "ssid",
+      "bssid"
+    ],
+    "schema": {
+      "input": [
+        {
+          "name": "interface",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "timeout",
+          "type": "duration"
+        }
+      ],
+      "output": [
+        {
+          "name": "access_points",
+          "type": "[]AccessPoint",
+          "description": "discovered access points"
+        }
+      ]
+    }
+  }
+]

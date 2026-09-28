@@ -1,203 +1,203 @@
 package tui
 
 import (
-	"bytes"
-	"context"
-	"os"
 	"strings"
-	"sync"
 	"testing"
-	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
-// A tool that captured stdout at init must be captured by the TUI.
-//
-// This is a regression test for the failure that made the interface unusable:
-// the runner reassigned the os.Stdout variable, but a package that had already
-// stored that value in a variable of its own -- which most tools do when they
-// build a printer during init -- kept writing to the original file. Its output
-// went straight to the terminal, in the middle of the interface's own frames.
-// Redirecting the descriptor, rather than the variable, is what fixes it.
-func TestInProcessCaptureReachesWritersHoldingAnOldStdout(t *testing.T) {
-	// This handle stands in for the one a tool captures during init, before
-	// the TUI starts.
-	stale := os.Stdout
-	var out string
-	var mu sync.Mutex
+// The layout tests pin the breakpoints the audit measured, because the failure
+// mode is a terminal 20 columns wide rendering two side regions that each need
+// 24: no error, no panic, just a transcript nobody can read.
 
-	r := &InProcessRunner{
-		ToolName: "stale",
-		Execute: func(_ context.Context, args []string) int {
-			// Written through the stale handle and through the live variable,
-			// because a real tool may use either.
-			_, _ = stale.WriteString("VIA-STALE-HANDLE\n")
-			_, _ = os.Stdout.WriteString("VIA-LIVE-VARIABLE\n")
-			// Interleaved with an event, to prove both survive together.
-			if len(args) > 0 {
-				_, _ = os.Stdout.WriteString(
-					`{"schema_version":"1.0","timestamp":"2026-01-01T00:00:00Z","execution_id":"e1",` +
-						`"framework":"stale","level":"info","event":"execution.started","data":{}}` + "\n")
+func TestLayoutBreakpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		width      int
+		wantMode   LayoutMode
+		wantRegion bool
+	}{
+		// Below the compact breakpoint nothing is offered a region, whatever it
+		// has to show. A 40-column terminal has no room for two columns and
+		// never will.
+		{name: "tiny", width: 20, wantMode: ModeCompact},
+		{name: "just below compact", width: CompactWidth - 1, wantMode: ModeCompact},
+		// 60 is where a single region becomes possible.
+		{name: "at compact boundary", width: CompactWidth, wantMode: ModeAdaptive, wantRegion: true},
+		{name: "mid", width: 100, wantMode: ModeAdaptive, wantRegion: true},
+		// Beyond 120 both sides fit.
+		{name: "at wide boundary", width: WideWidth, wantMode: ModeWide, wantRegion: true},
+		{name: "very wide", width: 200, wantMode: ModeWide, wantRegion: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := LayoutFor(tc.width, 40, LayoutOptions{Navigation: true, Activity: true})
+			if l.Mode != tc.wantMode {
+				t.Errorf("Mode = %v, want %v at width %d", l.Mode, tc.wantMode, tc.width)
 			}
-			mu.Lock()
-			out += "done"
-			mu.Unlock()
-			return 0
-		},
-	}
-
-	var buf bytes.Buffer
-	code, err := r.Run(context.Background(), []string{"scan", "x"}, &buf)
-	var events []Event
-	readEvents(&buf, func(ev Event) { events = append(events, ev) }, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0", code)
-	}
-
-	mu.Lock()
-	ran := out == "done"
-	mu.Unlock()
-	if !ran {
-		t.Fatal("the tool did not run")
-	}
-
-	// The event must have arrived...
-	var sawStarted bool
-	for _, ev := range events {
-		if ev.Event == EventExecutionStarted {
-			sawStarted = true
-		}
-	}
-	if !sawStarted {
-		t.Errorf("execution.started was not captured; events = %+v", events)
-	}
-	// ...and stdout must be restored afterwards, which is what lets the renderer
-	// keep drawing.
-	if os.Stdout != stale {
-		t.Error("os.Stdout was not restored after the run")
+			if l.ShowRegions != tc.wantRegion {
+				t.Errorf("ShowRegions = %t, want %t at width %d", l.ShowRegions, tc.wantRegion, tc.width)
+			}
+		})
 	}
 }
 
-// The interface must fill the terminal exactly.
-//
-// A view one line taller than the terminal does not clip: the terminal scrolls,
-// the header scrolls off the top, and the composer -- which is supposed to be
-// pinned to the bottom -- lands in the middle of the screen. Content of any
-// length, including the long, table-shaped output tools actually print, has to
-// fit.
-func TestViewExactlyFillsTheTerminalAtAnyContentLength(t *testing.T) {
-	for _, size := range []struct{ w, h int }{{100, 30}, {80, 24}, {60, 20}, {40, 12}} {
-		m := newModel(Config{Title: "QYVORA / PROBE", Version: "0.1.0", Runner: &InProcessRunner{
-			ToolName: "probe",
-			Execute:  func(context.Context, []string) int { return 0 },
-		}}, newTheme(false))
-		m = resize(m, size.w, size.h)
+func TestLayoutOffersNoRegionWithoutContent(t *testing.T) {
+	// A tool with no capabilities and nothing running gets the whole width, on
+	// any terminal. This is the rule that keeps an empty column from appearing
+	// beside a working session.
+	for _, w := range []int{40, 80, 200} {
+		l := LayoutFor(w, 40, LayoutOptions{})
+		if l.ShowRegions {
+			t.Errorf("width %d: regions offered with nothing to show", w)
+		}
+		if l.Transcript != w {
+			t.Errorf("width %d: transcript = %d, want the full %d", w, l.Transcript, w)
+		}
+	}
+}
 
-		// A deliberately hostile block: long lines that the viewport has to
-		// wrap, which is exactly what tool help text and capability tables do.
-		var rows []string
-		for i := 0; i < 40; i++ {
-			rows = append(rows, "nzinga.simulation.dns.resolve   Offline simulation dataset "+
-				strings.Repeat("detail ", 18)+" simulation   S1   no")
-		}
-		b := newBlock(1, []string{"capabilities"})
-		b.started, b.finished = time.Now().Add(-2*time.Second), time.Now()
-		b.status = StatusDone
-		for _, r := range rows {
-			b.addEvent(Event{Event: "capability.listed", Level: "info",
-				Data: map[string]any{"raw": r}})
-		}
-		m = addBlock(m, b)
-
-		lines := strings.Split(strings.TrimRight(m.View(), "\n"), "\n")
-		if len(lines) != size.h {
-			t.Errorf("%dx%d: View() is %d lines, want exactly %d", size.w, size.h, len(lines), size.h)
-		}
-		for i, l := range lines {
-			if w := len([]rune(l)); w > size.w {
-				t.Errorf("%dx%d: line %d is %d runes and would wrap", size.w, size.h, i, w)
+func TestLayoutTranscriptAlwaysFits(t *testing.T) {
+	// The invariant the whole component set rests on: transcript + regions +
+	// separators is never wider than the terminal, and the transcript is never
+	// zero, at any width and any combination of offered regions.
+	//
+	// It is also an equality, not an inequality, and that is the point. An
+	// inequality passes while the transcript is handed fewer columns than the
+	// layout promised it, and the composer then clamps every line to make them
+	// fit -- ellipsising the transcript in exactly the space the region vacated.
+	for _, w := range []int{1, 20, 59, 60, 61, 80, 100, 120, 121, 200, 400} {
+		for _, opts := range []LayoutOptions{
+			{}, {Navigation: true}, {Activity: true},
+			{Navigation: true, Activity: true},
+		} {
+			l := LayoutFor(w, 40, opts)
+			if l.Transcript < 1 {
+				t.Errorf("width %d opts %+v: transcript = %d, want at least 1", w, opts, l.Transcript)
+			}
+			used := l.Transcript + regionColumns(l.Navigation, l.Activity)
+			if used > w {
+				t.Errorf("width %d opts %+v: columns total %d, over the terminal width", w, opts, used)
+			}
+			if used != w {
+				t.Errorf("width %d opts %+v: columns total %d, want the terminal exactly", w, opts, used)
+			}
+			if l.ShowRegions && l.Navigation == 0 && l.Activity == 0 {
+				t.Errorf("width %d opts %+v: ShowRegions with no region", w, opts)
 			}
 		}
 	}
 }
 
-// Long output has to be wrapped, not truncated: a truncated capability table
-// loses the column the operator was reading.
-func TestLongToolOutputIsWrappedNotTruncated(t *testing.T) {
-	m := newModel(Config{Title: "QYVORA / PROBE", Version: "0.1.0", Runner: &InProcessRunner{
-		ToolName: "probe",
-		Execute:  func(context.Context, []string) int { return 0 },
-	}}, newTheme(false))
-	m = resize(m, 72, 24)
-
-	marker := "OFFLINE-SIMULATION-DATASET-TAIL"
-	b := newBlock(1, []string{"capabilities"})
-	b.started, b.finished = time.Now().Add(-time.Second), time.Now()
-	b.status = StatusDone
-	// The line is what the tool printed, not an event: it has no envelope.
-	b.addOutput(strings.Repeat("nzinga.simulation.dns.resolve   ", 3) + marker)
-	m = addBlock(m, b)
-
-	body := m.viewport.View()
-	if !strings.Contains(body, marker) {
-		t.Errorf("output was cut off instead of wrapped; transcript was:\n%s", body)
+func TestLayoutIgnoresNonsensicalSizes(t *testing.T) {
+	// A zero or negative size reaches the layout on a terminal that reports one
+	// during teardown. It must not produce a negative column width for a region
+	// to render into.
+	for _, w := range []int{0, -1, -100} {
+		l := LayoutFor(w, 40, LayoutOptions{Navigation: true, Activity: true})
+		if l.Transcript < 1 {
+			t.Errorf("width %d: transcript = %d", w, l.Transcript)
+		}
+		if l.Navigation < 0 || l.Activity < 0 {
+			t.Errorf("width %d: negative region width (%d, %d)", w, l.Navigation, l.Activity)
+		}
 	}
 }
 
-// A character device is not a terminal.
-//
-// This is a regression test for a wrong answer that mattered. The check used
-// to ask whether the stream was a character device, which /dev/null, /dev/zero
-// and every similar device satisfy. A session was therefore launched into
-// streams with nobody watching, drew nothing, consumed the operator's
-// keystrokes, and reported a failure for a command that had run correctly --
-// and `tool tui >/dev/null 2>/dev/null` behaved differently from the same
-// command with its output sent to a file.
-func TestIsTerminalRejectsNonTerminalCharacterDevices(t *testing.T) {
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		t.Skipf("cannot open %s: %v", os.DevNull, err)
+func TestLayoutHeightGatesRegions(t *testing.T) {
+	// A region needs vertical room to be worth anything. On a very short
+	// terminal it is dropped rather than squeezed: a 3-line activity region
+	// next to a 5-line transcript helps nobody.
+	l := LayoutFor(200, 3, LayoutOptions{Navigation: true, Activity: true})
+	if l.ShowRegions {
+		t.Error("regions offered on a 3-line terminal")
 	}
-	defer devNull.Close()
-
-	// Confirm the premise: this really is a character device, so the old check
-	// really would have accepted it.
-	info, err := devNull.Stat()
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if info.Mode()&os.ModeCharDevice == 0 {
-		t.Skipf("%s is not a character device on this platform", os.DevNull)
-	}
-
-	if isTerminal(devNull) {
-		t.Errorf("isTerminal(%s) = true; a character device is not a terminal", os.DevNull)
-	}
-	if IsInteractive(devNull) {
-		t.Errorf("IsInteractive(%s) = true; nothing is watching that stream", os.DevNull)
+	if l.Transcript != 200 {
+		t.Errorf("transcript = %d, want the full 200", l.Transcript)
 	}
 }
 
-// Run must refuse a non-terminal even when the caller did not pre-check, and it
-// must say so in the way tools are expected to recognise.
-func TestRunRefusesWhenOutputIsNotATerminal(t *testing.T) {
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		t.Skipf("cannot open %s: %v", os.DevNull, err)
+func TestLayoutIsStableForAStableSize(t *testing.T) {
+	// The transcript width must not vary between renders, or a region and the
+	// viewport disagree and the columns shear.
+	first := LayoutFor(100, 40, LayoutOptions{Navigation: true, Activity: true})
+	for i := 0; i < 5; i++ {
+		l := LayoutFor(100, 40, LayoutOptions{Navigation: true, Activity: true})
+		if l != first {
+			t.Fatalf("layout is not deterministic: %+v then %+v", first, l)
+		}
 	}
-	defer devNull.Close()
+}
 
-	code, err := Run(Config{
-		Title:  "QYVORA / PROBE",
-		Runner: &InProcessRunner{ToolName: "probe", Execute: func(context.Context, []string) int { return 0 }},
-		Out:    devNull,
-	})
-	if !IsNotInteractive(err) {
-		t.Errorf("Run into %s: err = %v, want a not-interactive error", os.DevNull, err)
+func TestComposeRegionsAlignsColumns(t *testing.T) {
+	// The failure this guards against is the classic one: a viewport returns
+	// short lines, the regions have their own heights, and without padding the
+	// right-hand column slides up as the transcript scrolls.
+	mid := "aaa\nb\ncccc"
+	left := "L1\nL2\nL3\nL4"
+	right := "R1\nR2"
+	for _, w := range []int{40, 60, 100} {
+		lw, rw := 16, 16
+		out := strings.Split(composeRegions(mid, w-lw-rw-2, left, lw, right, rw, w), "\n")
+		if len(out) != 4 {
+			t.Fatalf("width %d: got %d lines, want 4", w, len(out))
+		}
+		for i, line := range out {
+			if got := lipgloss.Width(line); got > w {
+				t.Errorf("width %d line %d is %d wide, over the terminal", w, i, got)
+			}
+			if got := lipgloss.Width(line); got != w {
+				t.Errorf("width %d line %d is %d wide, want the terminal exactly", w, i, got)
+			}
+		}
+		// The columns are in the same place on every line, or the right-hand
+		// column slides as the transcript scrolls.
+		for i, line := range out {
+			if i >= 2 {
+				continue
+			}
+			plain := stripANSI(line)
+			if idx := strings.Index(plain, "R"); idx < lw+1 {
+				t.Errorf("width %d: line %d has the right column at %d: %q", w, i, idx, plain)
+			}
+		}
+		// A line with no right-region content is padded, not skipped, so the
+		// column above it is not orphaned.
+		if !strings.HasPrefix(stripANSI(out[0]), "L1") {
+			t.Errorf("width %d: line 0 = %q", w, stripANSI(out[0]))
+		}
 	}
-	if code != 1 {
-		t.Errorf("Run into %s: code = %d, want 1", os.DevNull, code)
+}
+
+func TestComposeRegionsHandlesUnevenSides(t *testing.T) {
+	// One region only, and regions taller than the transcript. Both directions
+	// occur: a long capability list beside a short command, and a long run
+	// beside a short registry.
+	if got := composeRegions("x", 30, "", 0, "R1\nR2", 10, 40); !strings.Contains(got, "R2") {
+		t.Errorf("right region shorter than the transcript was lost: %q", got)
+	}
+	if got := composeRegions("x\ny", 30, "L1", 10, "", 0, 40); !strings.Contains(got, "y") {
+		t.Errorf("transcript lost when only a left region was present: %q", got)
+	}
+	if got := composeRegions("x", 30, "L1\nL2\nL3", 10, "", 0, 40); !strings.Contains(got, "L3") {
+		t.Errorf("left region taller than the transcript was lost: %q", got)
+	}
+	if got := composeRegions("x", 40, "", 0, "", 0, 40); !strings.Contains(got, "x") {
+		t.Errorf("the transcript was lost with no regions at all: %q", got)
+	}
+}
+
+func TestComposeRegionsDoesNotEllipsiseTheTranscript(t *testing.T) {
+	// The regression that made this function take explicit widths: measuring the
+	// middle column gave the full terminal width, so every transcript line was
+	// clamped and came out with an ellipsis where the region now was.
+	w, lw, rw := 100, 20, 20
+	mid := strings.Repeat("x", w-lw-rw-2)
+	out := stripANSI(composeRegions(mid, w-lw-rw-2, "L1", lw, "R1", rw, w))
+	if strings.Contains(out, "…") {
+		t.Errorf("the transcript was ellipsised:\n%s", out)
+	}
+	if lipgloss.Width(out) != w {
+		t.Errorf("line is %d wide, want %d", lipgloss.Width(out), w)
 	}
 }
