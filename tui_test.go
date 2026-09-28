@@ -98,6 +98,29 @@ func TestUnknownEventTypesAreRetained(t *testing.T) {
 	}
 }
 
+// In-place progress redraws must collapse to their final state, or a tool
+// that livens its progress with \r rewrites dumps control characters into the
+// transcript.
+func TestReadEventsCollapsesInPlaceRedrawsToTheLastState(t *testing.T) {
+	var buf bytes.Buffer
+	buf.WriteString("\rProbing [===] 10% (5/50)\rProbing [=====] 40% (20/50)\rProbing [========] 100% (50/50)\n")
+	buf.WriteString("plain line\n")
+
+	var text []string
+	readEvents(&buf, func(Event) {}, func(line string) { text = append(text, line) })
+
+	if len(text) != 2 {
+		t.Fatalf("text lines = %d, want 2", len(text))
+	}
+	want := "Probing [========] 100% (50/50)"
+	if text[0] != want {
+		t.Errorf("collapsed line = %q, want %q", text[0], want)
+	}
+	if text[1] != "plain line" {
+		t.Errorf("plain line changed: %q", text[1])
+	}
+}
+
 func TestProgressAcceptsBothPercentConventions(t *testing.T) {
 	b := newBlock(1, nil)
 	b.addEvent(Event{Event: EventProgressUpdated, Data: map[string]any{"percent": 0.5}})
@@ -301,6 +324,30 @@ func TestViewRendersAnExecutionBlock(t *testing.T) {
 	for _, want := range []string{"scan", "example.com", "Findings", "open redirect", "Artifacts", "report.json", "completed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A running command's own output must appear while it runs, not only after it
+// finishes. A scan that prints as it works otherwise looks like a blank
+// screen for its whole duration.
+func TestRunningBlockStreamsTheToolsOutput(t *testing.T) {
+	th := newTheme(false, nil)
+	m := newModel(Config{Title: "QYVORA / TEST", Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
+	m = resize(m, 100, 40)
+
+	m = addBlock(m, newBlock(1, []string{"scan", "example.com"}))
+	b := m.blocks[0]
+	b.status = StatusRunning
+	b.addOutput("Querying crt.sh ...")
+	b.addOutput("crt.sh found 42 potential subdomains")
+	b.addOutput("Resolving 42 candidates with 8 threads ...")
+	m = refresh(m)
+
+	out := m.View()
+	for _, want := range []string{"Querying crt.sh", "crt.sh found 42", "Resolving 42 candidates"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("running view missing streamed output %q:\n%s", want, out)
 		}
 	}
 }

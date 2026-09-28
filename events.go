@@ -74,7 +74,7 @@ func readEvents(r io.Reader, fn func(Event), text func(string)) (stats eventStat
 		if !strings.HasPrefix(line, "{") {
 			stats.Text++
 			if text != nil {
-				text(line)
+				text(visibleLine(line))
 			}
 			continue
 		}
@@ -104,6 +104,26 @@ type eventStats struct {
 	// Text counts lines of the tool's own output rather than events.
 	Text int
 	Err  error
+}
+
+// visibleLine reduces a tool-printed line to its final on-screen state.
+//
+// A tool livens its progress reading with in-place redraws: "\rProbing 10%",
+// then "\rProbing 37%", then "\rProbing 100%". To a reader that splits lines
+// on newlines those rewrites are one line full of carriage returns. Collapsing
+// to the last segment is exactly what the terminal showed, so the transcript
+// reads like the run it recorded instead of a dump of control characters.
+func visibleLine(s string) string {
+	if !strings.ContainsRune(s, '\r') {
+		return s
+	}
+	last := ""
+	for _, part := range strings.Split(s, "\r") {
+		if part != "" {
+			last = part
+		}
+	}
+	return strings.TrimRight(last, " \t")
 }
 
 // sortedKeys gives deterministic iteration over an event's data map, which

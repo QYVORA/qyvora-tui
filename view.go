@@ -391,11 +391,14 @@ func (m model) renderCommandText(command string, width int) string {
 func (m model) renderBlockBody(b *block) []string {
 	var lines []string
 
-	// A running command leads with what it is doing right now, which is the
-	// only thing that changes while it works.
+	// A running command leads with what it is doing right now, and then shows
+	// what the tool has actually printed, as it printed it. A scan that talks
+	// as it works must read like a scan on a real terminal; hiding the tool's
+	// own lines until it finishes makes a long run look dead.
 	if b.status == StatusRunning {
 		lines = append(lines, m.renderLive(b))
 		lines = append(lines, m.renderProgress(b)...)
+		lines = append(lines, m.renderOutput(b)...)
 		return lines
 	}
 
