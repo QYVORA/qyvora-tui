@@ -906,7 +906,7 @@ func (m *model) helpLines() []string {
 		m.theme.Group.Render("Keys"),
 		"  " + m.theme.Detail.Render("ctrl+c") + "   stop the running command · " + m.theme.Detail.Render("ctrl+d") + "   leave",
 		"  " + m.theme.Detail.Render("ctrl+o") + "   show or hide the raw event log",
-		"  " + m.theme.Detail.Render("pgup/pgdn") + "   scroll the session · " + m.theme.Detail.Render("ctrl+end") + "   jump to newest",
+		"  " + m.theme.Detail.Render("pgup/pgdn · shift+↑/↓") + "   scroll the session · " + m.theme.Detail.Render("ctrl+end") + "   jump to newest",
 		"  " + m.theme.Detail.Render("tab") + "         complete · " + m.theme.Detail.Render("↑/↓") + "         history",
 		"  " + m.theme.Detail.Render("F1") + "         show or hide the capability registry",
 		"",

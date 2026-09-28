@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // emit writes one well-formed envelope as JSONL.
@@ -692,5 +694,78 @@ func TestEventStreamMustBePureJSONL(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("line is not a valid envelope: %q", line)
 		}
+	}
+}
+
+// Shift+Up and Shift+Down scroll the transcript one line at a time, a per-line
+// complement to pgup/pgdn for when an output line spans the whole width.
+// Scrolling up must also release follow mode, or the next live stream chunk
+// would yank the view back to the newest output the moment the reader starts
+// to go back.
+func TestShiftArrowsScrollTheTranscript(t *testing.T) {
+	th := newTheme(false, nil)
+	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
+	m = resize(m, 100, 12) // viewport is the height minus the header and composer
+	m.running = true
+	m = addBlock(m, newBlock(1, []string{"scan", "example.com"}))
+	for i := 0; i < 30; i++ {
+		m.blocks[0].addOutput(fmt.Sprintf("result line %02d", i))
+	}
+	m.refreshViewport() // pinned to the newest output
+
+	if !m.following {
+		t.Fatal("a fresh session is not pinned to the newest output")
+	}
+	atBottom := m.viewport.YOffset
+	if atBottom <= 0 {
+		t.Fatalf("transcript fits the viewport (offset %d); the test needs overflow", atBottom)
+	}
+
+	upd, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftUp})
+	m = upd.(model)
+	if m.viewport.YOffset >= atBottom {
+		t.Errorf("shift+up did not scroll: offset %d, was %d", m.viewport.YOffset, atBottom)
+	}
+	if m.following {
+		t.Error("scrolling up must release follow mode")
+	}
+
+	// The top of the transcript must be reachable.
+	for i := 0; i < 200 && m.viewport.YOffset > 0 && !t.Failed(); i++ {
+		upd, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftUp})
+		m = upd.(model)
+	}
+	if m.viewport.YOffset != 0 {
+		t.Errorf("the top was not reachable: offset %d", m.viewport.YOffset)
+	}
+
+	// Scrolling all the way back down re-pins to the newest output.
+	prev := m.viewport.YOffset
+	for i := 0; i < 200 && !m.following && !t.Failed(); i++ {
+		upd, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftDown})
+		m = upd.(model)
+		if m.viewport.YOffset <= prev {
+			t.Errorf("shift+down did not scroll: offset %d, was %d", m.viewport.YOffset, prev)
+		}
+		prev = m.viewport.YOffset
+	}
+	if !m.following {
+		t.Errorf("reaching the newest output must re-pin follow mode, at offset %d", m.viewport.YOffset)
+	}
+}
+
+// When the whole transcript fits, shifting up is a no-op rather than an error
+// or a jump to nothing.
+func TestShiftUpIsHarmlessWhenThereIsNothingToScroll(t *testing.T) {
+	th := newTheme(false, nil)
+	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
+	m = resize(m, 100, 12)
+	upd, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftUp})
+	m = upd.(model)
+	if m.viewport.YOffset != 0 {
+		t.Errorf("shift+up moved an unscrollable viewport to offset %d", m.viewport.YOffset)
+	}
+	if !m.following {
+		t.Error("a no-op scroll must not release follow mode")
 	}
 }
