@@ -2,10 +2,7 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"io"
-	"os"
-	"sync"
 )
 
 // ExecuteArgsFunc is a tool's in-process entry point. It runs one command with
@@ -53,60 +50,6 @@ func (r *InProcessRunner) Name() string { return r.ToolName }
 func (r *InProcessRunner) Commands() []Command { return r.Meta }
 
 func (r *InProcessRunner) Run(ctx context.Context, args []string, events io.Writer) (int, error) {
-	// Serialise execution: two concurrent runs would both be writing to
-	// os.Stdout and the captured stream would interleave into nonsense.
-	var mu sync.Mutex
-	mu.Lock()
-	defer mu.Unlock()
-
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return 1, fmt.Errorf("creating event pipe: %w", err)
-	}
-
-	// The tool writes to os.Stdout; the TUI reads pr. The write end is
-	// buffered so a tool emitting events faster than the UI renders does not
-	// block on a full pipe.
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(events, pr)
-		close(done)
-	}()
-
-	// Capture at the descriptor level, not by reassigning os.Stdout. A tool
-	// that captured stdout into a variable during package initialisation keeps
-	// writing to the original handle however the variable is later assigned,
-	// so its output would appear on the terminal in the middle of the
-	// interface's own frames. Moving the descriptor catches every writer.
-	// Both streams are captured, and both end up in the same transcript. A tool
-	// writes much of what the operator asked for to standard error -- a
-	// capability table, a warning, the reason a run failed -- so capturing only
-	// stdout would leave that text drawing straight over the interface.
-	restoreOut, err := redirectStdout(pw)
-	if err != nil {
-		_ = pw.Close()
-		<-done
-		_ = pr.Close()
-		return 1, fmt.Errorf("tui: cannot capture tool output: %w", err)
-	}
-	restoreErr, err := redirectStderr(pw)
-	if err != nil {
-		// Undo the first half before giving up, or the tool's output would keep
-		// going to a pipe nobody is reading.
-		restoreOut()
-		_ = pw.Close()
-		<-done
-		_ = pr.Close()
-		return 1, fmt.Errorf("tui: cannot capture tool diagnostics: %w", err)
-	}
-	restore := func() {
-		restoreErr()
-		restoreOut()
-	}
-
 	full := append([]string{}, r.Prefix...)
 	full = append(full, r.eventFlag()...)
 	full = append(full, args...)
@@ -114,14 +57,14 @@ func (r *InProcessRunner) Run(ctx context.Context, args []string, events io.Writ
 	// The tool must not inherit a cancelled context from a previous run, and
 	// it needs a context that is cancelled when ctx is, so Ctrl+C stops the
 	// work rather than merely the UI.
-	code := r.Execute(ctx, full)
-
-	restore()
-	// Closing the write end is what lets the copy goroutine observe EOF.
-	_ = pw.Close()
-	wg.Wait()
-	_ = pr.Close()
-	<-done
+	var code int
+	err := Capture(events, func() error {
+		code = r.Execute(ctx, full)
+		return nil
+	})
+	if err != nil {
+		return 1, err
+	}
 
 	if ctx.Err() != nil && code == 0 {
 		// The tool finished cleanly despite the interrupt; report the
