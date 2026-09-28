@@ -32,12 +32,17 @@ import (
 // If fn returns an error, it is returned unchanged, and the streams are always
 // restored even then: leaving standard error pointed at a dead pipe would make
 // the next write fail, turning one failed command into a broken process.
+// captureMu is package-level on purpose. A mutex declared inside Capture would
+// be created fresh on every call and so would guard nothing: two overlapping
+// captures would both point the descriptors at their own pipe, the later
+// install winning, and each caller would end up with a half-foreign transcript.
+var captureMu sync.Mutex
+
 func Capture(dst io.Writer, fn func() error) error {
 	// Serialise: two overlapping captures would interleave into the same pipe
 	// and hand each caller a half-foreign transcript.
-	var mu sync.Mutex
-	mu.Lock()
-	defer mu.Unlock()
+	captureMu.Lock()
+	defer captureMu.Unlock()
 
 	if dst == nil {
 		return fmt.Errorf("tui: capture needs an output writer")

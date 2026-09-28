@@ -2,8 +2,11 @@ package tui
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -141,5 +144,51 @@ func TestCaptureRestoresQuicklyForManyRuns(t *testing.T) {
 			t.Fatalf("run %d: %v", i, err)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// The mutex that serialises captures has to outlive the call, or two concurrent
+// captures both install their pipe and the later one wins: every writer lands in
+// the same transcript and the other caller sees nothing but foreign output. This
+// is the failure the comment claims to prevent, so it is worth a test that fails
+// when the lock is function-local.
+func TestCaptureSerialisesOverlappingCalls(t *testing.T) {
+	const callers = 4
+
+	var (
+		buffers = make([]bytes.Buffer, callers)
+		start   = make(chan struct{})
+		wg      sync.WaitGroup
+	)
+	for i := range callers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Line up every goroutine so the captures genuinely overlap
+			// rather than happening to run one after another.
+			<-start
+			_ = Capture(&buffers[i], func() error {
+				for n := range 20 {
+					fmt.Fprintf(os.Stdout, "caller%d-line%d\n", i, n)
+					runtime.Gosched()
+				}
+				return nil
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range callers {
+		got := buffers[i].String()
+		if got == "" {
+			t.Errorf("caller %d captured nothing: its transcript went to another caller", i)
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+			if want := fmt.Sprintf("caller%d-line", i); !strings.HasPrefix(line, want) {
+				t.Fatalf("caller %d transcript contains foreign line %q", i, line)
+			}
+		}
 	}
 }
