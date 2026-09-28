@@ -152,6 +152,13 @@ type model struct {
 	following bool
 	// showEvents reveals the raw event log beneath each execution.
 	showEvents bool
+	// regionFocus routes the keyboard to the executions region rather than the
+	// composer. execSel is the execution entry the region is focused on, and
+	// execOffset is the region's own scroll offset when its history outgrows
+	// the column it is drawn in.
+	regionFocus bool
+	execSel     int
+	execOffset  int
 
 	width  int
 	height int
@@ -240,6 +247,11 @@ func Run(cfg Config) (int, error) {
 		tea.WithContext(context.Background()),
 		tea.WithOutput(render),
 		tea.WithInput(in),
+		// Cell motion reporting gives the wheel and click handling their
+		// coordinates: a right-hand region has to know which column a click
+		// landed in before it can decide whether the transcript or the
+		// executions list was addressed.
+		tea.WithMouseCellMotion(),
 	)
 	final, err := p.Run()
 	if err != nil {
@@ -301,14 +313,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.input.Width = max(8, msg.Width-lipgloss.Width(m.input.Prompt)-2)
-		// The viewport owns everything between the header rule and the
-		// composer: header, rule, viewport, composer.
-		vpHeight := msg.Height - 4
-		if vpHeight < 1 {
-			vpHeight = 1
-		}
-		m.applyLayout(msg.Width, msg.Height, vpHeight)
+		m.applyLayout(msg.Width, msg.Height)
 		m.refreshViewport()
 		return m, nil
 
@@ -354,13 +359,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Capabilities arriving after startup: the interface adopts them
 		// without a restart.
 		m.caps = msg.caps
-		m.applyLayout(m.width, m.height, m.viewport.Height)
+		m.applyLayout(m.width, m.height)
 		m.refreshViewport()
 		return m, nil
 
 	case noticeMsg:
 		m.notices = append(m.notices, msg.text)
 		return m, nil
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -396,9 +404,9 @@ func (m *model) finish(msg runDoneMsg) {
 			m.state = stateReady
 		}
 	}
-	// With the run over the activity region goes away, and the transcript takes
-	// its width back.
-	m.applyLayout(m.width, m.height, m.viewport.Height)
+	// With the run over the possibly-wider executions region takes over from
+	// the narrower live view, and the transcript is rebuilt at its new width.
+	m.applyLayout(m.width, m.height)
 	m.refreshViewport()
 }
 
@@ -409,6 +417,27 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// cannot be used.
 	if m.form != nil {
 		return m.handleFormKey(msg)
+	}
+
+	// The executions region takes the keyboard while it is focused. A few keys
+	// leave it rather than being eaten: the session must stay stoppable and
+	// quittable from anywhere, and Tab/Esc/F2 are the way back to the composer.
+	// Every other key -- a letter, a scroll chord -- releases the region and
+	// falls through to the composer, so typing while the region is focused
+	// returns to the prompt and lands in it.
+	if m.regionFocus {
+		switch msg.Type {
+		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyEsc, tea.KeyTab, tea.KeyF2:
+			m.regionFocus = false
+			m.refreshViewport()
+		case tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown,
+			tea.KeyHome, tea.KeyEnd, tea.KeyCtrlA, tea.KeyCtrlE,
+			tea.KeyEnter, tea.KeySpace:
+			return m.handleRegionKey(msg)
+		default:
+			m.regionFocus = false
+			m.refreshViewport()
+		}
 	}
 
 	switch msg.Type {
@@ -440,7 +469,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// built-in word, because the registry is a reference to consult, not a
 		// command to run, and it must stay discoverable.
 		m.showCapabilities = !m.showCapabilities
-		m.applyLayout(m.width, m.height, m.viewport.Height)
+		m.applyLayout(m.width, m.height)
+		m.refreshViewport()
+		return m, nil
+
+	case tea.KeyF2:
+		// F2 moves focus between the composer and the executions region. The
+		// region is the navigator for the session's history, which is what a
+		// second focus target needs to have: it has rows worth selecting.
+		if m.canFocusRegion() {
+			m.regionFocus = !m.regionFocus
+		}
 		m.refreshViewport()
 		return m, nil
 
@@ -575,6 +614,10 @@ func (m *model) submit() tea.Cmd {
 	case "clear", "cls":
 		m.blocks = nil
 		m.notices = nil
+		m.regionFocus = false
+		m.execSel = 0
+		m.execOffset = 0
+		m.applyLayout(m.width, m.height)
 		m.refreshViewport()
 		return nil
 	case "quit", "exit", ":q":
@@ -638,7 +681,11 @@ func (m *model) start(args []string) tea.Cmd {
 	// rebuilt at its new width now. Deferring this to the next resize would leave
 	// the transcript clipped to the old width, with every line truncated and an
 	// ellipsis where the region now is.
-	m.applyLayout(m.width, m.height, m.viewport.Height)
+	//
+	// The newest execution becomes the region's selected entry; running work is
+	// what an operator focuses on, and the region leads with it.
+	m.execSel = 0
+	m.applyLayout(m.width, m.height)
 
 	// A per-execution child context, never a shared or root one. Ctrl+C
 	// cancels this execution and nothing else, and the next execution starts
@@ -909,6 +956,8 @@ func (m *model) helpLines() []string {
 		"  " + m.theme.Detail.Render("pgup/pgdn · shift+↑/↓") + "   scroll the session · " + m.theme.Detail.Render("ctrl+end") + "   jump to newest",
 		"  " + m.theme.Detail.Render("tab") + "         complete · " + m.theme.Detail.Render("↑/↓") + "         history",
 		"  " + m.theme.Detail.Render("F1") + "         show or hide the capability registry",
+		"  " + m.theme.Detail.Render("F2") + "         focus executions · " + m.theme.Detail.Render("enter/space") + "   expand a run",
+		"  " + m.theme.Detail.Render("wheel") + "        scroll · " + m.theme.Detail.Render("click") + "            select and jump",
 		"",
 		m.theme.Group.Render("Built-ins") + "  " + m.theme.Detail.Render("help · clear · quit"),
 		m.theme.Group.Render("Commands ") + strings.Join(commandNames(m.runner.Commands()), " · "),
@@ -1014,7 +1063,7 @@ func (m *model) openFormFor(id string) {
 	}
 	m.form = f
 	m.showCapabilities = true
-	m.applyLayout(m.width, m.height, m.viewport.Height)
+	m.applyLayout(m.width, m.height)
 	m.refreshViewport()
 }
 
@@ -1042,7 +1091,7 @@ func (m *model) openForm() {
 	case 1:
 		m.form = OpenForm(formable[0])
 		m.showCapabilities = true
-		m.applyLayout(m.width, m.height, m.viewport.Height)
+		m.applyLayout(m.width, m.height)
 	default:
 		names := make([]string, 0, len(formable))
 		for _, c := range formable {

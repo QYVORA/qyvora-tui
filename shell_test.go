@@ -109,8 +109,8 @@ func TestShellDrawsActivityWhileRunning(t *testing.T) {
 		evMsg(ev("tool.specific.thing", "error", nil)),
 	})
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "ACTIVITY") {
-		t.Errorf("no activity region while running:\n%s", out)
+	if !strings.Contains(out, "EXECUTIONS") {
+		t.Errorf("no executions region while running:\n%s", out)
 	}
 	// The error is the thing an operator is looking for, so it leads.
 	if !strings.Contains(out, "error") {
@@ -143,7 +143,7 @@ func TestShellChargesNoColumnsForARegionThatIsNotDrawn(t *testing.T) {
 	// would be drawn into no columns at all.
 	m := modelFor(t, 60, 40, caps)
 	m.start([]string{"scan"})
-	if r := m.activityRegion(0); r != nil {
+	if r := m.executionsRegion(0); r != nil {
 		t.Error("a region was built at zero width")
 	}
 	if r := m.capabilitiesRegion(0); r != nil {
@@ -275,7 +275,7 @@ func TestShellRendersInPlainMode(t *testing.T) {
 	if strings.Contains(out, "\x1b") {
 		t.Error("the plain theme emitted an escape sequence")
 	}
-	for _, want := range []string{"CAPABILITIES", "ACTIVITY", "Profile target baseline", "run"} {
+	for _, want := range []string{"CAPABILITIES", "EXECUTIONS", "Profile target baseline", "run"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("plain mode lost %q:\n%s", want, out)
 		}

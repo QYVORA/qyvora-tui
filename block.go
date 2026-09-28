@@ -69,14 +69,18 @@ type eventRow struct {
 	Data   map[string]any
 }
 
+// outputCap is how many lines of a command's printed output a block retains.
+// A command that prints without limit must not grow the transcript until the
+// interface stalls, and the tail is kept because that is where a failure and
+// its explanation end up. When the cap trips, the block says so rather than
+// silently showing less.
+const outputCap = 500
+
 // addOutput records a line of the tool's printed output.
 func (b *block) addOutput(line string) {
-	// Bound it: a command that prints without limit must not grow the
-	// transcript until the interface stalls. The tail is kept, because that is
-	// where a failure and its explanation end up.
-	const maxOutputLines = 500
-	if len(b.output) >= maxOutputLines {
-		b.output = b.output[len(b.output)-maxOutputLines+1:]
+	if len(b.output) >= outputCap {
+		b.output = b.output[len(b.output)-outputCap+1:]
+		b.outputOmitted = true
 	}
 	b.output = append(b.output, line)
 }
@@ -93,6 +97,12 @@ type block struct {
 	status   Status
 	exitCode int
 
+	// expanded reveals the block's raw output in the transcript. A finished
+	// run starts collapsed so history stays readable; the executions region
+	// expands and collapses it. A running block ignores the flag and always
+	// shows live output.
+	expanded bool
+
 	rows []eventRow
 	// output holds the tool's own printed output, verbatim. It is kept apart
 	// from the event rows because it is not an event: it is whatever the
@@ -107,6 +117,11 @@ type block struct {
 	err   string
 	// cancelled records that the user, rather than the tool, ended this.
 	cancelled bool
+	// outputOmitted is true when a command printed more than outputCap lines
+	// and only the tail is retained; the interface says so rather than hiding
+	// the truncation. rowsOmitted is the same for the event log.
+	outputOmitted bool
+	rowsOmitted   bool
 }
 
 func newBlock(id int, args []string) *block {
@@ -140,6 +155,13 @@ func duration(d time.Duration) string {
 // Unrecognised event types are stored and rendered generically. A tool is
 // allowed to emit event types this build has never heard of, and dropping them
 // would make the TUI lose information the JSONL consumer still receives.
+// eventCap bounds the event log a block retains. A run that streams events
+// for hours must not grow the in-memory history without bound; the tail is
+// kept, and the Events view says so. The per-run activity counts are separate,
+// so bounding the log does not under-report a run -- it only limits what a
+// single block is willing to keep around for expansion.
+const eventCap = 2000
+
 func (b *block) addEvent(ev Event) {
 	row := eventRow{
 		At:     ev.Timestamp,
@@ -151,6 +173,10 @@ func (b *block) addEvent(ev Event) {
 	}
 	if row.At.IsZero() {
 		row.At = time.Now()
+	}
+	if len(b.rows) >= eventCap {
+		b.rows = b.rows[len(b.rows)-eventCap+1:]
+		b.rowsOmitted = true
 	}
 	b.rows = append(b.rows, row)
 	b.known = len(b.rows)

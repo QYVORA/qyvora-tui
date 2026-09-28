@@ -56,12 +56,20 @@ func (m model) View() string {
 	// here is what keeps the region widths and the drawn regions from
 	// disagreeing.
 	//
-	// This is the pure half of applyLayout. It deliberately does not touch the
-	// viewport, because View is a value method and rebuilding the viewport would
-	// discard the scroll position the operator set.
+	// This is the pure half of applyLayout. View is a value method, so anything
+	// done here is discarded by the time the program's model carries on: the
+	// rebox below reflows a copy of the viewport and cannot disturb the real
+	// widget or the scroll position the operator set.
 	m.layout = m.resolveLayout(m.width)
+
+	// The viewport may still sit at the dimensions of an earlier layout: a
+	// block was appended, a region toggled, the terminal resized. Reflow it on
+	// this copy so the mid column is exactly as wide as the layout granted the
+	// transcript -- otherwise composeRegions trims lines back onto "…".
+	m = m.rebox()
+
 	left := m.capabilitiesRegion(m.layout.Navigation)
-	right := m.activityRegion(m.layout.Activity)
+	right := m.executionsRegion(m.layout.Activity)
 
 	// The widths come from the layout, and the regions are rendered at exactly
 	// the widths it granted them, so the columns tile the terminal.
@@ -96,6 +104,14 @@ func (m model) View() string {
 		b.WriteString(m.viewport.View())
 	}
 	b.WriteString("\n")
+
+	// The row between the transcript and the composer is the session's pulse:
+	// while the operator is following the newest output it is silent, and the
+	// moment they scroll back it reports how much has appeared below the fold.
+	if len(m.blocks) > 0 {
+		b.WriteString(m.renderStrip())
+		b.WriteString("\n")
+	}
 
 	if m.form != nil {
 		// The form replaces the composer while it is open. Two input lines at
@@ -246,31 +262,23 @@ func padTo(line string, width int) string {
 }
 
 // renderHeader draws the tool identity and session state on one line.
+//
+// The identity leads: a brand mark and the tool's name, with the version
+// trailing faintly. The state is a status pill on the right, written with both
+// a symbol and a word so a monochrome terminal still reads it. Colour in the
+// resting header is the brand mark and the pill alone; everything between is
+// text.
 func (m model) renderHeader() string {
 	title := m.cfg.Title
 	if title == "" {
 		title = "QYVORA"
 	}
+	left := m.theme.Title.Render("▇ ") + m.theme.Title.Render(title)
 	if m.cfg.Version != "" {
-		title += "  " + m.cfg.Version
+		left += "  " + m.theme.Version.Render(m.cfg.Version)
 	}
 
-	left := m.theme.Title.Render(title)
-
-	right := ""
-	switch {
-	case m.running:
-		right = m.theme.Running.Render(spinnerFrames[m.spinner] + " running " + duration(time.Since(m.started)))
-	case len(m.notices) > 0 && m.lastNoticeIsError():
-		right = m.theme.Failed.Render("error")
-	case m.following == false:
-		// The user has scrolled back; say so, because new output is arriving
-		// below the fold and silently not being seen is disorienting.
-		right = m.theme.Hint.Render("paused · Ctrl+End to follow")
-	default:
-		right = m.theme.Ready.Render("ready")
-	}
-
+	right := m.statusPill()
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		// Too narrow to sit side by side. The identity matters more than the
@@ -280,12 +288,40 @@ func (m model) renderHeader() string {
 	return clampLine(left+strings.Repeat(" ", gap)+right, m.width)
 }
 
-func (m model) lastNoticeIsError() bool {
-	if len(m.notices) == 0 {
-		return false
+// statusPill renders the session's state as a symbol-plus-word pill, the way a
+// professional interface writes a status: the symbol and its text always travel
+// together, so neither colour nor a single glyph has to carry the meaning alone.
+func (m model) statusPill() string {
+	switch {
+	case m.running:
+		return m.theme.Running.Render(spinnerFrames[m.spinner] + " RUNNING · " + duration(time.Since(m.started)))
+	case m.state == stateCancelled:
+		return m.theme.Cancelled.Render("■ CANCELLED")
+	case m.state == stateFailed:
+		return m.theme.Failed.Render("✕ FAILED")
+	case m.following == false:
+		// The user has scrolled back; say so, because new output is arriving
+		// below the fold and silently not being seen is disorienting.
+		return m.theme.Hint.Render("⤓ PAUSED")
+	default:
+		return m.theme.Ready.Render("● ready")
 	}
-	return strings.HasPrefix(m.notices[len(m.notices)-1], "Error:") ||
-		strings.Contains(m.notices[len(m.notices)-1], "failed")
+}
+
+// renderStrip is the row between the transcript and the composer. It is the
+// session's pulse: silent while the operator follows the newest output, and
+// once they scroll back it reports how much has appeared below the fold. The
+// row is reserved whenever an execution exists, so the viewport does not
+// resize as follow mode toggles.
+func (m model) renderStrip() string {
+	if !m.following {
+		below := m.viewport.TotalLineCount() - (m.viewport.YOffset + m.viewport.Height)
+		if below > 0 {
+			label := fmt.Sprintf("↓ %s · ctrl+end to follow", plural(below, "new line", "new lines"))
+			return m.theme.Hint.Render("  " + label)
+		}
+	}
+	return ""
 }
 
 // renderComposer draws the bottom input bar.
@@ -325,24 +361,36 @@ func (m model) hint() string {
 	if m.form != nil {
 		return "tab next · ↑↓ field · esc cancel"
 	}
+	if m.regionFocus {
+		return "↑↓ move · enter/space expand · esc back"
+	}
 	if m.running {
 		return "ctrl+c stop"
 	}
 	if m.showCapabilities {
 		return "F1 hide · form <id> · tab complete"
 	}
-	if m.following {
-		return "tab complete · ↑↓ history · F1 capabilities"
-	}
-	return "ctrl+end latest · F1 capabilities"
+	return "F1 capabilities · tab complete · ↑↓ history"
 }
 
 // transcriptLines renders the whole session as terminal lines.
 //
 // The transcript is a flat list of lines rather than a set of widgets, which is
 // what lets the viewport scroll it and the composer stay put. A completed
-// command collapses to a compact summary; a running one shows its live state.
+// command collapses to a compact summary with its output expandable; a running
+// one shows its live state.
 func (m model) transcriptLines() []string {
+	if len(m.blocks) == 0 {
+		// A session with nothing in it explains itself rather than looking
+		// like a rendering failure. It is two lines that take no shelf space:
+		// the composer is the prompt, this is the cue.
+		if len(m.notices) == 0 {
+			return []string{
+				m.theme.Detail.Render("  ready for a command."),
+				m.theme.Detail.Render("  help for keys · F1 the registry · F2 executions"),
+			}
+		}
+	}
 	var lines []string
 	for i, b := range m.blocks {
 		if i > 0 {
@@ -394,19 +442,47 @@ func (m model) renderBlockBody(b *block) []string {
 	// A running command leads with what it is doing right now, and then shows
 	// what the tool has actually printed, as it printed it. A scan that talks
 	// as it works must read like a scan on a real terminal; hiding the tool's
-	// own lines until it finishes makes a long run look dead.
+	// own lines until it finishes makes a long run look dead. A running block
+	// is never collapsed: hiding live output while it is live is how a long run
+	// looks frozen.
 	if b.status == StatusRunning {
 		lines = append(lines, m.renderLive(b))
 		lines = append(lines, m.renderProgress(b)...)
-		lines = append(lines, m.renderOutput(b)...)
+		lines = append(lines, m.renderOutput(b, true)...)
 		return lines
 	}
 
 	lines = append(lines, m.renderSummary(b))
-	lines = append(lines, m.renderOutput(b)...)
+	lines = append(lines, m.renderResults(b))
 	lines = append(lines, m.renderGroups(b)...)
+	// A finished run's own output is collapsed to a preview line by default.
+	// The transcript is a session's history rather than a concatenated log, and
+	// a 40-line banner printed by every command is what makes history
+	// unreadable; the full text is one expand away, and the preview names its
+	// size so nothing is silently hidden.
+	lines = append(lines, m.renderOutput(b, b.expanded)...)
 	lines = append(lines, m.renderEvents(b)...)
 	return lines
+}
+
+// renderResults is the one-line tally of what a finished run produced: the
+// findings, artifacts and events it left behind. It is the compact answer to
+// "what did that do?" that a security operator asks of every command, and it
+// stays visible whether or not the run's output is expanded.
+func (m model) renderResults(b *block) string {
+	counts := []string{}
+	if n := len(b.findings); n > 0 {
+		counts = append(counts, m.theme.Success.Render(plural(n, "finding", "findings")))
+	} else {
+		counts = append(counts, m.theme.Detail.Render("no findings"))
+	}
+	if n := len(b.artifacts); n > 0 {
+		counts = append(counts, m.theme.Value.Render(plural(n, "artifact", "artifacts")))
+	}
+	if n := b.known; n > 0 {
+		counts = append(counts, m.theme.Value.Render(plural(n, "event", "events")))
+	}
+	return "  " + strings.Join(counts, " · ")
 }
 
 // renderLive is the one-line status of a running execution.
@@ -548,7 +624,11 @@ func (m model) renderEvents(b *block) []string {
 	if !m.showEvents || len(b.rows) == 0 {
 		return nil
 	}
-	lines := []string{"  " + m.theme.Group.Render("Events")}
+	head := "  " + m.theme.Group.Render("Events") + " " + m.theme.Detail.Render(plural(len(b.rows), "row", "rows"))
+	if b.rowsOmitted {
+		head += " " + m.theme.Detail.Render("(tail kept)")
+	}
+	lines := []string{head}
 	for i, row := range b.rows {
 		branch := treeBranch
 		if i == len(b.rows)-1 {
@@ -569,14 +649,30 @@ func (m model) renderEvents(b *block) []string {
 // of a table, which is the part holding the answer to the question the operator
 // asked. Wrapping keeps every column reachable and is what makes a wide
 // capability list readable in a narrow terminal.
-func (m model) renderOutput(b *block) []string {
+//
+// A finished run's output collapses to a one-line preview unless expanded: the
+// transcript reads as history, and the shape of a tool's banner is not a
+// session's content. The preview names the size -- and says when the tail is
+// being shown, so bounding a runaway command never hides its truncation.
+func (m model) renderOutput(b *block, expanded bool) []string {
 	if len(b.output) == 0 {
 		return nil
+	}
+	if !expanded {
+		note := plural(len(b.output), "line", "lines")
+		if b.outputOmitted {
+			note += " shown (tail kept)"
+		}
+		return []string{"  " + m.theme.Group.Render("Output") + " " +
+			m.theme.Hint.Render(note+" · expand with F2/enter")}
 	}
 	// A printed block is quoted under a rule rather than mixed into the tree:
 	// the tree is for results the interface understood, and this is the tool
 	// speaking for itself.
 	lines := []string{"  " + m.theme.Group.Render("Output")}
+	if b.outputOmitted {
+		lines = append(lines, "  "+m.theme.Detail.Render("(truncated to the last "+plural(outputCap, "line", "lines")+")"))
+	}
 	width := m.contentWidth() - 2
 	for _, raw := range b.output {
 		for _, line := range wrapText(raw, width) {
@@ -657,8 +753,14 @@ func clampPercent(p float64) float64 {
 }
 
 // contentWidth is the usable width of the transcript area, inside its indent.
+//
+// It follows the viewport rather than the terminal. The viewport is what
+// actually renders the transcript, and it is narrower than the terminal while a
+// side region is drawn; measuring against the terminal is how a block's lines
+// wrap to a width the viewport cannot hold and then come back truncated with an
+// ellipsis where the region now is.
 func (m model) contentWidth() int {
-	return max(24, m.width-2)
+	return max(24, m.viewport.Width-2)
 }
 
 // clampLine shortens a rendered line to fit the terminal.
@@ -716,11 +818,47 @@ func pad(s string, width int) string {
 // offered rather than imposed: a tool with no capabilities and nothing running
 // is given a full-width transcript even on a wide terminal, because an empty
 // column is worse than no column.
-func (m *model) applyLayout(width, height, vpHeight int) {
+func (m *model) applyLayout(width, height int) {
 	m.layout = m.resolveLayout(width)
 	tw := m.transcriptWidth(width)
-	m.viewport = viewport.New(max(1, tw), max(1, vpHeight))
-	m.input.Width = max(8, tw-lipgloss.Width(m.input.Prompt)-2)
+	m.viewport = viewport.New(max(1, tw), m.viewportHeight(height))
+	// The composer spans the whole terminal, not the transcript: it is the one
+	// element that addresses the operator, and its text has no indentation to
+	// reserve for.
+	m.input.Width = max(8, width-lipgloss.Width(m.input.Prompt)-2)
+}
+
+// viewportHeight is how many rows the transcript owns between the header rule
+// and the composer.
+//
+// The fixed furniture is four rows: the header, its rule, the composer's rule,
+// and the composer. Once there is any execution in the session another row goes
+// to the activity strip between the transcript and the composer -- the line
+// that reports new lines below the fold while the operator is reading history.
+// The strip is reserved rather than drawn on demand so the viewport does not
+// resize every time follow mode toggles: a viewport that changes height on a
+// scroll would move the transcript under the fingers that are using it.
+func (m *model) viewportHeight(termHeight int) int {
+	rows := termHeight - 4
+	if len(m.blocks) > 0 {
+		rows--
+	}
+	return max(1, rows)
+}
+
+// rebox reflows the viewport at the dimensions the current layout grants, on a
+// copy of the model. The scroll position the operator set is preserved:
+// SetContent reflows the history at the new width and clamps YOffset to the
+// new total, and following models stay pinned to the bottom.
+func (m model) rebox() model {
+	tw, th := m.transcriptWidth(m.width), m.viewportHeight(m.height)
+	if m.viewport.Width == tw && m.viewport.Height == th {
+		return m
+	}
+	m.viewport.Width = tw
+	m.viewport.Height = th
+	m.refreshViewport()
+	return m
 }
 
 // capabilitiesRegion builds the capability region, or nil when there is nothing
@@ -792,15 +930,35 @@ func boxedRegion(r *Region, t Theme, side int) string {
 	return r.Boxed(t, side)
 }
 
-// activityRegion builds the activity region for a running command.
+// executionsRegion builds the executions region: the session's navigator.
+//
+// It is the persistent right-hand column once any command has run: the running
+// command at the top with its live counts, the finished runs beneath it, and
+// each row expandable. It replaces the old single-purpose activity view,
+// because a run finishing is exactly when its history becomes useful, and a
+// column that vanished at that moment would be hiding the thing it had shown.
 //
 // A width of zero means the layout granted no region, and returning a region
 // anyway would charge the transcript columns for a panel that draws nothing.
-func (m model) activityRegion(width int) *Region {
-	if width <= 0 || !m.running || m.activity == nil {
+func (m model) executionsRegion(width int) *Region {
+	if width <= 0 || len(m.blocks) == 0 {
 		return nil
 	}
-	return m.activity.Region(m.theme, width)
+	r := NewRegion("EXECUTIONS", width)
+	r.Focused = m.regionFocus
+	r.Empty = "no executions"
+	entries := m.execEntries(width)
+	if len(entries) == 0 {
+		return r
+	}
+	rows, more := m.expandedRegionWindow(entries)
+	for _, line := range rows {
+		r.Add(line)
+	}
+	if more {
+		r.Add(m.theme.Hint.Render(clampLine("  ↓ scroll for older", width)))
+	}
+	return r
 }
 
 // resolveLayout resolves the geometry for a width from the model's current state.
@@ -817,14 +975,18 @@ func (m model) activityRegion(width int) *Region {
 func (m model) resolveLayout(width int) Layout {
 	l := LayoutFor(width, m.height, LayoutOptions{
 		Navigation: m.showCapabilities && m.caps != nil && len(m.caps.Items) > 0,
-		Activity:   m.running,
+		// The executions region exists for the whole session after the first
+		// command, not just while a run is in flight: a finished run's history
+		// is exactly what the navigator is for. This is what keeps the region
+		// from vanishing the moment a command completes.
+		Activity: len(m.blocks) > 0,
 	})
 	// A region that turned out to have no content gives its width back, so the
 	// transcript is not left narrower than it needs to be.
 	if l.Navigation > 0 && m.capabilitiesRegion(l.Navigation) == nil {
-		l = LayoutFor(width, m.height, LayoutOptions{Activity: m.running})
+		l = LayoutFor(width, m.height, LayoutOptions{Activity: len(m.blocks) > 0})
 	}
-	if l.Activity > 0 && m.activityRegion(l.Activity) == nil {
+	if l.Activity > 0 && m.executionsRegion(l.Activity) == nil {
 		l = LayoutFor(width, m.height, LayoutOptions{
 			Navigation: m.showCapabilities && m.caps != nil && len(m.caps.Items) > 0,
 		})
