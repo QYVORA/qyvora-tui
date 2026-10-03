@@ -4,7 +4,8 @@ package tui
 
 import (
 	"os"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // detachTerminal returns a private duplicate of the process's standard output
@@ -20,7 +21,7 @@ import (
 // value, because the point is to hold the same underlying terminal while
 // stdout itself is moved elsewhere.
 func detachTerminal() (*os.File, func(), error) {
-	saved, err := syscall.Dup(syscall.Stdout)
+	saved, err := unix.Dup(unix.Stdout)
 	if err != nil {
 		// Without a private handle there is no safe way to redirect stdout, so
 		// report it and let the caller fall back to a subprocess, whose output
@@ -29,7 +30,7 @@ func detachTerminal() (*os.File, func(), error) {
 	}
 	// Clear the close-on-exec flag: this duplicate must survive exec, because
 	// it is the handle the interface keeps drawing to.
-	syscall.CloseOnExec(saved)
+	unix.CloseOnExec(saved)
 	real := os.NewFile(uintptr(saved), "/dev/tty-render")
 	restore := func() {
 		if real != nil {
@@ -49,16 +50,16 @@ func detachTerminal() (*os.File, func(), error) {
 // land on the terminal in the middle of the interface's own frames. Moving the
 // descriptor catches every writer, however it obtained its handle.
 func redirectStdout(w *os.File) (restore func(), err error) {
-	saved, err := syscall.Dup(syscall.Stdout)
+	saved, err := unix.Dup(unix.Stdout)
 	if err != nil {
 		return nil, err
 	}
 	// The copy must not be closed on exec, or a command that spawns a helper
 	// would lose the redirection halfway through.
-	syscall.CloseOnExec(saved)
+	unix.CloseOnExec(saved)
 	backing := os.NewFile(uintptr(saved), "/dev/tty-stdout-saved")
 
-	if err := syscall.Dup2(int(w.Fd()), syscall.Stdout); err != nil {
+	if err := unix.Dup2(int(w.Fd()), unix.Stdout); err != nil {
 		_ = backing.Close()
 		return nil, err
 	}
@@ -74,7 +75,7 @@ func redirectStdout(w *os.File) (restore func(), err error) {
 		}
 		once = true
 		os.Stdout = previous
-		_ = syscall.Dup2(int(backing.Fd()), syscall.Stdout)
+		_ = unix.Dup2(int(backing.Fd()), unix.Stdout)
 		_ = backing.Close()
 	}, nil
 }
@@ -88,14 +89,14 @@ func redirectStdout(w *os.File) (restore func(), err error) {
 // terminal while the interface owns the screen means that text lands in the
 // middle of the interface's own frames and tears the display apart.
 func redirectStderr(w *os.File) (restore func(), err error) {
-	saved, err := syscall.Dup(syscall.Stderr)
+	saved, err := unix.Dup(unix.Stderr)
 	if err != nil {
 		return nil, err
 	}
-	syscall.CloseOnExec(saved)
+	unix.CloseOnExec(saved)
 	backing := os.NewFile(uintptr(saved), "/dev/tty-stderr-saved")
 
-	if err := syscall.Dup2(int(w.Fd()), syscall.Stderr); err != nil {
+	if err := unix.Dup2(int(w.Fd()), unix.Stderr); err != nil {
 		_ = backing.Close()
 		return nil, err
 	}
@@ -109,7 +110,7 @@ func redirectStderr(w *os.File) (restore func(), err error) {
 		}
 		once = true
 		os.Stderr = previous
-		_ = syscall.Dup2(int(backing.Fd()), syscall.Stderr)
+		_ = unix.Dup2(int(backing.Fd()), unix.Stderr)
 		_ = backing.Close()
 	}, nil
 }
