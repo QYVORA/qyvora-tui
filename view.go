@@ -365,12 +365,12 @@ func (m model) hint() string {
 		return "↑↓ move · enter/space expand · esc back"
 	}
 	if m.running {
-		return "ctrl+c stop"
+		return "ctrl+c stop · ctrl+e export"
 	}
 	if m.showCapabilities {
 		return "F1 hide · form <id> · tab complete"
 	}
-	return "F1 capabilities · tab complete · ↑↓ history"
+	return "F1 capabilities · ctrl+e export · tab complete"
 }
 
 // transcriptLines renders the whole session as terminal lines.

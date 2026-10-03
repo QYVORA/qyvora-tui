@@ -60,9 +60,14 @@ off the pipe, so it needs no changes to the tool at all.
 | `Ctrl+C` | Stop the running execution, keeping partial results |
 | `Ctrl+C` (idle) | Quit |
 | `Ctrl+D` | Quit, when the input is empty |
+| `Ctrl+E` | Export every run's tool output and structured events to a timestamped `.log` file in the current directory |
 | `Tab` | Complete from the tool's own command registry |
 | `↑` / `↓` | Command history |
 | `help` `clear` `quit` | Built-ins, handled locally |
+
+Export writes a new file named `<tool>-session-<timestamp>.log`. Printed output
+is exported in full even when the on-screen transcript has folded older lines;
+event data is included as JSONL for later inspection.
 
 ## Licence
 

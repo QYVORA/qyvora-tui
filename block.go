@@ -78,6 +78,7 @@ const outputCap = 500
 
 // addOutput records a line of the tool's printed output.
 func (b *block) addOutput(line string) {
+	b.rawOutput = append(b.rawOutput, line)
 	if len(b.output) >= outputCap {
 		b.output = b.output[len(b.output)-outputCap+1:]
 		b.outputOmitted = true
@@ -107,7 +108,10 @@ type block struct {
 	// output holds the tool's own printed output, verbatim. It is kept apart
 	// from the event rows because it is not an event: it is whatever the
 	// command chose to print, shown as written rather than interpreted.
-	output    []string
+	output []string
+	// rawOutput retains every printed line for export; output remains bounded
+	// for responsive transcript rendering.
+	rawOutput []string
 	findings  []Finding
 	artifacts []Artifact
 	progress  progressLine

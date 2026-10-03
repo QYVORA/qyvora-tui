@@ -266,8 +266,8 @@ func Run(cfg Config) (int, error) {
 
 func newModel(cfg Config, theme Theme) model {
 	ti := textinput.New()
-	ti.Prompt = "> "
-	ti.Placeholder = "command"
+	ti.Prompt = "❯ "
+	ti.Placeholder = "enter a command"
 	ti.Focus()
 
 	vp := viewport.New(80, 20)
@@ -487,6 +487,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Reveal the raw event log. The structured stream is always retained;
 		// this only decides whether it is on screen.
 		m.showEvents = !m.showEvents
+		m.refreshViewport()
+		return m, nil
+
+	case tea.KeyCtrlE:
+		path, err := m.exportSession()
+		if err != nil {
+			m.notices = append(m.notices, "Export failed: "+err.Error())
+		} else {
+			m.notices = append(m.notices, "Exported raw session output to "+path)
+		}
 		m.refreshViewport()
 		return m, nil
 
@@ -953,6 +963,7 @@ func (m *model) helpLines() []string {
 		m.theme.Group.Render("Keys"),
 		"  " + m.theme.Detail.Render("ctrl+c") + "   stop the running command · " + m.theme.Detail.Render("ctrl+d") + "   leave",
 		"  " + m.theme.Detail.Render("ctrl+o") + "   show or hide the raw event log",
+		"  " + m.theme.Detail.Render("ctrl+e") + "   export all session output and events",
 		"  " + m.theme.Detail.Render("pgup/pgdn · shift+↑/↓") + "   scroll the session · " + m.theme.Detail.Render("ctrl+end") + "   jump to newest",
 		"  " + m.theme.Detail.Render("tab") + "         complete · " + m.theme.Detail.Render("↑/↓") + "         history",
 		"  " + m.theme.Detail.Render("F1") + "         show or hide the capability registry",
