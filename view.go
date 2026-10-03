@@ -162,7 +162,11 @@ func (m model) renderForm() string {
 		if fl.cursor > 0 && i == f.focus {
 			row += "▏"
 		}
-		b.WriteString(clampLine(row, m.width))
+		row = padTo(clampLine(row, m.width), m.width)
+		if i == f.focus {
+			row = m.theme.Surface.Render(row)
+		}
+		b.WriteString(row)
 		b.WriteString("\n")
 	}
 
@@ -285,7 +289,7 @@ func (m model) renderHeader() string {
 		// status, so the status gives way rather than both being clipped.
 		return clampLine(left, m.width)
 	}
-	return clampLine(left+strings.Repeat(" ", gap)+right, m.width)
+	return m.theme.Surface.Render(padTo(clampLine(left+strings.Repeat(" ", gap)+right, m.width), m.width))
 }
 
 // statusPill renders the session's state as a symbol-plus-word pill, the way a
@@ -344,7 +348,8 @@ func (m model) renderComposer() string {
 			line += strings.Repeat(" ", space) + hint
 		}
 	}
-	b.WriteString(clampLine(line, m.width))
+	line = padTo(clampLine(line, m.width), m.width)
+	b.WriteString(m.theme.Surface.Render(line))
 	return b.String()
 }
 
@@ -415,8 +420,8 @@ func (m model) renderBlock(b *block) []string {
 // what they ran, so the history reads as a transcript of their own session
 // rather than a log.
 func (m model) renderCommand(b *block) []string {
-	out := m.theme.Prompt.Render("> ") + m.renderCommandText(b.command, m.contentWidth())
-	return []string{out, "  "}
+	out := m.theme.Prompt.Render("❯ ") + m.renderCommandText(b.command, m.contentWidth())
+	return []string{m.theme.Surface.Render(padTo(clampLine(out, m.viewport.Width), m.viewport.Width)), "  "}
 }
 
 // renderCommandText highlights the command word and leaves the arguments

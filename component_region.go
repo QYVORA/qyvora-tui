@@ -82,20 +82,20 @@ func (r *Region) Render(t Theme) string {
 	} else {
 		title = t.Label.Render(r.Title)
 	}
-	b.WriteString(clampLine(title, r.Width))
+	b.WriteString(t.Surface.Render(padTo(clampLine(title, r.Width), r.Width)))
 	b.WriteString("\n")
-	b.WriteString(t.Border.Render(strings.Repeat("─", r.Width)))
+	b.WriteString(t.Surface.Render(t.Border.Render(strings.Repeat("─", r.Width))))
 	b.WriteString("\n")
 
 	if len(r.Rows) == 0 {
 		if r.Empty != "" {
-			b.WriteString(t.Detail.Render(clampLine(r.Empty, r.Width)))
+			b.WriteString(t.Surface.Render(padTo(t.Detail.Render(clampLine(r.Empty, r.Width)), r.Width)))
 			b.WriteString("\n")
 		}
 		return b.String()
 	}
 	for _, row := range r.Rows {
-		b.WriteString(row)
+		b.WriteString(t.Surface.Render(padTo(row, r.Width)))
 		b.WriteString("\n")
 	}
 	return b.String()

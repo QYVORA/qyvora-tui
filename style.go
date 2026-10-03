@@ -19,6 +19,18 @@ func fg(hex string) lipglossStyle {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(hex))
 }
 
+// bg returns a background-only style for filled terminal surfaces.
+func bg(hex string) lipglossStyle {
+	return lipgloss.NewStyle().Background(lipgloss.Color(hex))
+}
+
+func badgeStyle(foreground, background string) lipglossStyle {
+	return lipgloss.NewStyle().Bold(true).
+		Foreground(lipgloss.Color(foreground)).
+		Background(lipgloss.Color(background)).
+		Padding(0, 1)
+}
+
 // bold returns a bold foreground style.
 func bold(hex string) lipglossStyle {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(hex))

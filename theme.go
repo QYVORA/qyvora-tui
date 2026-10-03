@@ -231,7 +231,7 @@ func newTheme(color bool, p *Palette) Theme {
 
 		Prompt: bold(pal.Accent),
 		Hint:   fg(pal.Faint),
-		Badge:  fg(pal.Info),
+		Badge:  badgeStyle(pal.Info, pal.Surface),
 
 		Critical: fg(pal.Danger),
 		High:     fg(pal.Warning),
@@ -242,7 +242,7 @@ func newTheme(color bool, p *Palette) Theme {
 		BarFill:  fg(pal.Accent),
 		BarEmpty: fg(pal.Rule),
 
-		Surface:   fg(pal.Surface),
+		Surface:   bg(pal.Surface),
 		Border:    fg(pal.Rule),
 		Selection: bold(pal.Accent),
 		Activity:  fg(pal.Muted),
