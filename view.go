@@ -257,6 +257,15 @@ func maxLineWidth(lines []string) int {
 	return w
 }
 
+// promptGlyph marks the command line, both where it is typed and where it is
+// echoed back into the transcript.
+//
+// It is one constant because the two must agree: a transcript whose commands
+// are echoed under a different marker than the one the user types under reads
+// as two different things, and a test that hard-codes one of them silently
+// stops checking the other.
+const promptGlyph = "❯ "
+
 // padTo pads a line to a visible width.
 func padTo(line string, width int) string {
 	if gap := width - lipgloss.Width(line); gap > 0 {
@@ -420,7 +429,7 @@ func (m model) renderBlock(b *block) []string {
 // what they ran, so the history reads as a transcript of their own session
 // rather than a log.
 func (m model) renderCommand(b *block) []string {
-	out := m.theme.Prompt.Render("❯ ") + m.renderCommandText(b.command, m.contentWidth())
+	out := m.theme.Prompt.Render(promptGlyph) + m.renderCommandText(b.command, m.contentWidth())
 	return []string{m.theme.Surface.Render(padTo(clampLine(out, m.viewport.Width), m.viewport.Width)), "  "}
 }
 

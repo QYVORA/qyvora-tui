@@ -266,7 +266,7 @@ func Run(cfg Config) (int, error) {
 
 func newModel(cfg Config, theme Theme) model {
 	ti := textinput.New()
-	ti.Prompt = "❯ "
+	ti.Prompt = promptGlyph
 	ti.Placeholder = "enter a command"
 	ti.Focus()
 

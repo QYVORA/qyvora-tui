@@ -7,15 +7,33 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// A region pads every line out to its own width, because the surface style
+// paints a background and a background that stops at the end of the text leaves
+// a ragged, half-shaded column. So content is compared with the padding
+// trimmed, and the padding is asserted separately by
+// TestRegionPadsEveryLineToItsWidth.
+func trimPad(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = strings.TrimRight(l, " ")
+	}
+	return out
+}
+
+func regionLinesOf(got string) []string {
+	return strings.Split(strings.TrimRight(got, "\n"), "\n")
+}
+
 func TestRegionRendersTitleAndRows(t *testing.T) {
 	r := NewRegion("CAPABILITIES", 24)
 	r.Add("one")
 	r.Add("two")
 	got := stripANSI(r.Render(newTheme(false, nil)))
-	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	lines := regionLinesOf(got)
 	if len(lines) != 4 {
 		t.Fatalf("got %d lines, want title + rule + 2 rows:\n%s", len(lines), got)
 	}
+	lines = trimPad(lines)
 	if lines[0] != "CAPABILITIES" {
 		t.Errorf("title = %q", lines[0])
 	}
@@ -24,6 +42,18 @@ func TestRegionRendersTitleAndRows(t *testing.T) {
 	}
 	if lines[2] != "one" || lines[3] != "two" {
 		t.Errorf("rows = %q, %q", lines[2], lines[3])
+	}
+}
+
+// Every line of a region is exactly as wide as the region, so the shaded
+// surface behind the column is continuous from the title to the last row.
+func TestRegionPadsEveryLineToItsWidth(t *testing.T) {
+	r := NewRegion("R", 24)
+	r.Add("short")
+	for i, line := range regionLinesOf(r.Render(newTheme(false, nil))) {
+		if w := lipgloss.Width(line); w != 24 {
+			t.Errorf("line %d is %d wide, want 24", i, w)
+		}
 	}
 }
 
@@ -56,12 +86,22 @@ func TestRegionEmptyTextIsShownWhenSet(t *testing.T) {
 	// unset Empty field produces.
 	withText := NewRegion("CAPABILITIES", 24)
 	withText.Empty = "none published"
-	if got := stripANSI(withText.Render(newTheme(false, nil))); !strings.Contains(got, "none published") {
+	got := stripANSI(withText.Render(newTheme(false, nil)))
+	if !strings.Contains(got, "none published") {
 		t.Errorf("Empty text not shown: %q", got)
 	}
+	// The message is a row, not a decoration on the title: title, rule, message.
+	if lines := trimPad(regionLinesOf(got)); len(lines) != 3 || lines[2] != "none published" {
+		t.Errorf("Empty text is not a row of its own: %q", lines)
+	}
+
+	// An unset Empty renders no body line at all. Padding is not a body line:
+	// the surface fills every line to the region's width, so the check is on the
+	// line count rather than on trailing spaces.
 	without := NewRegion("CAPABILITIES", 24)
-	if got := stripANSI(without.Render(newTheme(false, nil))); strings.Contains(got, "  \n") {
-		t.Errorf("an unset Empty left trailing blank space: %q", got)
+	got = strings.TrimRight(stripANSI(without.Render(newTheme(false, nil))), "\n")
+	if lines := regionLinesOf(got); len(lines) != 2 {
+		t.Errorf("an unset Empty drew %d lines, want title + rule only: %q", len(lines), got)
 	}
 }
 

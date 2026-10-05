@@ -300,7 +300,10 @@ func TestViewHandlesNarrowTerminals(t *testing.T) {
 	for _, w := range []int{200, 100, 60, 40, 20, 10} {
 		m = resize(m, w, 20)
 		out := m.View()
-		if !strings.Contains(out, ">") {
+		// The composer is the prompt, so its glyph is the thing that must
+		// survive the squeeze. It is the same glyph the command line is echoed
+		// with, taken from the view rather than spelled out twice here.
+		if !strings.Contains(stripANSI(out), promptGlyph) {
 			t.Errorf("width %d: prompt missing:\n%s", w, out)
 		}
 		// No rendered line may exceed the terminal width, or the display
