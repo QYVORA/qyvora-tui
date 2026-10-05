@@ -39,6 +39,35 @@ if tui.IsNotInteractive(err) {
 it runs the tool's own binary with `--events stdout` and reads the same JSONL
 off the pipe, so it needs no changes to the tool at all.
 
+### Consuming this module
+
+Add it the ordinary way, then make sure the package is actually **imported** so
+the linker keeps it:
+
+```bash
+go get github.com/QYVORA/qyvora-tui@v0.7.1
+```
+
+```go
+import tui "github.com/QYVORA/qyvora-tui"
+```
+
+A `require` on its own is not enough. Go drops an unimported dependency from the
+build, so a tool can satisfy `go.mod` and still ship a binary with no interface
+in it. Verify the *binary*, not the manifest:
+
+```bash
+go version -m ./mytool | grep qyvora-tui
+```
+
+The line must carry an `h1:` content hash, for example
+`dep github.com/QYVORA/qyvora-tui v0.7.1 h1:...`. A version with no hash means
+the module was required but never linked.
+
+Both QYVORA checks enforce this rather than trusting review: `qyvora-conformance`
+probes every built framework, and each framework's `scripts/verify-artifact.sh`
+repeats the check against the released binary.
+
 ## Guarantees
 
 - **Non-TTY fallback.** `Run` refuses to start when stdout is not a terminal, so
