@@ -120,6 +120,17 @@ type Theme struct {
 	Version lipglossStyle
 	Rule    lipglossStyle
 
+	// Structure. These carry the shape of the interface rather than the state
+	// of the work: the gutter that groups a command with its output, and the
+	// heading, count and column styles that separate a section label from the
+	// data beneath it. They are deliberately the quietest slots in the theme,
+	// because structure is read constantly and must never compete for
+	// attention with something that actually happened.
+	Gutter  lipglossStyle
+	Heading lipglossStyle
+	Count   lipglossStyle
+	Column  lipglossStyle
+
 	// Status. These are the only saturated colours in the resting interface.
 	Ready     lipglossStyle
 	Running   lipglossStyle
@@ -204,6 +215,7 @@ func newTheme(color bool, p *Palette) Theme {
 			Medium: plain, Low: plain, Info: plain, BarFill: plain,
 			BarEmpty: plain, Surface: plain, Border: plain, Selection: plain,
 			Activity: plain,
+			Gutter:   plain, Heading: plain, Count: plain, Column: plain,
 		}
 	}
 
@@ -213,6 +225,15 @@ func newTheme(color bool, p *Palette) Theme {
 		Title:   bold(pal.Accent),
 		Version: fg(pal.Faint),
 		Rule:    fg(pal.Rule),
+
+		// Structure stays close to the ground on purpose. The gutter is the
+		// rule colour, one step above the background, so a command's body is
+		// visibly attached to its command without the attachment being the
+		// first thing the eye lands on.
+		Gutter:  fg(pal.Rule),
+		Heading: bold(pal.Muted),
+		Count:   fg(pal.Faint),
+		Column:  fg(pal.Faint),
 
 		Ready:     fg(pal.Accent),
 		Running:   fg(pal.Accent),
@@ -282,14 +303,61 @@ func noColorRequested() bool {
 	return ok
 }
 
-// severityStyle maps a severity label onto a style, defaulting to muted.
-func (t Theme) severityStyle(sev string) lipglossStyle {
-	switch strings.ToUpper(sev) {
+// severityTag renders a severity as a fixed-width uppercase word.
+//
+// The full word rather than an abbreviation: "CRITICAL" and "HIGH" are the two
+// labels an operator triages on, and shortening them to fit a column trades the
+// one thing the label exists to say for a few characters of alignment. The
+// width is fixed instead, which is what actually produces the column.
+func (t Theme) severityTag(sev string) string {
+	return pad(strings.ToUpper(severityWord(sev)), severityColWidth)
+}
+
+// severityWord is the canonical name for a severity label, folding the spelling
+// variants tools emit into one word.
+func severityWord(sev string) string {
+	switch strings.ToUpper(strings.TrimSpace(sev)) {
+	case "CRITICAL", "CRIT":
+		return "CRITICAL"
+	case "HIGH":
+		return "HIGH"
+	case "MEDIUM", "MODERATE", "MED":
+		return "MEDIUM"
+	case "LOW":
+		return "LOW"
+	case "INFO", "INFORMATIONAL", "NOTE":
+		return "INFO"
+	default:
+		return "INFO"
+	}
+}
+
+// severityRank orders severities for tallying and sorting. An unrecognised
+// label ranks below LOW rather than above it: inventing a severity is worse
+// than understating one.
+func severityRank(sev string) int {
+	switch severityWord(sev) {
+	case "CRITICAL":
+		return 4
+	case "HIGH":
+		return 3
+	case "MEDIUM":
+		return 2
+	case "LOW":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// styleForSeverityWord returns the style for a canonical severity word.
+func (t Theme) styleForSeverityWord(word string) lipglossStyle {
+	switch word {
 	case "CRITICAL":
 		return t.Critical
 	case "HIGH":
 		return t.High
-	case "MEDIUM", "MODERATE":
+	case "MEDIUM":
 		return t.Medium
 	case "LOW":
 		return t.Low
@@ -298,21 +366,20 @@ func (t Theme) severityStyle(sev string) lipglossStyle {
 	}
 }
 
-// severityTag renders a severity as a fixed-width tag, so findings line up in a
-// column no matter how long the label is.
-func (t Theme) severityTag(sev string) string {
-	switch strings.ToUpper(sev) {
-	case "CRITICAL":
-		return "CRIT"
-	case "HIGH":
-		return "HIGH"
-	case "MEDIUM", "MODERATE":
-		return "MED "
-	case "LOW":
-		return "LOW "
-	default:
-		return "INFO"
+// worstSeverity returns the most severe label present in a set of findings, or
+// an empty string when there are none. It is what lets a summary line report
+// "4 findings" in the colour of the worst of them.
+func worstSeverity(fs []Finding) string {
+	worst, rank := "", -1
+	for _, f := range fs {
+		if r := severityRank(f.Severity); r > rank {
+			rank, worst = r, severityWord(f.Severity)
+		}
 	}
+	if rank <= 0 {
+		return ""
+	}
+	return worst
 }
 
 // statusStyle maps an execution status onto its style.

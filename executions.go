@@ -115,7 +115,18 @@ func (m model) execEntryDetail(b *block, width int) []string {
 		lines = append(lines, m.theme.Detail.Render(clampLine("  "+plural(n, "event", "events"), width)))
 	}
 	if len(lines) == 0 {
-		lines = append(lines, m.theme.Detail.Render(clampLine("  no output", width)))
+		// "No output" was the wrong sentence here. A run that printed a
+		// capability table or a scan listing has output on screen -- it simply
+		// recorded no findings, artifacts or events to summarise. Saying
+		// "no output" about a run whose output was expanded two inches to the
+		// left is the kind of line that makes an operator stop trusting the
+		// panel, so the two cases are named separately.
+		if n := len(b.output); n > 0 {
+			lines = append(lines, m.theme.Detail.Render(
+				clampLine("  "+plural(n, "line", "lines")+" printed", width)))
+		} else {
+			lines = append(lines, m.theme.Detail.Render(clampLine("  no output", width)))
+		}
 	}
 	return lines
 }

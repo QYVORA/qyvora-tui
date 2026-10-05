@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,11 +13,49 @@ import (
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // tree glyphs, matching the shape a reader expects from a file tree.
+//
+// These are used only where there is real nesting to show, which after the
+// redesign is the event log. Findings and artifacts are flat lists, and drawing
+// branches for a list tells the reader there is a hierarchy that is not there.
 const (
 	treeBranch = "├─"
 	treeLeaf   = "└─"
-	treePipe   = "│ "
-	treeBlank  = "  "
+)
+
+// gutterRail is the vertical rule that runs down the left of a command's body.
+const gutterRail = "│"
+
+// The columns a finding list is built from.
+//
+// A finding is a severity and a target with a sentence between them, and the
+// sentence is what explains the other two. The severity is therefore given the
+// width of its longest real word ("CRITICAL") and the target a bounded share of
+// what is left, so every target in a run starts in the same column and the
+// titles -- the part carrying the meaning -- get the width that remains.
+//
+// Nothing here is fixed in absolute terminal columns. The title column grows
+// with the terminal instead, because a 34-character title cap left most of a
+// wide terminal empty and truncated titles mid-word while doing it.
+const (
+	// severityColWidth is the width of the severity column, set to the longest
+	// canonical severity word.
+	severityColWidth = 8
+
+	// severityRail is the coloured rule before each finding. It carries the
+	// severity to the eye before the word is read, and it is a solid block
+	// rather than a glyph so it still reads as a rail with colour switched off.
+	severityRail = "▌"
+
+	// minFindingTitle keeps a title readable when the terminal is narrow. Below
+	// this the target is given up before the title is squeezed further.
+	minFindingTitle = 18
+
+	// The bounds on the target column. A target is an address, so it is worth
+	// reserving room for it, but it is not worth more than a third of the line:
+	// a very long address truncated to a share is no more useful than one
+	// truncated to a column.
+	minFindingTarget = 12
+	maxFindingTarget = 30
 )
 
 // View renders the whole interface: a compact header, the scrolling session,
@@ -38,12 +77,8 @@ func (m model) View() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
-	// A hairline rule under the header separates identity from content without
-	// drawing a box around everything.
-	b.WriteString(m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))))
-	b.WriteString("\n")
 
-	// The viewport takes everything between the header rule and the composer.
+	// The viewport takes everything between the header band and the composer.
 	// It scrolls independently, so history stays reachable while a command runs.
 	//
 	// Regions are drawn only when the layout granted them width *and* there is
@@ -286,6 +321,11 @@ func (m model) renderHeader() string {
 	if title == "" {
 		title = "QYVORA"
 	}
+	// The identity is set in the accent and the version is dimmed beside it,
+	// which is what makes the row read as "who this is" and "which build" rather
+	// than as one run of text. It also matches the plain-text banner exactly, so
+	// the same tool looks like itself whether it is drawing a terminal or
+	// writing to a pipe.
 	left := m.theme.Title.Render("▇ ") + m.theme.Title.Render(title)
 	if m.cfg.Version != "" {
 		left += "  " + m.theme.Version.Render(m.cfg.Version)
@@ -296,9 +336,25 @@ func (m model) renderHeader() string {
 	if gap < 1 {
 		// Too narrow to sit side by side. The identity matters more than the
 		// status, so the status gives way rather than both being clipped.
-		return clampLine(left, m.width)
+		return m.band(clampLine(left, m.width))
 	}
-	return m.theme.Surface.Render(padTo(clampLine(left+strings.Repeat(" ", gap)+right, m.width), m.width))
+	return m.band(left + strings.Repeat(" ", gap) + right)
+}
+
+// band draws one full-width strip of fixed furniture.
+//
+// The header is separated from the transcript by its own background rather than
+// by a rule drawn beneath it. A rule under a row of text reads as a caption
+// above a divider and costs a row to say what a filled bar says for free: the
+// bar is unmistakably chrome, and it is the same row the identity occupies.
+func (m model) band(content string) string {
+	padded := padTo(clampLine(content, m.width), m.width)
+	if !m.theme.Color {
+		return padded
+	}
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color(m.theme.Palette.Surface)).
+		Render(padded)
 }
 
 // statusPill renders the session's state as a symbol-plus-word pill, the way a
@@ -352,14 +408,33 @@ func (m model) renderComposer() string {
 	line := m.input.View()
 	if hint := m.hint(); hint != "" {
 		hint = m.theme.Hint.Render(hint)
-		space := m.width - lipgloss.Width(line) - lipgloss.Width(hint)
-		if space >= 2 {
-			line += strings.Repeat(" ", space) + hint
+		// The input pads itself out to its full width, so the hint cannot be
+		// placed by measuring the rendered line -- that measures the padding
+		// too, always reports the terminal as full, and silently drops the
+		// hints on every terminal. The space between the cursor and the hint is
+		// measured from what was actually typed instead.
+		gap := m.width - m.composerTextWidth() - lipgloss.Width(hint)
+		if gap >= 2 {
+			line = strings.TrimRight(line, " ") + strings.Repeat(" ", gap) + hint
 		}
 	}
 	line = padTo(clampLine(line, m.width), m.width)
 	b.WriteString(m.theme.Surface.Render(line))
 	return b.String()
+}
+
+// composerTextWidth is the width the typed text actually occupies: the prompt,
+// the value, and the cursor.
+//
+// This is what the composer hint is laid out against. m.input.View() cannot be
+// used for it, because the widget fills its configured width with padding and a
+// measurement of it says the line is always as wide as the terminal.
+func (m model) composerTextWidth() int {
+	w := lipgloss.Width(m.input.Prompt) + 1 // the cursor always occupies a cell
+	if v := m.input.Value(); v != "" {
+		return w + lipgloss.Width(v)
+	}
+	return w + lipgloss.Width(m.input.Placeholder)
 }
 
 // hint returns the context-sensitive key hint on the right of the composer.
@@ -422,7 +497,30 @@ func (m model) transcriptLines() []string {
 // renderBlock renders one command and its execution as a session entry.
 func (m model) renderBlock(b *block) []string {
 	lines := m.renderCommand(b)
-	return append(lines, m.renderBlockBody(b)...)
+	return append(lines, m.gutter(m.renderBlockBody(b))...)
+}
+
+// gutter runs a faint vertical rule down the left of a command's body.
+//
+// Without it a transcript is just a list of lines, and the reader has to
+// remember which command each result belongs to -- which is exactly what is
+// hard after a few runs. With it, a command's outcome stays visibly attached to
+// the command that produced it, however long the output between them gets.
+//
+// The rule is one step above the background rather than a full border, so it
+// groups without boxing. Indentation beneath it is preserved: the body's own
+// leading spaces are replaced by the gutter, not added to, so a finding and the
+// events under it keep their relative nesting.
+func (m model) gutter(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if strings.TrimSpace(stripANSI(l)) == "" {
+			out = append(out, l)
+			continue
+		}
+		out = append(out, " "+m.theme.Gutter.Render(gutterRail)+" "+strings.TrimPrefix(l, "  "))
+	}
+	return out
 }
 
 // renderCommand echoes the command the way a terminal agent does: the user sees
@@ -430,7 +528,10 @@ func (m model) renderBlock(b *block) []string {
 // rather than a log.
 func (m model) renderCommand(b *block) []string {
 	out := m.theme.Prompt.Render(promptGlyph) + m.renderCommandText(b.command, m.contentWidth())
-	return []string{m.theme.Surface.Render(padTo(clampLine(out, m.viewport.Width), m.viewport.Width)), "  "}
+	// No spacer row after the echo. The gutter that opens the block's body is
+	// what separates the command from its results, and a blank line as well was
+	// a row spent saying the same thing.
+	return []string{m.theme.Surface.Render(padTo(clampLine(out, m.viewport.Width), m.viewport.Width))}
 }
 
 // renderCommandText highlights the command word and leaves the arguments
@@ -467,7 +568,6 @@ func (m model) renderBlockBody(b *block) []string {
 	}
 
 	lines = append(lines, m.renderSummary(b))
-	lines = append(lines, m.renderResults(b))
 	lines = append(lines, m.renderGroups(b)...)
 	// A finished run's own output is collapsed to a preview line by default.
 	// The transcript is a session's history rather than a concatenated log, and
@@ -477,26 +577,6 @@ func (m model) renderBlockBody(b *block) []string {
 	lines = append(lines, m.renderOutput(b, b.expanded)...)
 	lines = append(lines, m.renderEvents(b)...)
 	return lines
-}
-
-// renderResults is the one-line tally of what a finished run produced: the
-// findings, artifacts and events it left behind. It is the compact answer to
-// "what did that do?" that a security operator asks of every command, and it
-// stays visible whether or not the run's output is expanded.
-func (m model) renderResults(b *block) string {
-	counts := []string{}
-	if n := len(b.findings); n > 0 {
-		counts = append(counts, m.theme.Success.Render(plural(n, "finding", "findings")))
-	} else {
-		counts = append(counts, m.theme.Detail.Render("no findings"))
-	}
-	if n := len(b.artifacts); n > 0 {
-		counts = append(counts, m.theme.Value.Render(plural(n, "artifact", "artifacts")))
-	}
-	if n := b.known; n > 0 {
-		counts = append(counts, m.theme.Value.Render(plural(n, "event", "events")))
-	}
-	return "  " + strings.Join(counts, " · ")
 }
 
 // renderLive is the one-line status of a running execution.
@@ -535,7 +615,16 @@ func (m model) renderProgress(b *block) []string {
 	return []string{"  " + bar + " " + m.theme.Detail.Render(fmt.Sprintf("%3.0f%%", pct))}
 }
 
-// renderSummary is the compact one-line outcome of a finished execution.
+// renderSummary is the one-line outcome of a finished execution: what it was,
+// how long it took, and what it left behind.
+//
+// It answers "what did that do?" -- the question an operator asks of every
+// command -- in a single line. The status and the tally used to be two lines
+// that repeated the finding count between them, spending two rows to say less
+// than one does. A finished run is now one row and the count appears once.
+//
+// The finding count is drawn in the colour of the worst severity present, so a
+// glance at a finished run reports how bad it was and not only how much.
 func (m model) renderSummary(b *block) string {
 	mark := m.theme.Success.Render("✓")
 	verb := "completed"
@@ -552,79 +641,142 @@ func (m model) renderSummary(b *block) string {
 		style = m.theme.Cancelled
 	}
 
-	elapsed := duration(b.elapsed())
+	sep := m.theme.Detail.Render(" · ")
+	parts := []string{style.Render(verb + " " + duration(b.elapsed()))}
+
 	// A failed run should say why without the user having to expand it.
-	reason := ""
 	if b.err != "" {
-		reason = " · " + truncate(b.err, max(12, m.contentWidth()-34))
+		parts = append(parts, m.theme.Failed.Render(truncate(b.err, max(12, m.contentWidth()-34))))
 	}
-	// Findings are the outcome a security tool exists to produce, so they are
-	// named on the summary line rather than only inside the expanded group.
-	note := ""
-	if n := len(b.findings); n > 0 {
-		note = fmt.Sprintf(" · %s", plural(n, "finding", "findings"))
-		if b.status == StatusFailed {
-			note = ""
+
+	if n := len(b.findings); n == 0 {
+		// "No findings" is only good news from a run that actually finished its
+		// work. On a failed run it is drawn dim: a scan that died before
+		// looking is not a clean bill of health, and colouring it green says
+		// otherwise.
+		absent := m.theme.Detail
+		if b.status == StatusDone {
+			absent = m.theme.Success
 		}
+		parts = append(parts, absent.Render("no findings"))
+	} else {
+		parts = append(parts, m.theme.styleForSeverityWord(worstSeverity(b.findings)).
+			Render(plural(n, "finding", "findings")))
 	}
-	return "  " + mark + " " + style.Render(verb+" in "+elapsed) + reason +
-		m.theme.Detail.Render(note)
+	if n := len(b.artifacts); n > 0 {
+		parts = append(parts, m.theme.Value.Render(plural(n, "artifact", "artifacts")))
+	}
+	if n := b.known; n > 0 {
+		parts = append(parts, m.theme.Detail.Render(plural(n, "event", "events")))
+	}
+	return "  " + mark + " " + strings.Join(parts, sep)
 }
 
-// renderGroups renders the findings and artifacts of a finished execution as
-// compact trees, the way a terminal agent lists work it did.
+// renderGroups renders the findings and artifacts of a finished execution.
+//
+// Findings are grouped because "what did it find" is the question a security
+// tool is run to answer, and the answer is scannable only if the severity and
+// the target line up from row to row.
 func (m model) renderGroups(b *block) []string {
 	var lines []string
 
-	if len(b.findings) > 0 {
+	if n := len(b.findings); n > 0 {
 		fs := make([]Finding, len(b.findings))
 		copy(fs, b.findings)
 		sortFindings(fs)
-		lines = append(lines, "  "+m.theme.Group.Render("Findings"))
-		for i, f := range fs {
-			lines = append(lines, m.renderFinding(f, i == len(fs)-1))
+		lines = append(lines, m.groupHeading("findings", n))
+		titleW, targetW := m.findingColumns()
+		for _, f := range fs {
+			lines = append(lines, m.renderFinding(f, titleW, targetW))
 		}
 	}
 
-	if len(b.artifacts) > 0 {
-		lines = append(lines, "  "+m.theme.Group.Render("Artifacts"))
-		for i, a := range b.artifacts {
-			lines = append(lines, m.renderArtifact(a, i == len(b.artifacts)-1))
+	if n := len(b.artifacts); n > 0 {
+		lines = append(lines, m.groupHeading("artifacts", n))
+		sizeW := m.artifactSizeWidth()
+		for _, a := range b.artifacts {
+			lines = append(lines, m.renderArtifact(a, sizeW))
 		}
 	}
 	return lines
 }
 
-func (m model) renderFinding(f Finding, last bool) string {
-	branch := treeBranch
-	if last {
-		branch = treeLeaf
+// groupHeading labels a section of a finished run.
+//
+// The label is set in the structure colour rather than the text colour and the
+// count beside it is dimmer again, which is what separates "here is a section"
+// from "here is a result" without needing a box or a blank line above it.
+func (m model) groupHeading(label string, count int) string {
+	h := "  " + m.theme.Heading.Render(strings.ToUpper(label))
+	if count > 0 {
+		h += "  " + m.theme.Count.Render(strconv.Itoa(count))
 	}
-	tag := m.theme.severityStyle(f.Severity).Render(m.theme.severityTag(f.Severity))
+	return h
+}
 
-	// The title is padded so every target starts in the same column. A ragged
-	// target position is what makes a list of findings hard to scan, and
-	// scanning them quickly is the whole point of showing them.
-	titleWidth := 34
-	if avail := m.contentWidth() - 14; avail < titleWidth {
-		titleWidth = max(8, avail)
+// findingColumns divides the transcript width between the finding title and the
+// target.
+//
+// The title takes everything the target does not need. Titles are prose and
+// targets are addresses, so when space runs short the address is the part that
+// should be cut, and it is cut to a bounded column rather than to whatever is
+// left over.
+func (m model) findingColumns() (title, target int) {
+	// indent + rail + space + severity + gap + gap
+	const fixed = 2 + 1 + 1 + severityColWidth + 2 + 2
+	avail := m.contentWidth() - fixed
+	if avail < minFindingTitle+minFindingTarget {
+		// Too narrow for both. Below about eight columns an address is not
+		// readable at all, so the target is dropped and its space goes to the
+		// title: an address cut to four characters identifies nothing, and
+		// saying nothing is better than saying something false.
+		if avail-minFindingTitle < 8 {
+			return max(minFindingTitle, avail), 0
+		}
+		return minFindingTitle, avail - minFindingTitle
 	}
-	line := "  " + m.theme.Detail.Render(branch) + " " + tag + "  " +
-		m.theme.Value.Render(pad(truncate(f.Title, titleWidth), titleWidth))
-	if f.Target != "" {
-		line += " " + m.theme.Detail.Render(truncate(f.Target, max(8, m.contentWidth()-titleWidth-12)))
+	target = clampInt(avail/3, minFindingTarget, maxFindingTarget)
+	title = max(minFindingTitle, avail-target-1)
+	return title, target
+}
+
+// artifactSizeWidth is the column artifact sizes share, so a list of files
+// lines up by size the way findings line up by target.
+func (m model) artifactSizeWidth() int {
+	const fixed = 2 + 1 + 1 + 1
+	return clampInt(m.contentWidth()-fixed, 0, 12)
+}
+
+// renderFinding draws one finding: rail, severity, title, target.
+//
+// The rail is what makes a long list scannable. Colour alone would put the
+// severity last, after the eye has already read the sentence; a solid block at a
+// fixed offset puts the worst findings at a glance and survives NO_COLOR, where
+// the word is carrying the whole meaning on its own.
+func (m model) renderFinding(f Finding, titleW, targetW int) string {
+	style := m.theme.styleForSeverityWord(severityWord(f.Severity))
+	line := "  " + style.Render(severityRail) + " " +
+		style.Render(m.theme.severityTag(f.Severity)) + "  " +
+		m.theme.Value.Render(pad(truncate(f.Title, titleW), titleW))
+	if targetW > 0 && f.Target != "" {
+		line += " " + m.theme.Column.Render(pad(truncate(f.Target, targetW), targetW))
 	}
 	return clampLine(line, m.contentWidth())
 }
 
-func (m model) renderArtifact(a Artifact, last bool) string {
-	branch := treeBranch
-	if last {
-		branch = treeLeaf
-	}
-	line := "  " + m.theme.Detail.Render(branch) + " " + m.theme.Value.Render(a.Name)
-	if a.Size != "" {
-		line += " " + m.theme.Detail.Render(a.Size)
+// renderArtifact draws one artifact: name, then size in its own column.
+//
+// The name is truncated rather than the size, because a size is a short exact
+// value and a truncated one is a lie, while a truncated path is still
+// recognisable.
+func (m model) renderArtifact(a Artifact, sizeW int) string {
+	line := "  " + m.theme.Detail.Render("▪") + " " + m.theme.Value.Render(a.Name)
+	if a.Size != "" && sizeW > 0 {
+		gap := m.contentWidth() - 4 - lipgloss.Width(a.Name) - sizeW
+		if gap < 1 {
+			gap = 1
+		}
+		line += strings.Repeat(" ", gap) + m.theme.Column.Render(pad(a.Size, sizeW))
 	}
 	return clampLine(line, m.contentWidth())
 }
@@ -638,7 +790,7 @@ func (m model) renderEvents(b *block) []string {
 	if !m.showEvents || len(b.rows) == 0 {
 		return nil
 	}
-	head := "  " + m.theme.Group.Render("Events") + " " + m.theme.Detail.Render(plural(len(b.rows), "row", "rows"))
+	head := "  " + m.theme.Heading.Render("EVENTS") + "  " + m.theme.Count.Render(strconv.Itoa(len(b.rows)))
 	if b.rowsOmitted {
 		head += " " + m.theme.Detail.Render("(tail kept)")
 	}
@@ -677,15 +829,28 @@ func (m model) renderOutput(b *block, expanded bool) []string {
 		if b.outputOmitted {
 			note += " shown (tail kept)"
 		}
-		return []string{"  " + m.theme.Group.Render("Output") + " " +
-			m.theme.Hint.Render(note+" · expand with F2/enter")}
+		// An affordance, not a section. It is dimmed and set further in than a
+		// heading so it reads as a note attached to the run rather than as the
+		// first line of its output.
+		//
+		// The keys it names are the ones that actually work from where the
+		// operator is. Expanding is done from the executions region, so F2 on
+		// its own only moves focus there; saying "F2 expand" sent people
+		// pressing a key that visibly did nothing. With the region already
+		// focused the step is not needed and is not named.
+		keys := "· F2 focus, enter expand"
+		if m.regionFocus {
+			keys = "· enter expand"
+		}
+		return []string{"   " + m.theme.Detail.Render("output "+note) + " " +
+			m.theme.Hint.Render(keys)}
 	}
 	// A printed block is quoted under a rule rather than mixed into the tree:
 	// the tree is for results the interface understood, and this is the tool
 	// speaking for itself.
-	lines := []string{"  " + m.theme.Group.Render("Output")}
+	lines := []string{"  " + m.theme.Heading.Render("OUTPUT")}
 	if b.outputOmitted {
-		lines = append(lines, "  "+m.theme.Detail.Render("(truncated to the last "+plural(outputCap, "line", "lines")+")"))
+		lines = append(lines, "   "+m.theme.Detail.Render("(truncated to the last "+plural(outputCap, "line", "lines")+")"))
 	}
 	width := m.contentWidth() - 2
 	for _, raw := range b.output {
@@ -842,22 +1007,47 @@ func (m *model) applyLayout(width, height int) {
 	m.input.Width = max(8, width-lipgloss.Width(m.input.Prompt)-2)
 }
 
-// viewportHeight is how many rows the transcript owns between the header rule
+// viewportHeight is how many rows the transcript owns between the header band
 // and the composer.
-//
-// The fixed furniture is four rows: the header, its rule, the composer's rule,
-// and the composer. Once there is any execution in the session another row goes
-// to the activity strip between the transcript and the composer -- the line
-// that reports new lines below the fold while the operator is reading history.
-// The strip is reserved rather than drawn on demand so the viewport does not
-// resize every time follow mode toggles: a viewport that changes height on a
-// scroll would move the transcript under the fingers that are using it.
 func (m *model) viewportHeight(termHeight int) int {
-	rows := termHeight - 4
+	return max(1, termHeight-m.chromeHeight())
+}
+
+// chromeHeight is the number of rows the fixed furniture occupies, so the
+// transcript can be given everything that is left.
+//
+// The header counts as one row because its rule is its border rather than a row
+// of its own. The strip is counted whenever an execution exists, whether or not
+// it currently has anything to say, so the viewport does not resize every time
+// follow mode toggles: a viewport that changes height on a scroll moves the
+// transcript under the fingers using it.
+//
+// An open form is measured rather than assumed. A form stands in for the
+// composer but can be several rows taller than it, and charging it the
+// composer's two rows is how a long form pushes its own fields off the top of
+// the terminal.
+func (m *model) chromeHeight() int {
+	rows := 1 // the header band
 	if len(m.blocks) > 0 {
-		rows--
+		rows++ // the strip between transcript and composer
 	}
-	return max(1, rows)
+	if m.form != nil {
+		return rows + m.formHeight()
+	}
+	return rows + 2 // the composer's rule and the composer
+}
+
+// formHeight is the number of rows an open form draws.
+func (m model) formHeight() int {
+	f := m.form
+	if f == nil {
+		return 0
+	}
+	rows := 2 + len(f.fields) // its rule, its title, one row per field
+	if f.Err() != "" {
+		rows++
+	}
+	return rows + 1 // the key hint footer
 }
 
 // rebox reflows the viewport at the dimensions the current layout grants, on a

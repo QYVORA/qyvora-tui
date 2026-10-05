@@ -146,7 +146,16 @@ func (b *block) elapsed() time.Duration {
 }
 
 // duration renders an elapsed time the way the transcript header shows it.
+//
+// A negative elapsed time is possible when the wall clock steps backwards
+// between the two timestamps, and the naive formatting renders it as "00:-1" or
+// similar: a nonsensical duration in the one field whose entire job is to be a
+// fact. Clamping to zero is not the true value, but zero is the only honest
+// reading of a measurement that came out negative.
 func duration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
 	if d < time.Minute {
 		return fmt.Sprintf("%02d:%02d", int(d.Seconds())/60, int(d.Seconds())%60)
 	}

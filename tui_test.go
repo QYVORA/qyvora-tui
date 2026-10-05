@@ -330,9 +330,19 @@ func TestViewRendersAnExecutionBlock(t *testing.T) {
 	m = refresh(m)
 
 	out := m.View()
-	for _, want := range []string{"scan", "example.com", "Findings", "open redirect", "Artifacts", "report.json", "completed"} {
+	// Section labels are set in caps so a heading reads as structure rather than
+	// as another line of content, which is what lets a long result list be
+	// scanned instead of read.
+	for _, want := range []string{"scan", "example.com", "FINDINGS", "open redirect", "ARTIFACTS", "report.json", "completed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q:\n%s", want, out)
+		}
+	}
+	// The severity is spelled out and given a rail of its own, so a finding is
+	// identifiable before its sentence has been read.
+	for _, want := range []string{"HIGH", severityRail} {
+		if !strings.Contains(out, want) {
+			t.Errorf("view missing the severity %q:\n%s", want, out)
 		}
 	}
 }
