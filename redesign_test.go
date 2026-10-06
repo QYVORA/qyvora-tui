@@ -333,7 +333,7 @@ func TestClickOnTheComposerReturnsFocus(t *testing.T) {
 func TestHeaderPillCarriesState(t *testing.T) {
 	m := modelFor(t, 200, 40, nil)
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "● ready") {
+	if !strings.Contains(out, "● READY") {
 		t.Errorf("the idle pill is missing:\n%s", out)
 	}
 	m.start([]string{"scan"})

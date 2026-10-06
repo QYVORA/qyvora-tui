@@ -183,6 +183,11 @@ func (m model) renderForm() string {
 	var b strings.Builder
 	b.WriteString(m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))))
 	b.WriteString("\n")
+	// The form takes the composer's place, so it takes the mode bar too. Without
+	// it the keyboard's location is stated only in the footer hint, which is the
+	// one part of the form that scrolls out of the way.
+	b.WriteString(m.renderModeBar())
+	b.WriteString("\n")
 	title := m.theme.Title.Render("FILL IN  " + f.Capability.Name)
 	b.WriteString(clampLine(title, m.width))
 	b.WriteString("\n")
@@ -371,21 +376,52 @@ func (m model) band(content string) string {
 // statusPill renders the session's state as a symbol-plus-word pill, the way a
 // professional interface writes a status: the symbol and its text always travel
 // together, so neither colour nor a single glyph has to carry the meaning alone.
+//
+// The state is a filled field, not coloured text. A word in Danger on the
+// transcript's own ground is a word; the same word on a red field is an
+// unmistakable event, and the header is where the operator looks when they want
+// to know what the session is doing without reading the transcript to find out.
 func (m model) statusPill() string {
 	switch {
 	case m.running:
-		return m.theme.Running.Render(spinnerFrames[m.spinner] + " RUNNING · " + duration(time.Since(m.started)))
+		return m.theme.Pill.Render(spinnerFrames[m.spinner] + " RUNNING · " + duration(time.Since(m.started)))
 	case m.state == stateCancelled:
-		return m.theme.Cancelled.Render("■ CANCELLED")
+		return m.theme.PillMuted.Render("■ CANCELLED")
 	case m.state == stateFailed:
-		return m.theme.Failed.Render("✕ FAILED")
+		return m.theme.PillCritical.Render("✕ FAILED")
 	case m.following == false:
 		// The user has scrolled back; say so, because new output is arriving
-		// below the fold and silently not being seen is disorienting.
-		return m.theme.Hint.Render("⤓ PAUSED")
+		// below the fold and silently not being seen is disorienting. Muted
+		// rather than filled: nothing is wrong, the operator is just reading.
+		return m.theme.PillMuted.Render("⤓ PAUSED")
 	default:
-		return m.theme.Ready.Render("● ready")
+		return m.theme.Pill.Render("● READY")
 	}
+}
+
+// renderModeBar is the one-row strip that says where the keyboard is.
+//
+// The composer's hint text already describes the mode, but a hint is only
+// legible if the operator reads it, and the mode is the first thing they need to
+// know after a keystroke moved it. Carrying the mode in its own field means the
+// answer to "where am I typing" is available at a glance and does not depend on
+// parsing a sentence.
+//
+// The bar is drawn on the composer's ground, not the terminal's, so it reads as
+// part of the input rather than as another rule.
+func (m model) renderModeBar() string {
+	label, style := "COMMAND", m.theme.ModeFg
+	switch {
+	case m.form != nil:
+		label, style = "FILL IN", m.theme.ModeFg
+	case m.regionFocus:
+		label, style = "EXECUTIONS", m.theme.Selection
+	}
+	bar := " " + style.Render(label)
+	if w := lipgloss.Width(bar); w < m.width {
+		bar += strings.Repeat(" ", m.width-w)
+	}
+	return m.theme.ModeBar.Render(clampLine(bar, m.width))
 }
 
 // renderStrip is the row between the transcript and the composer. It is the
@@ -411,9 +447,12 @@ func (m model) renderStrip() string {
 // scrolls.
 func (m model) renderComposer() string {
 	// The bar is visually distinct from the transcript without being a boxed
-	// panel: a rule above it and a green prompt are enough.
+	// panel: a rule above it, a mode bar naming where the keyboard is, and a
+	// green prompt are enough.
 	var b strings.Builder
 	b.WriteString(m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))))
+	b.WriteString("\n")
+	b.WriteString(m.renderModeBar())
 	b.WriteString("\n")
 
 	line := m.input.View()
@@ -1153,7 +1192,7 @@ func (m *model) chromeHeight() int {
 	if m.form != nil {
 		return rows + m.formHeight()
 	}
-	return rows + 2 // the composer's rule and the composer
+	return rows + 3 // the composer's rule, mode bar and input
 }
 
 // formHeight is the number of rows an open form draws.
@@ -1162,7 +1201,7 @@ func (m model) formHeight() int {
 	if f == nil {
 		return 0
 	}
-	rows := 2 + len(f.fields) // its rule, its title, one row per field
+	rows := 3 + len(f.fields) // its rule, mode bar, title, one row per field
 	if f.Err() != "" {
 		rows++
 	}

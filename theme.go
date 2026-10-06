@@ -587,11 +587,14 @@ func newThemeAt(color bool, p *Palette, depth ColorDepth) Theme {
 		Detail:  fg(pal.Faint),
 		Success: fg(pal.Accent),
 
-		Prompt:  bold(pal.Accent),
-		Hint:    fg(pal.Faint),
-		Badge:   badgeStyle(pal.Info, pal.Surface),
-		ModeBar: fill(pal.Accent),
-		ModeFg:  fg(pal.Accent),
+		Prompt: bold(pal.Accent),
+		Hint:   fg(pal.Faint),
+		Badge:  badgeStyle(pal.Info, pal.Surface),
+		// The mode bar is a field with ink on it, not accent on accent. Accent on
+		// Accent is invisible, and the mode bar exists precisely so the current
+		// input target is legible without reading the hint.
+		ModeBar: fill(pal.AccentBg),
+		ModeFg:  fg(pal.AccentHi),
 		Tip:     fg(pal.Faint),
 
 		Critical: fg(pal.Danger),
