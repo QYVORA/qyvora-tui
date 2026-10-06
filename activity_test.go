@@ -119,7 +119,7 @@ func TestActivityNilIsSafe(t *testing.T) {
 	if a.hasErrors() {
 		t.Error("a nil Activity reported errors")
 	}
-	if got := a.Region(newTheme(false, nil), 24); got == nil {
+	if got := a.Region(newTheme(false, nil), minRegionWidth); got == nil {
 		t.Error("a nil Activity produced no region")
 	}
 }
@@ -146,7 +146,7 @@ func TestActivityRegionShowsCountsNotAPercentage(t *testing.T) {
 	a := newActivity()
 	a.record(ev("scan.started", "info", nil))
 	a.record(ev("finding.discovered", "info", nil))
-	got := stripANSI(a.Region(newTheme(false, nil), 24).Render(newTheme(false, nil)))
+	got := stripANSI(a.Region(newTheme(false, nil), minRegionWidth).Render(newTheme(false, nil)))
 	if strings.Contains(got, "%") {
 		t.Errorf("the activity region rendered a percentage: %q", got)
 	}
@@ -159,7 +159,7 @@ func TestActivityRegionShowsCountsNotAPercentage(t *testing.T) {
 }
 
 func TestActivityRegionIsEmptyBeforeAnythingHappens(t *testing.T) {
-	got := stripANSI(newActivity().Region(newTheme(false, nil), 24).Render(newTheme(false, nil)))
+	got := stripANSI(newActivity().Region(newTheme(false, nil), minRegionWidth).Render(newTheme(false, nil)))
 	if !strings.Contains(got, "no activity") {
 		t.Errorf("an untouched activity region = %q, want an explanation", got)
 	}
@@ -170,7 +170,7 @@ func TestActivityRegionOmitsZeroLevels(t *testing.T) {
 	a := newActivity()
 	a.record(ev("tool.event", "info", nil))
 	a.record(ev("tool.event", "error", nil))
-	got := stripANSI(a.Region(newTheme(false, nil), 24).Render(newTheme(false, nil)))
+	got := stripANSI(a.Region(newTheme(false, nil), minRegionWidth).Render(newTheme(false, nil)))
 	if strings.Contains(got, "debug") || strings.Contains(got, "warn") {
 		t.Errorf("a level with no events was listed: %q", got)
 	}
@@ -189,7 +189,7 @@ func TestActivityRegionShowsEveryLevelTheRunUsed(t *testing.T) {
 		a.record(ev("tool.event", level, nil))
 	}
 	th := newTheme(false, nil)
-	got := stripANSI(a.Region(th, 24).Render(th))
+	got := stripANSI(a.Region(th, minRegionWidth).Render(th))
 	for _, level := range []string{"critical", "error", "warning", "info", "debug", "notice", "severe-ish"} {
 		if !strings.Contains(got, level) {
 			t.Errorf("a level the run used is not shown (%s):\n%s", level, got)

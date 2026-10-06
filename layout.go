@@ -19,10 +19,25 @@ package tui
 const (
 	// CompactWidth is the narrowest width at which a side region is worth
 	// drawing.
-	CompactWidth = 60
+	//
+	// It is derived rather than picked, because it is exactly the width at which
+	// the narrowest permitted region can coexist with a transcript that is still
+	// readable. Writing it as a round number is how it drifts: the region floor
+	// rose to 28 and a hand-written 60 stopped meaning anything, granting a
+	// panel that pushed the transcript below its minimum. The layout then took
+	// the panel away and reported a wide layout with no regions, which is the
+	// confusing outcome this avoids.
+	CompactWidth = minRegionWidth + regionChrome + regionGap + minTranscriptWidth
 
 	// WideWidth is the width at which a full multi-region shell becomes
-	// affordable.
+	// affordable: both panels beside a transcript wide enough that the left one
+	// is not squeezing the words out of it.
+	//
+	// This one stays a chosen number rather than a derived one, because it is
+	// not a limit: two panels beside a usable transcript fit well before it. It
+	// is the point past which a second panel is worth having at all. Narrower
+	// than this and the transcript would be readable but cramped, and a cramped
+	// transcript is worse than a single panel beside a comfortable one.
 	WideWidth = 120
 )
 
@@ -89,12 +104,23 @@ type Layout struct {
 }
 
 // Region widths. A region that is too narrow to carry a label and a value is
-// not worth drawing, so each has a minimum and a ceiling.
+// not worth drawing, so each has a floor and a ceiling.
 const (
-	minNavigationWidth = 20
-	minActivityWidth   = 24
-	maxNavigationWidth = 30
-	maxActivityWidth   = 30
+	// minRegionWidth is the narrowest a side panel is drawn at. It is also the
+	// width below which a region is not a region at all: NewRegion clamps up to
+	// it and Region.Render refuses anything narrower, so the floor is a single
+	// number rather than one per region.
+	//
+	// 28 rather than the 20 this used to allow, because 20 columns cannot carry
+	// a capability name and its detail on the same line and forcing them onto
+	// separate wrapped lines is what made the left panel read as a list of
+	// fragments.
+	minRegionWidth = 28
+
+	// maxRegionWidth is the widest a side panel grows. Past this a panel stops
+	// being a panel and becomes the interface, and the transcript it was
+	// accompanying is now the accessory.
+	maxRegionWidth = 36
 )
 
 // minTranscriptWidth is the narrowest a transcript is still readable at. Below
@@ -145,10 +171,18 @@ func regionColumns(widths ...int) int {
 //   - Below CompactWidth, compact, unconditionally. At that size the transcript
 //     is all the operator can use, and taking any of it for a panel would leave
 //     something unreadable.
-//   - Between CompactWidth and WideWidth, at most one region. Activity is
-//     preferred, because watching work happen is what a wider terminal can
-//     uniquely add, but navigation is taken when there is no run in flight.
+//   - Between CompactWidth and WideWidth, the executions region only. It is the
+//     one panel that earns its columns on merit: it changes while the operator
+//     watches, and the capability registry does not.
 //   - At WideWidth, both regions when both have content.
+//
+// The asymmetry between the two panels below WideWidth is deliberate rather
+// than an oversight. The registry is reference material -- useful, static, and
+// available on F1 in two keystrokes -- so a column of it beside a live session
+// is a claim on the transcript that the session can use better. Executions are
+// the session: the run in flight and the runs behind it, which cannot be
+// reproduced on demand from a keypress. When the two compete, the transcript
+// goes to the one that cannot wait.
 //
 // Every grant is conditional on the transcript keeping minTranscriptWidth
 // columns. That single condition is what stops a 70-column terminal being
@@ -160,16 +194,21 @@ func LayoutFor(width, height int, opts LayoutOptions) Layout {
 		return l
 	}
 
-	nav := regionFor(opts.Navigation, regionWidth(width, minNavigationWidth, maxNavigationWidth), width)
-	act := regionFor(opts.Activity, regionWidth(width, minActivityWidth, maxActivityWidth), width)
+	wide := width >= WideWidth
+	// The registry only earns a column on a terminal wide enough to carry both
+	// panels and the words between them.
+	nav := 0
+	if wide && opts.Navigation {
+		nav = regionFor(true, regionWidth(width), width)
+	}
+	act := regionFor(opts.Activity, regionWidth(width), width)
 
 	// Two regions need the wide breakpoint and room for both plus a usable
-	// transcript. Below that there is room for one, and activity takes it: it
-	// changes while the operator watches, and the registry does not.
-	both := nav > 0 && act > 0 && width >= WideWidth && fits(width, nav, act)
-	// Navigation yields only when it is actually competing with activity for the
-	// space. With no run in flight it is the only candidate, and there is no
-	// reason to discard it.
+	// transcript. Below that there is room for one, and it is the executions
+	// region.
+	both := nav > 0 && act > 0 && fits(width, nav, act)
+	// With no run in flight there is no executions region to show, so a wide
+	// terminal falls back to the registry rather than to an empty column.
 	if act > 0 && !both {
 		nav = 0
 	}
@@ -223,15 +262,28 @@ func fits(width int, regions ...int) bool {
 	return width-regionColumns(regions...) >= minTranscriptWidth
 }
 
-// regionWidth scales a region against the terminal.
+// regionWidth is the width both side regions are drawn at.
 //
-// The share is a quarter of the space above the transcript's minimum, clamped to
-// the region's own bounds: a side panel that grows without limit stops being a
-// panel and starts being the interface.
-func regionWidth(width, min, max int) int {
-	share := (width - minTranscriptWidth) / 4
-	return clampInt(share, min, max)
+// A quarter of the terminal, four columns of margin, clamped to the region
+// bounds. The clamp does the real work at both ends: without a floor, a narrow
+// terminal would grant a panel too narrow to read; without a ceiling, a wide one
+// would let the panel take over. The share alone grows without limit, and a
+// panel that grows without limit stops being a panel.
+//
+// Both regions take the same number so the two columns are symmetric and the
+// transcript's width is the same whichever one is showing. They are different
+// content and would each prefer a different width, but a layout that sizes them
+// differently depending on which is present makes the transcript jump sideways
+// when a region opens and closes.
+func regionWidth(width int) int {
+	return clampInt((width-regionMargin)/4, minRegionWidth, maxRegionWidth)
 }
+
+// regionMargin is the four columns held back from the region share. The right
+// two are the composer's own margin, and the left two are what keeps a panel's
+// outer edge off the terminal edge, where it reads as a clipped column rather
+// than as a deliberate border.
+const regionMargin = 4
 
 // LayoutOptions is what the shell knows about the tool when it resolves a
 // layout. Regions are offered, not imposed: a tool with no capability registry

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func regionLinesOf(got string) []string {
 }
 
 func TestRegionRendersTitleAndRows(t *testing.T) {
-	r := NewRegion("CAPABILITIES", 24)
+	r := NewRegion("CAPABILITIES", minRegionWidth)
 	r.Add("one")
 	r.Add("two")
 	got := stripANSI(r.Render(newTheme(false, nil)))
@@ -48,11 +49,11 @@ func TestRegionRendersTitleAndRows(t *testing.T) {
 // Every line of a region is exactly as wide as the region, so the shaded
 // surface behind the column is continuous from the title to the last row.
 func TestRegionPadsEveryLineToItsWidth(t *testing.T) {
-	r := NewRegion("R", 24)
+	r := NewRegion("R", minRegionWidth)
 	r.Add("short")
 	for i, line := range regionLinesOf(r.Render(newTheme(false, nil))) {
-		if w := lipgloss.Width(line); w != 24 {
-			t.Errorf("line %d is %d wide, want 24", i, w)
+		if w := lipgloss.Width(line); w != minRegionWidth {
+			t.Errorf("line %d is %d wide, want %d", i, w, minRegionWidth)
 		}
 	}
 }
@@ -71,7 +72,7 @@ func TestRegionNilAndEmptyAreSafe(t *testing.T) {
 	nilRegion.Add("x")
 	nilRegion.SetRows([]string{"x"})
 
-	empty := NewRegion("ACTIVITY", 24)
+	empty := NewRegion("ACTIVITY", minRegionWidth)
 	got := stripANSI(empty.Render(newTheme(false, nil)))
 	if !strings.Contains(got, "ACTIVITY") {
 		t.Errorf("an empty region dropped its title: %q", got)
@@ -84,7 +85,7 @@ func TestRegionNilAndEmptyAreSafe(t *testing.T) {
 func TestRegionEmptyTextIsShownWhenSet(t *testing.T) {
 	// "none published" is more useful than a blank column, and blank is what an
 	// unset Empty field produces.
-	withText := NewRegion("CAPABILITIES", 24)
+	withText := NewRegion("CAPABILITIES", minRegionWidth)
 	withText.Empty = "none published"
 	got := stripANSI(withText.Render(newTheme(false, nil)))
 	if !strings.Contains(got, "none published") {
@@ -98,7 +99,7 @@ func TestRegionEmptyTextIsShownWhenSet(t *testing.T) {
 	// An unset Empty renders no body line at all. Padding is not a body line:
 	// the surface fills every line to the region's width, so the check is on the
 	// line count rather than on trailing spaces.
-	without := NewRegion("CAPABILITIES", 24)
+	without := NewRegion("CAPABILITIES", minRegionWidth)
 	got = strings.TrimRight(stripANSI(without.Render(newTheme(false, nil))), "\n")
 	if lines := regionLinesOf(got); len(lines) != 2 {
 		t.Errorf("an unset Empty drew %d lines, want title + rule only: %q", len(lines), got)
@@ -109,18 +110,18 @@ func TestRegionClampsWideRows(t *testing.T) {
 	// Rows arrive from tool data, so their width is not under the region's
 	// control. A row that overruns must be cut, not wrapped: wrapping would
 	// silently add a line and shear the columns beside it.
-	r := NewRegion("R", 20)
+	r := NewRegion("R", minRegionWidth)
 	r.Add(strings.Repeat("x", 200))
 	for _, line := range strings.Split(strings.TrimRight(r.Rows[0], "\n"), "\n") {
-		if lipgloss.Width(line) > 20 {
-			t.Fatalf("row is %d wide, over the region's 20", lipgloss.Width(line))
+		if lipgloss.Width(line) > minRegionWidth {
+			t.Fatalf("row is %d wide, over the region's %d", lipgloss.Width(line), minRegionWidth)
 		}
 	}
 }
 
 func TestRegionTooNarrowRendersNothing(t *testing.T) {
 	// Below the minimum a region is absent rather than unreadable.
-	r := NewRegion("R", 4)
+	r := NewRegion("R", minRegionWidth-1)
 	r.Add("something")
 	if got := r.Render(newTheme(false, nil)); got != "" {
 		t.Errorf("a 4-wide region rendered %q", got)
@@ -131,7 +132,7 @@ func TestRegionBoxedPutsTheRuleOnTheInnerEdge(t *testing.T) {
 	// The rule marks the boundary with the transcript, so its side is decided
 	// by where the region sits, not by a constant.
 	// The rule only exists on a region wide enough to be one.
-	r := NewRegion("R", 20)
+	r := NewRegion("R", minRegionWidth)
 	r.Add("a")
 	left := stripANSI(r.Boxed(newTheme(false, nil), -1))
 	right := stripANSI(r.Boxed(newTheme(false, nil), 1))
@@ -157,7 +158,7 @@ func TestRegionBoxedOfNothingIsEmpty(t *testing.T) {
 	if got := nilRegion.Boxed(newTheme(false, nil), 1); got != "" {
 		t.Errorf("a nil region boxed to %q", got)
 	}
-	if got := NewRegion("R", 2).Boxed(newTheme(false, nil), 1); got != "" {
+	if got := NewRegion("R", minRegionWidth-1).Boxed(newTheme(false, nil), 1); got != "" {
 		t.Errorf("a too-narrow region boxed to %q", got)
 	}
 }
@@ -229,5 +230,67 @@ func TestKeyHintKeepsTheKey(t *testing.T) {
 	}
 	if got := keyHint(newTheme(false, nil), "", "orphan", 20); got != "" {
 		t.Errorf("a hint with no key rendered %q", got)
+	}
+}
+
+// A region is not scrolled. A panel taller than the terminal has its last rows
+// below the fold, and those are the newest ones, so the height budget has to be
+// charged at draw time rather than discovered by the operator.
+func TestRegionHonoursItsHeightBudget(t *testing.T) {
+	r := NewRegion("R", minRegionWidth)
+	for i := 0; i < 40; i++ {
+		r.Add(fmt.Sprintf("row%02d", i))
+	}
+	r.Height = 12
+	lines := regionLinesOf(stripANSI(r.Render(newTheme(false, nil))))
+	if len(lines) != 12 {
+		t.Fatalf("region drew %d rows, want its 12-row budget:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[0], "R") {
+		t.Errorf("the budget cut the title: %q", lines[0])
+	}
+	if !strings.Contains(lines[11], "row09") {
+		t.Errorf("the last drawn row is %q, want row09 (12 less title and rule)", lines[11])
+	}
+}
+
+// A budget too small for the title and the rule draws nothing. Half a header is
+// not a header, and a panel showing one rule and no label is a mystery column.
+func TestRegionTooShortForItsChromeDrawsNothing(t *testing.T) {
+	r := NewRegion("R", minRegionWidth)
+	r.Add("a")
+	for _, h := range []int{1} {
+		r.Height = h
+		if got := stripANSI(r.Render(newTheme(false, nil))); got != "" {
+			t.Errorf("a %d-row budget drew %q, want nothing", h, got)
+		}
+	}
+	// Zero means unconstrained, so every row is drawn.
+	r.Height = 0
+	if got := len(regionLinesOf(stripANSI(r.Render(newTheme(false, nil))))); got != 3 {
+		t.Errorf("an unbudgeted region drew %d rows, want title + rule + 1", got)
+	}
+	// A budget of exactly the chrome draws the chrome and no content, which is
+	// the honest result rather than a truncated panel.
+	r.Height = chromeRows
+	lines := regionLinesOf(stripANSI(r.Render(newTheme(false, nil))))
+	if len(lines) != chromeRows {
+		t.Errorf("a chrome-sized budget drew %d rows, want %d", len(lines), chromeRows)
+	}
+}
+
+// The empty message is a row like any other: it is dropped when the budget is
+// spent rather than drawn past the bottom of the panel.
+func TestRegionEmptyMessageRespectsTheBudget(t *testing.T) {
+	r := NewRegion("R", minRegionWidth)
+	r.Empty = "nothing yet"
+	r.Height = chromeRows
+	if got := stripANSI(r.Render(newTheme(false, nil))); strings.Contains(got, "nothing yet") {
+		t.Errorf("a chrome-sized budget drew the message past its end: %q", got)
+	}
+	r.Height = chromeRows + 1
+	lines := regionLinesOf(stripANSI(r.Render(newTheme(false, nil))))
+	if len(lines) != chromeRows+1 || !strings.Contains(lines[chromeRows], "nothing yet") {
+		t.Errorf("a %d-row budget drew %q, want the title, the rule and the message", chromeRows+1, lines)
 	}
 }

@@ -34,6 +34,13 @@ type Region struct {
 	// Focused marks the region as holding keyboard focus, for tools that route
 	// keys to a region. A region that cannot be focused leaves it false.
 	Focused bool
+
+	// Height is the number of rows the region may occupy, or zero for as many as
+	// it has. It is set from the layout rather than inferred, because a panel
+	// taller than the terminal is not scrolled: the rows past the bottom are
+	// simply never seen, so a region that renders everything has silently thrown
+	// away whatever the operator most recently needed.
+	Height int
 }
 
 // NewRegion builds a region at a width.
@@ -70,10 +77,29 @@ func (r *Region) Len() int {
 	return len(r.Rows)
 }
 
+// chromeRows is what a boxed region spends on its own furniture: the title and
+// the rule beneath it. They are counted before any content is drawn, because a
+// region that filled its budget and then added a title would push its last row
+// past the bottom of the terminal, and the last row is the one that changes what
+// the operator does next.
+const chromeRows = 2
+
 // Render draws the region: a title, a rule, and its rows.
+//
+// A region with a height budget draws at most Height lines in total, title and
+// rule included. Rows that do not fit are dropped, not wrapped and not scrolled:
+// the alternative is a panel whose contents move under the operator's fingers
+// every time it repaints.
 func (r *Region) Render(t Theme) string {
-	if r == nil || r.Width < minNavigationWidth {
+	if r == nil || r.Width < minRegionWidth {
 		return ""
+	}
+	budget := 0
+	if r.Height > 0 {
+		budget = r.Height
+		if budget < chromeRows {
+			return ""
+		}
 	}
 	var b strings.Builder
 	title := r.Title
@@ -87,14 +113,14 @@ func (r *Region) Render(t Theme) string {
 	b.WriteString(t.Surface.Render(t.Border.Render(strings.Repeat("─", r.Width))))
 	b.WriteString("\n")
 
-	if len(r.Rows) == 0 {
-		if r.Empty != "" {
-			b.WriteString(t.Surface.Render(padTo(t.Detail.Render(clampLine(r.Empty, r.Width)), r.Width)))
-			b.WriteString("\n")
-		}
-		return b.String()
+	rows := r.Rows
+	if len(rows) == 0 && r.Empty != "" {
+		rows = []string{t.Detail.Render(clampLine(r.Empty, r.Width))}
 	}
-	for _, row := range r.Rows {
+	if budget > 0 && len(rows) > budget-chromeRows {
+		rows = rows[:budget-chromeRows]
+	}
+	for _, row := range rows {
 		b.WriteString(t.Surface.Render(padTo(row, r.Width)))
 		b.WriteString("\n")
 	}

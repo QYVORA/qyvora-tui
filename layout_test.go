@@ -201,3 +201,95 @@ func TestComposeRegionsDoesNotEllipsiseTheTranscript(t *testing.T) {
 		t.Errorf("line is %d wide, want %d", lipgloss.Width(out), w)
 	}
 }
+
+// TestSidebarWinsBelowWideWidth pins the one asymmetric grant in the layout. The
+// capability registry is reference material behind F1; executions are the live
+// session. Below WideWidth the transcript goes to the one that cannot wait.
+func TestSidebarWinsBelowWideWidth(t *testing.T) {
+	both := LayoutOptions{Navigation: true, Activity: true}
+	for _, w := range []int{CompactWidth, 80, 100, WideWidth - 1} {
+		l := LayoutFor(w, 40, both)
+		if l.Navigation != 0 {
+			t.Errorf("width %d: navigation = %d, want 0 below WideWidth", w, l.Navigation)
+		}
+		if l.Activity == 0 {
+			t.Errorf("width %d: no executions region, but activity was offered", w)
+		}
+	}
+	for _, w := range []int{WideWidth, WideWidth + 1, 200} {
+		l := LayoutFor(w, 40, both)
+		if l.Navigation == 0 || l.Activity == 0 {
+			t.Errorf("width %d: navigation = %d, activity = %d; want both at WideWidth and above", w, l.Navigation, l.Activity)
+		}
+	}
+}
+
+// TestRegistryFillsTheWideTerminalAlone covers the case where there is no run in
+// flight: a wide terminal with nothing to execute falls back to the registry
+// rather than to an empty column.
+func TestRegistryFillsTheWideTerminalAlone(t *testing.T) {
+	l := LayoutFor(200, 40, LayoutOptions{Navigation: true})
+	if l.Navigation == 0 {
+		t.Fatal("no navigation region on a wide terminal with nothing to execute")
+	}
+	if l.Activity != 0 {
+		t.Errorf("activity = %d with no executions to show", l.Activity)
+	}
+	if used := l.Transcript + regionColumns(l.Navigation, l.Activity); used != 200 {
+		t.Errorf("columns total %d, want the terminal exactly", used)
+	}
+}
+
+// TestCompactWidthIsDerivedFromTheParts guards the breakpoint against the region
+// floor moving under it. A hand-written CompactWidth stops meaning anything the
+// moment minRegionWidth changes, and the failure is a layout that grants a panel
+// it then has to take back.
+func TestCompactWidthIsDerivedFromTheParts(t *testing.T) {
+	want := minRegionWidth + regionChrome + regionGap + minTranscriptWidth
+	if CompactWidth != want {
+		t.Errorf("CompactWidth = %d, want %d from the region floor and the transcript minimum", CompactWidth, want)
+	}
+	// Exactly at the breakpoint the narrowest region and the narrowest
+	// transcript must both fit. One column either side must not both.
+	l := LayoutFor(CompactWidth, 40, LayoutOptions{Activity: true})
+	if l.Activity == 0 {
+		t.Errorf("no region at CompactWidth %d", CompactWidth)
+	}
+	if got := l.Transcript; got < minTranscriptWidth {
+		t.Errorf("transcript = %d at CompactWidth, below the %d minimum", got, minTranscriptWidth)
+	}
+	if l := LayoutFor(CompactWidth-1, 40, LayoutOptions{Activity: true}); l.ShowRegions {
+		t.Errorf("width %d granted a region below CompactWidth", CompactWidth-1)
+	}
+}
+
+// TestRegionWidthFollowsTheShare pins the width formula across its whole range:
+// a quarter of the terminal less a margin, clamped at both ends.
+func TestRegionWidthFollowsTheShare(t *testing.T) {
+	for _, tc := range []struct{ width, want int }{
+		{CompactWidth, minRegionWidth},
+		{116, minRegionWidth}, // (116-4)/4 = 28, the floor exactly
+		{120, 29},             // the share is live from here
+		{140, 34},
+		{148, 36},             // (148-4)/4 = 36, the ceiling exactly
+		{240, maxRegionWidth}, // clamped
+	} {
+		if got := regionWidth(tc.width); got != tc.want {
+			t.Errorf("regionWidth(%d) = %d, want %d", tc.width, got, tc.want)
+		}
+	}
+}
+
+// Both regions are drawn at the same width so the transcript does not change
+// size as a panel opens and closes.
+func TestBothRegionsShareOneWidth(t *testing.T) {
+	for _, w := range []int{CompactWidth, 100, WideWidth, 200} {
+		l := LayoutFor(w, 40, LayoutOptions{Navigation: true, Activity: true})
+		if l.Navigation == 0 || l.Activity == 0 {
+			continue
+		}
+		if l.Navigation != l.Activity {
+			t.Errorf("width %d: navigation %d, activity %d; want them equal", w, l.Navigation, l.Activity)
+		}
+	}
+}

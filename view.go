@@ -103,8 +103,19 @@ func (m model) View() string {
 	// transcript -- otherwise composeRegions trims lines back onto "…".
 	m = m.rebox()
 
+	// Both regions share the transcript's row budget. A panel drawn taller than
+	// the transcript beside it has its last rows below the terminal, where they
+	// are never seen: the newest run, which is the one the operator is watching,
+	// is exactly the row that disappears.
+	rows := m.viewport.Height
 	left := m.capabilitiesRegion(m.layout.Navigation)
 	right := m.executionsRegion(m.layout.Activity)
+	if left != nil {
+		left.Height = rows
+	}
+	if right != nil {
+		right.Height = rows
+	}
 
 	// The widths come from the layout, and the regions are rendered at exactly
 	// the widths it granted them, so the columns tile the terminal.
