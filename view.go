@@ -129,6 +129,12 @@ func (m model) View() string {
 	// pointer, because a region can exist and still draw nothing: too short to
 	// render, or empty. Charging the transcript for a panel that is not on screen
 	// is how the columns end up over-running the terminal.
+	// The transcript's row count is recorded as it is drawn. paintFrame needs to
+	// know which rows are the transcript to put them on the Base field, and
+	// counting rows by arithmetic from the frame's edges would be a second
+	// version of chromeHeight that can disagree with the first.
+	transcriptRows := m.viewport.Height
+
 	leftBox, rightBox := boxedRegion(left, m.theme, -1), boxedRegion(right, m.theme, 1)
 	navW, actW := 0, 0
 	if leftBox != "" {
@@ -165,10 +171,46 @@ func (m model) View() string {
 		// once would leave the operator unsure which one their keystrokes are
 		// going to.
 		b.WriteString(m.renderForm())
-		return b.String()
+		return m.paintFrame(strings.Split(b.String(), "\n"), transcriptRows)
 	}
 	b.WriteString(m.renderComposer())
-	return b.String()
+	return m.paintFrame(strings.Split(b.String(), "\n"), transcriptRows)
+}
+
+// paintFrame puts the whole frame on the tool's own ground.
+//
+// The palette is a ladder of four fills, and a ladder only means anything if the
+// steps are used in order: Inset is the field behind everything, and each lighter
+// step is a surface raised off it. Without this the chrome is painted and the
+// transcript is left on whatever background the terminal happens to have, so
+// Surface has nothing to be raised above and the interface reads as a set of
+// floating cards rather than one surface with panels on it.
+//
+// Painting is done here rather than at each call site because the ground has to
+// reach the parts nothing draws: the empty rows above a short transcript, the
+// columns between the panels, the row of the frame that holds no content at all.
+// Those are the majority of the pixels on an idle screen, and they are exactly the
+// ones that would otherwise show through as the terminal's own colour.
+//
+// The ground goes down first and the panels paint over it, so a row is painted
+// twice but never twice in the wrong order: Inset covers the frame, and the
+// transcript and panels that already carry their own fills replace it.
+func (m model) paintFrame(rows []string, transcriptRows int) string {
+	if !m.theme.Color {
+		return strings.Join(rows, "\n")
+	}
+	painted := make([]string, 0, len(rows))
+	for i, row := range rows {
+		row = ground(m.theme.Inset, row, m.width)
+		// The transcript is the field the work happens on: one step above the
+		// frame, so the panels beside it read as raised off it. It starts below
+		// the header and runs for the rows the viewport was boxed to.
+		if i > 0 && i <= transcriptRows {
+			row = ground(m.theme.Base, row, m.width)
+		}
+		painted = append(painted, row)
+	}
+	return strings.Join(painted, "\n")
 }
 
 // renderForm draws the open form's fields.
@@ -569,8 +611,13 @@ func (m model) renderComposer() string {
 			line = strings.TrimRight(line, " ") + strings.Repeat(" ", gap) + hint
 		}
 	}
+	// The input row is the one surface the operator is touching, so it takes the
+	// top of the ladder rather than sharing Surface with the header and the
+	// panels. Drawn on Surface -- which is what it did -- the field the caret
+	// sits in is indistinguishable from a panel being read, and the eye has no
+	// place to rest while typing.
 	line = padTo(clampLine(line, m.width), m.width)
-	b.WriteString(m.theme.Surface.Render(line))
+	b.WriteString(m.theme.Raised.Render(line))
 	return b.String()
 }
 
