@@ -292,7 +292,7 @@ func newModel(cfg Config, theme Theme) model {
 	m.input.PromptStyle = m.theme.Prompt
 	m.input.TextStyle = m.theme.Value
 	if theme.Color {
-		m.input.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Palette.Accent))
+		m.input.Cursor.Style = lipgloss.NewStyle().Foreground(paletteColor(theme.Palette.Accent))
 	} else {
 		m.input.Cursor.Style = lipgloss.NewStyle()
 	}

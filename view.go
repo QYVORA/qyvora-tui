@@ -353,7 +353,7 @@ func (m model) band(content string) string {
 		return padded
 	}
 	return lipgloss.NewStyle().
-		Background(lipgloss.Color(m.theme.Palette.Surface)).
+		Background(paletteColor(m.theme.Palette.Surface)).
 		Render(padded)
 }
 

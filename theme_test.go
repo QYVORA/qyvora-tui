@@ -73,9 +73,14 @@ func TestNoColorEnvironmentWins(t *testing.T) {
 }
 
 func TestPaletteFallbackFillsEverySlot(t *testing.T) {
-	// A tool sets one colour. The other nine must still resolve, or the region
-	// it did not style disappears.
-	th := newTheme(true, &testPalette)
+	// A tool sets one colour. The rest must still resolve, or the region it did
+	// not style disappears.
+	//
+	// Depth is pinned to truecolor here because the resolved palette is the
+	// authored one. At a reduced depth the same slots are intentionally emptied
+	// or rewritten, and asserting they match the base hexes would be asserting
+	// that the terminal is ignored.
+	th := newThemeAt(true, &testPalette, DepthTrueColor)
 	if th.Palette.Accent != testPalette.Accent {
 		t.Errorf("Accent = %q, want the tool's %q", th.Palette.Accent, testPalette.Accent)
 	}
@@ -101,7 +106,7 @@ func TestPaletteFallbackFillsEverySlot(t *testing.T) {
 }
 
 func TestNilPaletteYieldsBaseTheme(t *testing.T) {
-	th := newTheme(true, nil)
+	th := newThemeAt(true, nil, DepthTrueColor)
 	if th.Palette != BaseTheme {
 		t.Errorf("a nil palette did not yield the base theme:\n got %+v\nwant %+v", th.Palette, BaseTheme)
 	}
