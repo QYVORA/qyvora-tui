@@ -904,8 +904,12 @@ func (m model) renderOutput(b *block, expanded bool) []string {
 	}
 	width := m.contentWidth() - 2
 	for _, raw := range b.output {
+		// Wrap first, highlight second. Highlighting before wrapping would put
+		// escape sequences into the string the wrapper measures, and it would cut
+		// one in half at the break point -- the wrapped line then paints the rest
+		// of the terminal the colour it was meant to end in.
 		for _, line := range wrapText(raw, width) {
-			lines = append(lines, "  "+m.theme.Output.Render(line))
+			lines = append(lines, "  "+highlightLine(line, m.theme))
 		}
 	}
 	return lines

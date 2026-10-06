@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -130,13 +129,8 @@ func visibleLine(s string) string {
 		}
 		s = last
 	}
-	return ansiCode.ReplaceAllString(s, "")
+	return stripANSI(s)
 }
-
-// ansiCode is one terminal escape sequence: CSI (SGR, cursor and others),
-// OSC title/hyperlink, and the charset selectors that colour wrappers emit
-// around their payloads.
-var ansiCode = regexp.MustCompile(`\x1b\[[0-9;:?]*[ -/]*[@-~]|\x1b\][^\x1b\x07]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]`)
 
 // sortedKeys gives deterministic iteration over an event's data map, which
 // JSON does not guarantee. Without this the detail panel reshuffles its rows
