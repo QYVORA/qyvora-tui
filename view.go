@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -333,6 +334,16 @@ func padTo(line string, width int) string {
 // resting header is the brand mark and the pill alone; everything between is
 // text.
 func (m model) renderHeader() string {
+	right := m.statusPill()
+
+	// The banner replaces the header's own identity row rather than sitting
+	// above it. Drawing both would name the tool twice, and the wordmark is the
+	// version of the name that says the same thing at a glance, so the text row
+	// stands in only when the art has nothing to offer.
+	if art := m.renderBanner(); len(art) > 0 {
+		return m.bannerWithStatus(art, right)
+	}
+
 	title := m.cfg.Title
 	if title == "" {
 		title = "QYVORA"
@@ -347,7 +358,6 @@ func (m model) renderHeader() string {
 		left += "  " + m.theme.Version.Render(m.cfg.Version)
 	}
 
-	right := m.statusPill()
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		// Too narrow to sit side by side. The identity matters more than the
@@ -355,6 +365,97 @@ func (m model) renderHeader() string {
 		return m.band(clampLine(left, m.width))
 	}
 	return m.band(left + strings.Repeat(" ", gap) + right)
+}
+
+// bannerHeight is how many rows the banner draws in the header, zero when it
+// draws nothing.
+//
+// The header is charged this from the same place the transcript's height is
+// computed, so a banner cannot push the composer's last row off the bottom of
+// the terminal. A banner that is allowed to overrun the viewport is the one
+// piece of furniture in the interface that would make the input unreachable.
+func (m model) bannerHeight() int {
+	return len(m.renderBanner())
+}
+
+// renderBanner draws the tool's banner in the theme's identity colour, or
+// nothing when the ladder could not fit a rung.
+//
+// The banner is offered the width of the header and a height budget that leaves
+// the terminal room for the composer, so a tall wordmark on a short terminal
+// degrades to a shorter rung rather than to a broken layout. The art is padded
+// to a common width so the rows form a rectangle; a wordmark whose rows have
+// different lengths reads as a rendering fault even when every row is correct.
+func (m model) renderBanner() []string {
+	if m.cfg.Banner.Tool == "" && len(m.cfg.Banner.Art) == 0 {
+		return nil
+	}
+	// Leave room for the header band itself plus the composer's rows and a blank
+	// row, so a banner never squeezes the input off screen.
+	budget := m.height - m.bannerReservedRows()
+	art := RenderBanner(m.cfg.Banner, m.width, budget)
+	if art.IsDropped() {
+		return nil
+	}
+	// Rows are padded to the art's own width, not to the terminal's: the wordmark
+	// is a rectangle, and the caller is what places it in the terminal's width.
+	rows := make([]string, 0, len(art.ASCII))
+	for _, line := range art.ASCII {
+		rows = append(rows, padTo(m.theme.Title.Render(clampLine(line, art.Width)), art.Width))
+	}
+	return rows
+}
+
+// bannerReservedRows is the number of rows the header cannot give to the banner:
+// the band itself and the composer's furniture. The transcript's share is
+// whatever is left.
+func (m model) bannerReservedRows() int {
+	const composerRows = 4
+	rows := 1 + composerRows
+	if len(m.blocks) > 0 {
+		rows++ // the strip between the transcript and the composer
+	}
+	return rows
+}
+
+// bannerWithStatus draws the banner rows with the status pill on the first one,
+// right-aligned, so both the identity and the session's state are on the same
+// row rather than in different corners.
+func (m model) bannerWithStatus(art []string, right string) string {
+	artW := 0
+	for _, l := range art {
+		if n := lipgloss.Width(l); n > artW {
+			artW = n
+		}
+	}
+	// The status sits beside the art only when the art fits whole with a column
+	// left over. Padding the art to the terminal's width and then appending the
+	// status is what produced a row twice the terminal's width; truncating the art
+	// to make room instead produced a cut-off wordmark with the pill jammed
+	// against its last glyph, which reads worse than either.
+	beside := artW+1+lipgloss.Width(right) <= m.width
+
+	var b strings.Builder
+	for i, line := range art {
+		switch {
+		case i == 0 && beside:
+			// Pad to the space the status leaves, then add it.
+			room := m.width - lipgloss.Width(right)
+			b.WriteString(padTo(line, room))
+			b.WriteString(right)
+		default:
+			b.WriteString(padTo(line, m.width))
+		}
+		b.WriteString("\n")
+	}
+	if !beside {
+		// The status goes below rather than being dropped: it is the one thing in
+		// the header that changes without the operator doing anything, so it must
+		// not be the thing that gets clipped.
+		b.WriteString(m.band(padTo(right, m.width)))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // band draws one full-width strip of fixed furniture.
@@ -636,11 +737,14 @@ func (m model) renderLive(b *block) string {
 		what = b.progress.Message
 	} else if len(b.rows) > 0 {
 		// The most recent event is the best available description of what the
-		// tool is doing right now.
+		// tool is doing right now. The event's own detail is preferred over its
+		// label: the label is the topic the tool emitted ("scan.progress"), while
+		// the detail is the sentence it wrote for a person ("scanning cell 812447
+		// of 1000000"). Falling back to the label leaves the operator reading a
+		// topic name where a description was available.
 		last := b.rows[len(b.rows)-1]
-		if last.Detail != "" {
-			what = last.Label
-		} else {
+		what = last.Detail
+		if what == "" {
 			what = last.Label
 		}
 	}
@@ -650,19 +754,154 @@ func (m model) renderLive(b *block) string {
 
 // renderProgress draws a bar only when the tool reported a percentage. An
 // invented bar would be a guess about work the tool never reported.
+//
+// When the tool reported counts as well as a percentage, they are drawn beside
+// the bar. A percentage alone answers "how far along", which is the less useful
+// half: on a scan of two million cells "81%" says nothing about whether the run
+// is nearly over or has an hour left. The counts say both, and the tool
+// published them, so throwing them away to save a few columns is a poor trade.
+//
+// The counts are grouped rather than separated. "812447 / 1000000" is read as
+// one number over another; "812447 of 1000000" costs five more columns to say
+// the same thing.
 func (m model) renderProgress(b *block) []string {
 	if !b.progress.HasBar {
 		return nil
 	}
-	pct := clampPercent(b.progress.Percent)
-	width := 20
-	if avail := m.contentWidth() - 22; avail < width {
-		width = max(4, avail)
+	p := b.progress
+	pct := clampPercent(p.Percent)
+
+	counts := ""
+	if p.Total > 0 && p.Current >= 0 {
+		counts = m.theme.Detail.Render(fmt.Sprintf("  %s / %s", commas(p.Current), commas(p.Total)))
 	}
+
+	// The bar takes what is left after the indent, the counts and the percentage.
+	// Measuring the finished line and then clamping it is how the count used to
+	// be cut off at narrow widths instead of the bar giving way.
+	const pctW = 5
+	fixed := 2 + countsLen(counts) + pctW
+	width := m.contentWidth() - fixed
+	if width > 24 {
+		width = 24
+	}
+	if width < minBarCells {
+		// Too narrow for a bar and its numbers together. The numbers are the more
+		// precise statement of the same fact, so they win and the bar is dropped
+		// rather than rendering both at a width where neither can be read.
+		//
+		// The counts are abbreviated before they are given up entirely, because
+		// "812k / 1.0M" still carries the magnitude and "81%" does not. Only when
+		// even the abbreviation will not fit does the percentage stand alone.
+		pctText := m.theme.Detail.Render(fmt.Sprintf("%3.0f%%", pct))
+		for _, pair := range [][2]string{
+			{shortCount(p.Current), shortCount(p.Total)},
+			{shortCount(p.Current), commas(p.Total)},
+			{commas(p.Current), commas(p.Total)},
+		} {
+			if p.Total <= 0 || p.Current < 0 {
+				break
+			}
+			row := m.theme.Detail.Render(fmt.Sprintf("  %s / %s", pair[0], pair[1])) + " " + pctText
+			if lipgloss.Width(stripANSI(row)) <= m.contentWidth() {
+				return []string{row}
+			}
+		}
+		return []string{clampLine("  "+pctText, m.contentWidth())}
+	}
+
 	filled := int(pct / 100 * float64(width))
 	bar := m.theme.BarFill.Render(strings.Repeat("█", filled)) +
 		m.theme.BarEmpty.Render(strings.Repeat("░", max(0, width-filled)))
-	return []string{"  " + bar + " " + m.theme.Detail.Render(fmt.Sprintf("%3.0f%%", pct))}
+	return []string{"  " + bar + " " + m.theme.Detail.Render(fmt.Sprintf("%3.0f%%", pct)) + counts}
+}
+
+// countsLen is the width of a rendered counts string.
+func countsLen(s string) int { return lipgloss.Width(s) }
+
+// minBarCells is the narrowest a progress bar is drawn.
+//
+// A bar of four cells can only report 0, 25, 50, 75 or 100 percent, so it is a
+// decoration that suggests a reading it cannot give. Below this width the
+// percentage is drawn on its own, which is the honest version of the same fact.
+const minBarCells = 8
+
+// shortCount abbreviates a count to its magnitude, which is the part that is
+// worth a narrow column: 812,447 becomes "812k" and 1,000,000 becomes "1.0M".
+//
+// One decimal below a thousand is not worth the column, so 9,500 becomes "9.5k"
+// and 950 becomes "950". Rounding up past the next unit would report more work
+// than the tool said it had, which is the one direction this must not err in.
+func shortCount(n int64) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	// Tenths are computed with integer division so that a value just below the
+	// next unit abbreviates down rather than rounding up into it. Formatting the
+	// quotient as a float and trimming a trailing zero turns 9,999 into "10.0k",
+	// which reports more work than the tool said it had and lands on the wrong
+	// unit besides.
+	var out string
+	switch {
+	case n < 1000:
+		out = strconv.FormatInt(n, 10)
+	case n < 1000000:
+		if tenths := n / 100; tenths >= 100 {
+			out = strconv.FormatInt(tenths/10, 10) + "k"
+		} else {
+			out = unitCount(tenths, "k")
+		}
+	case n < 1000000000:
+		if tenths := n / 100000; tenths >= 100 {
+			out = strconv.FormatInt(tenths/10, 10) + "M"
+		} else {
+			out = unitCount(tenths, "M")
+		}
+	default:
+		if tenths := n / 100000000; tenths >= 100 {
+			out = strconv.FormatInt(tenths/10, 10) + "B"
+		} else {
+			out = unitCount(tenths, "B")
+		}
+	}
+	if neg {
+		return "-" + out
+	}
+	return out
+}
+
+// unitCount builds a one-decimal abbreviation from tenths of the unit, dropping
+// the decimal when it would be a bare zero. The unit is appended separately so
+// that "1.0M" is recognised as the round "1M"; testing for a ".0" suffix on the
+// assembled string never matches, because the suffix is ".0M".
+func unitCount(tenths int64, unit string) string {
+	whole, frac := tenths/10, tenths%10
+	if frac == 0 {
+		return strconv.FormatInt(whole, 10) + unit
+	}
+	return strconv.FormatInt(whole, 10) + "." + strconv.FormatInt(frac, 10) + unit
+}
+
+// commas groups a count in thousands, the way a terminal tool prints one. An
+// ungrouped 1000000 is six digits of which the operator has to count the digits
+// to read the magnitude, and the whole point of showing the count is the
+// magnitude.
+func commas(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	if neg {
+		return "-" + string(out)
+	}
+	return string(out)
 }
 
 // renderSummary is the one-line outcome of a finished execution: what it was,
@@ -692,13 +931,23 @@ func (m model) renderSummary(b *block) string {
 	}
 
 	sep := m.theme.Detail.Render(" · ")
-	parts := []string{style.Render(verb + " " + duration(b.elapsed()))}
+	// The lead is what the row is: the mark and the outcome. It is never dropped
+	// or shortened, because a summary that cannot say whether the run passed is
+	// not a summary.
+	lead := style.Render(verb + " " + duration(b.elapsed()))
 
-	// A failed run should say why without the user having to expand it.
+	// The tallies are ordered by how much they change what the operator does next.
+	// Findings come before artifacts and events because a security tool is run for
+	// what it found; an artifact count is background, and an event count is
+	// diagnostic detail that is one keystroke away.
+	var parts []string
 	if b.err != "" {
-		parts = append(parts, m.theme.Failed.Render(truncate(b.err, max(12, m.contentWidth()-34))))
+		// A failed run should say why without the user having to expand it. The
+		// reason is placed after the tallies for that reason: it is the longest
+		// and least compressible part, and a run that failed with a 200-character
+		// stack must not push "12 findings" off the end of the row.
+		parts = append(parts, m.theme.Failed.Render(b.err))
 	}
-
 	if n := len(b.findings); n == 0 {
 		// "No findings" is only good news from a run that actually finished its
 		// work. On a failed run it is drawn dim: a scan that died before
@@ -719,7 +968,62 @@ func (m model) renderSummary(b *block) string {
 	if n := b.known; n > 0 {
 		parts = append(parts, m.theme.Detail.Render(plural(n, "event", "events")))
 	}
-	return "  " + mark + " " + strings.Join(parts, sep)
+
+	// Sort the trailing parts by how much they matter, most important first.
+	// Fitting then drops from the end, so what survives is the finding tally
+	// rather than whatever happened to be appended last.
+	sortSummaryParts(parts)
+
+	// The row is indent + mark + space + lead, and then each part costs a
+	// separator plus its own text. The budget is what is left after the fixed
+	// part; the loop spends it one part at a time.
+	//
+	// The previous version built the parts, joined them, and returned the result,
+	// which overran the terminal by whatever the parts needed beyond it. The
+	// viewport then cut the row at its own width, which is how a finished run came
+	// to read "12 finding" with the artifact and event counts gone entirely.
+	const minPartWidth = 8
+	sepW := lipgloss.Width(sep)
+	var out strings.Builder
+	out.WriteString("  ")
+	out.WriteString(mark)
+	out.WriteString(" ")
+	out.WriteString(lead)
+	room := m.contentWidth() - 3 - lipgloss.Width(mark) - lipgloss.Width(lead)
+	for _, part := range parts {
+		if room < sepW+minPartWidth {
+			break
+		}
+		out.WriteString(sep)
+		out.WriteString(truncate(stripANSI(part), room-sepW))
+		room -= sepW + lipgloss.Width(stripANSI(part))
+	}
+	return clampLine(out.String(), m.contentWidth())
+}
+
+// summaryPartWeight ranks a trailing summary part by how much it matters. Lower
+// sorts first, so the parts that get dropped when the row is too narrow are the
+// least informative ones.
+func summaryPartWeight(text string) int {
+	switch {
+	case strings.Contains(text, "finding"):
+		return 0
+	case strings.Contains(text, "no findings"):
+		return 0
+	case strings.Contains(text, "artifact"):
+		return 1
+	case strings.Contains(text, "event"):
+		return 2
+	default:
+		// A failure reason, or anything a tool printed that is not a tally.
+		return 3
+	}
+}
+
+func sortSummaryParts(parts []string) {
+	sort.SliceStable(parts, func(i, j int) bool {
+		return summaryPartWeight(parts[i]) < summaryPartWeight(parts[j])
+	})
 }
 
 // renderGroups renders the findings and artifacts of a finished execution.
@@ -1189,7 +1493,7 @@ func (m *model) viewportHeight(termHeight int) int {
 // composer's two rows is how a long form pushes its own fields off the top of
 // the terminal.
 func (m *model) chromeHeight() int {
-	rows := 1 // the header band
+	rows := m.headerHeight()
 	if len(m.blocks) > 0 {
 		rows++ // the strip between transcript and composer
 	}
@@ -1197,6 +1501,21 @@ func (m *model) chromeHeight() int {
 		return rows + m.formHeight()
 	}
 	return rows + 3 // the composer's rule, mode bar and input
+}
+
+// headerHeight is how many rows the header band occupies: one, or the height of
+// the banner when the tool supplied one.
+//
+// The banner is charged to the transcript here, which is what keeps a tall
+// wordmark from pushing the composer's input row off the bottom of a short
+// terminal. Chrome is the difference between the terminal and the viewport, so
+// anything drawn in the header has to be counted in it or the viewport is built
+// taller than the space it was given.
+func (m model) headerHeight() int {
+	if h := m.bannerHeight(); h > 0 {
+		return h
+	}
+	return 1
 }
 
 // formHeight is the number of rows an open form draws.
@@ -1245,17 +1564,55 @@ func (m model) capabilitiesRegion(width int) *Region {
 	}
 	r := NewRegion("CAPABILITIES", width)
 	r.Empty = "none published"
+	r.Height = m.capabilitiesBudget()
+	return m.fillCapabilitiesRegion(r)
+}
+
+// capabilitiesBudget is how many rows the capability region may draw, title and
+// rule included.
+//
+// The budget comes from viewportHeight rather than from a guess at the terminal
+// height. The region is drawn beside the transcript and shares its rows, so that
+// is the number that is actually true at draw time, and computing it from the
+// same function the viewport uses is what keeps the two from disagreeing. The
+// previous guess of height-10 meant a short terminal hid capabilities that would
+// have fitted, and then reported a "+N more" count unrelated to how many were
+// really hidden.
+func (m model) capabilitiesBudget() int {
+	h := m.viewportHeight(m.height)
+	if h <= chromeRows {
+		return 0
+	}
+	return h
+}
+
+// fillCapabilitiesRegion adds as many capabilities as the region's budget
+// allows, complete ones only, and says how many were left out.
+//
+// A capability takes its name, then its detail indented beneath it, then its
+// note. Rows that do not fit are not drawn half: a row cut off by the region's
+// bottom edge is worse than one capability fewer, because the operator cannot
+// tell an incomplete entry from a complete one.
+func (m model) fillCapabilitiesRegion(r *Region) *Region {
 	entries := m.caps.Entries()
-	// Fit as many complete capabilities as the terminal height allows, counting
-	// the two lines each takes. A row cut in half by the region's edge is worse
-	// than one capability less.
-	budget := max(2, m.height-10)
-	shown := 0
+	// chromeRows is subtracted because the title and the rule are part of the
+	// budget and are drawn before any content.
+	budget := r.Height - chromeRows
+	if r.Height <= 0 {
+		budget = 0
+	}
+	used, shown := 0, 0
+	// When anything is left out, the last row is spent saying so. Reserving it up
+	// front rather than adding it afterwards is what makes the notice reliable: a
+	// loop that fills the budget and only then tries to append "+N more" has
+	// already used the row, so the notice is the thing that gets dropped and the
+	// count of hidden capabilities goes unmentioned.
+	moreRow := 1
 	for _, e := range entries {
-		if shown+2 > budget {
+		rows := capabilityRows(e)
+		if budget > 0 && used+rows+moreRow > budget {
 			break
 		}
-		shown++
 		marker, style := "●", m.theme.Value
 		switch {
 		case !e.Available:
@@ -1268,19 +1625,38 @@ func (m model) capabilitiesRegion(width int) *Region {
 		// The style is applied here rather than only chosen: a dimmed row that
 		// renders identically to a live one is not dimmed, and the distinction
 		// the marker makes is the only thing left carrying it.
-		r.Add(style.Render(clampLine(marker+" "+e.Name, width-2)))
+		r.Add(style.Render(clampLine(marker+" "+e.Name, r.Width-2)))
 		if e.Detail != "" {
-			r.Add(m.theme.Detail.Render(clampLine("  "+e.Detail, width-2)))
+			r.Add(m.theme.Detail.Render(clampLine("  "+e.Detail, r.Width-2)))
 		}
 		if e.Note != "" && e.Note != "live provider" {
-			r.Add(m.theme.Hint.Render(clampLine("  "+e.Note, width-2)))
+			r.Add(m.theme.Hint.Render(clampLine("  "+e.Note, r.Width-2)))
 		}
+		used += rows
+		shown++
 	}
-	if len(entries) > shown {
-		remaining := len(entries) - shown
-		r.Add(m.theme.Hint.Render(clampLine(fmt.Sprintf("  +%d more", remaining), width-2)))
+	if remaining := len(entries) - shown; remaining > 0 {
+		// The count is what was actually left out, which is only true now that
+		// the loop stops on the budget rather than on a guess.
+		r.Add(m.theme.Hint.Render(clampLine(fmt.Sprintf("  +%d more", remaining), r.Width-2)))
 	}
 	return r
+}
+
+// capabilityRows is how many rows one capability occupies: its name, its detail
+// and its note, counting only the ones it actually has.
+//
+// Counting it rather than assuming two is what keeps the last capability from
+// being drawn when only half of it fits.
+func capabilityRows(e Entry) int {
+	n := 1
+	if e.Detail != "" {
+		n++
+	}
+	if e.Note != "" && e.Note != "live provider" {
+		n++
+	}
+	return n
 }
 
 // boxedRegion renders a region with its inner rule, or an empty string when

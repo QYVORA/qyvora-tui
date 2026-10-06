@@ -23,6 +23,15 @@ type Config struct {
 	Title string
 	// Version is shown in the header when set.
 	Version string
+	// Banner is the tool's identity art, drawn at the richest rung of the
+	// banner ladder that fits the terminal. A zero value draws nothing and the
+	// header carries the name on its own, which is the correct default: most
+	// tools are libraries and commands with no wordmark to show.
+	//
+	// The banner is a TUI-only affordance. It never reaches the one-shot CLI
+	// output, because that output is parsed by scripts and compared in tests and
+	// a wordmark is not part of any tool's contract.
+	Banner Banner
 	// In, Out and Err are the streams the TUI owns. Out defaults to stdout.
 	In  io.Reader
 	Out io.Writer
