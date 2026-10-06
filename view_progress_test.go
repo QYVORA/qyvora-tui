@@ -441,8 +441,20 @@ func TestBannerDegradesWithTheTerminalAndIsChargedToTheHeader(t *testing.T) {
 		if len(rows) > tc.h {
 			t.Errorf("w=%d h=%d: banner is %d rows in a %d row terminal", tc.w, tc.h, len(rows), tc.h)
 		}
-		if got := m.headerHeight(); got != len(rows) {
-			t.Errorf("w=%d h=%d: header is %d rows, banner is %d", tc.w, tc.h, got, len(rows))
+		// The header's declared height has to equal the rows it actually draws.
+		// These are not the same number when the status pill does not fit beside
+		// the art and is given a row of its own, so the invariant is stated
+		// against what is drawn rather than against the art alone. Asserting
+		// headerHeight against the art is what let the header claim six rows
+		// while writing seven: chromeHeight charges the transcript for what the
+		// header says it occupies, so an undercount hands the viewport rows that
+		// are not there and the frame scrolls -- taking the input row with it.
+		drawn := len(strings.Split(m.renderHeader(), "\n"))
+		if got := m.headerHeight(); got != drawn {
+			t.Errorf("w=%d h=%d: header claims %d rows and draws %d", tc.w, tc.h, got, drawn)
+		}
+		if drawn < len(rows) {
+			t.Errorf("w=%d h=%d: header draws %d rows for %d rows of art", tc.w, tc.h, drawn, len(rows))
 		}
 		// The composer's mode bar is the one row that must never leave: it is
 		// what says where the keyboard is. The placeholder text beside it is

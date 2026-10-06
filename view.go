@@ -162,7 +162,13 @@ func (m model) View() string {
 	// while the operator is following the newest output it is silent, and the
 	// moment they scroll back it reports how much has appeared below the fold.
 	if len(m.blocks) > 0 {
-		b.WriteString(m.renderStrip())
+		// The strip's row is reserved in chromeHeight whether or not it has
+		// anything to say, so the viewport does not resize as follow mode
+		// toggles. It is written as a full-width row even when silent: an empty
+		// string here would be a row of zero columns in the middle of a frame
+		// whose rows are all the terminal's width, which is a ragged edge the
+		// eye reads as a rendering fault rather than as a blank row.
+		b.WriteString(padTo(m.renderStrip(), m.width))
 		b.WriteString("\n")
 	}
 
@@ -416,8 +422,35 @@ func (m model) renderHeader() string {
 // computed, so a banner cannot push the composer's last row off the bottom of
 // the terminal. A banner that is allowed to overrun the viewport is the one
 // piece of furniture in the interface that would make the input unreachable.
+// bannerHeight is the header's row count when a banner is configured: the art
+// rows, plus a row for the status pill when it does not fit beside the art.
+//
+// The pill's row has to be counted here as well as drawn, or the header claims
+// fewer rows than it occupies. That is not a cosmetic off-by-one: chromeHeight
+// is the difference between the terminal and the viewport, so undercounting it
+// gives the transcript rows that were never there, and View writes one row more
+// than the terminal has. The extra row scrolls the frame, so the input row the
+// operator is typing into is the row that disappears.
 func (m model) bannerHeight() int {
-	return len(m.renderBanner())
+	art := m.renderBanner()
+	if len(art) == 0 {
+		return 0
+	}
+	if m.statusBesideBanner(art) {
+		return len(art)
+	}
+	return len(art) + 1 // the status pill on its own row below the art
+}
+
+// statusBesideBanner reports whether the status pill has room beside the art.
+func (m model) statusBesideBanner(art []string) bool {
+	artW := 0
+	for _, l := range art {
+		if n := lipgloss.Width(l); n > artW {
+			artW = n
+		}
+	}
+	return artW+1+lipgloss.Width(m.statusPill()) <= m.width
 }
 
 // renderBanner draws the tool's banner in the theme's identity colour, or
@@ -460,22 +493,28 @@ func (m model) bannerReservedRows() int {
 	return rows
 }
 
+// bannerReservedRowsFor is bannerReservedRows with the header's own height
+// substituted, for the call that happens before the banner has been rendered.
+// It is the only place the header is assumed to be one row, and it is an
+// assumption rather than a measurement because the banner's height is what is
+// being decided. The banner is measured against the space left over, so being one
+// row optimistic here costs the banner a row of height, never the composer its
+// input.
+
 // bannerWithStatus draws the banner rows with the status pill on the first one,
 // right-aligned, so both the identity and the session's state are on the same
 // row rather than in different corners.
 func (m model) bannerWithStatus(art []string, right string) string {
-	artW := 0
-	for _, l := range art {
-		if n := lipgloss.Width(l); n > artW {
-			artW = n
-		}
-	}
 	// The status sits beside the art only when the art fits whole with a column
 	// left over. Padding the art to the terminal's width and then appending the
 	// status is what produced a row twice the terminal's width; truncating the art
 	// to make room instead produced a cut-off wordmark with the pill jammed
 	// against its last glyph, which reads worse than either.
-	beside := artW+1+lipgloss.Width(right) <= m.width
+	//
+	// The same question is asked by bannerHeight, which has to know the answer to
+	// charge the right number of rows to chrome. Asking it here too would be a
+	// second place for the answer to change.
+	beside := m.statusBesideBanner(art)
 
 	var b strings.Builder
 	for i, line := range art {
@@ -497,7 +536,13 @@ func (m model) bannerWithStatus(art []string, right string) string {
 		b.WriteString(m.band(padTo(right, m.width)))
 		b.WriteString("\n")
 	}
-	return b.String()
+	// The last newline is removed because View adds one of its own after the
+	// header. Left in place it made the header one row taller than the height
+	// bannerHeight reported, so chromeHeight under-charged the header, the
+	// viewport was given rows that were never there, and View wrote one row more
+	// than the terminal has. The terminal scrolls, and the row that goes off the
+	// bottom is the one the operator is typing into.
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // band draws one full-width strip of fixed furniture.
