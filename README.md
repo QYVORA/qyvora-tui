@@ -2,8 +2,8 @@
 
 The shared interactive terminal application for the QYVORA security toolchain.
 
-All thirteen QYVORA tools expose the same interactive experience, built once
-here rather than thirteen times. A tool supplies a `tui.Runner`; this module
+All fourteen QYVORA frameworks expose the same interactive experience, built once
+here rather than fourteen times. A framework supplies a `tui.Runner`; this module
 supplies everything the user actually sees.
 
 ## What it is
@@ -45,7 +45,7 @@ Add it the ordinary way, then make sure the package is actually **imported** so
 the linker keeps it:
 
 ```bash
-go get github.com/QYVORA/qyvora-tui@v0.7.2
+go get github.com/QYVORA/qyvora-tui@v0.8.0
 ```
 
 ```go
@@ -61,7 +61,7 @@ go version -m ./mytool | grep qyvora-tui
 ```
 
 The line must carry an `h1:` content hash, for example
-`dep github.com/QYVORA/qyvora-tui v0.7.2 h1:...`. A version with no hash means
+`dep github.com/QYVORA/qyvora-tui v0.8.0 h1:...`. A version with no hash means
 the module was required but never linked.
 
 Both QYVORA checks enforce this rather than trusting review: `qyvora-conformance`
