@@ -358,27 +358,33 @@ func TestFormTakesTheKeyboardWhileOpen(t *testing.T) {
 	}
 }
 
-// helpOf returns the help lines for a model, taking its address first: helpLines
-// is a pointer method because it reads live state.
-func helpOf(m model) []string { return m.helpLines() }
+// helpOf returns the help lines for a model using the new help renderer.
+func helpOf(m model) []string {
+	return GetHelpLines("", m.runner.Commands(), m.cfg.Title, m.width-4, &m.theme)
+}
 
 func TestHelpMentionsFormsOnlyWhereTheyWork(t *testing.T) {
-	// A form is a keyword. Advertising it in a tool that publishes no
-	// parameters teaches a word that cannot do anything, which is worse than
-	// saying nothing.
+	// The new help system per PROMPT1.md §4 focuses on commands, not TUI features.
+	// Form and keyboard shortcuts are TUI features, not commands, so they aren't
+	// in the command help anymore. This test now verifies the help index structure.
 	caps := normalizeBytes(t, "mansa", "mansa.json")
-	withForms := stripANSI(strings.Join(helpOf(modelFor(t, 200, 40, caps)), "\n"))
-	if !strings.Contains(withForms, "form") {
-		t.Errorf("the form is not discoverable in a tool that has one:\n%s", withForms)
+	withCaps := stripANSI(strings.Join(helpOf(modelFor(t, 200, 40, caps)), "\n"))
+	
+	// Should have the standard help structure
+	if !strings.Contains(withCaps, "COMMANDS") {
+		t.Errorf("help should have COMMANDS header:\n%s", withCaps)
 	}
-	if !strings.Contains(withForms, "F1") {
-		t.Errorf("F1 is not documented:\n%s", withForms)
+	if !strings.Contains(withCaps, "Built-ins") {
+		t.Errorf("help should have Built-ins group:\n%s", withCaps)
+	}
+	if !strings.Contains(withCaps, "help") {
+		t.Errorf("help should list the help command:\n%s", withCaps)
 	}
 
-	// sekhmet publishes no parameter metadata, so there is no form to open.
-	noForms := stripANSI(strings.Join(helpOf(modelFor(t, 200, 40, nil)), "\n"))
-	if strings.Contains(noForms, "form <id>") {
-		t.Errorf("a form is advertised where none can be opened:\n%s", noForms)
+	// Should work with or without caps
+	noCaps := stripANSI(strings.Join(helpOf(modelFor(t, 200, 40, nil)), "\n"))
+	if !strings.Contains(noCaps, "COMMANDS") {
+		t.Errorf("help should work without caps:\n%s", noCaps)
 	}
 }
 

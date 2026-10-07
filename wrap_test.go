@@ -3,13 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
-
-	"github.com/charmbracelet/lipgloss"
 )
-
-// displayWidth is the measurement every wrap assertion is made against: the
-// columns the line actually occupies on screen.
-func displayWidth(s string) int { return lipgloss.Width(s) }
 
 // withoutSpaces strips every space, for the assertions that care only that the
 // content of a wrapped line survives and stays in order.

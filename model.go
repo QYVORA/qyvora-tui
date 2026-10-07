@@ -625,11 +625,20 @@ func (m *model) submit() tea.Cmd {
 	m.history.Add(line)
 	m.input.SetValue("")
 
-	switch strings.ToLower(line) {
-	case "help", "?":
-		m.notices = append(m.notices, m.helpLines()...)
+	// Handle help command specially to support "help <command>" syntax
+	if strings.HasPrefix(strings.ToLower(line), "help") || line == "?" {
+		query := ""
+		parts := strings.Fields(line)
+		if len(parts) > 1 {
+			query = parts[1]
+		}
+		helpLines := GetHelpLines(query, m.runner.Commands(), m.cfg.Title, m.width-4, &m.theme)
+		m.notices = append(m.notices, helpLines...)
 		m.refreshViewport()
 		return nil
+	}
+
+	switch strings.ToLower(line) {
 	case "clear", "cls":
 		m.blocks = nil
 		m.notices = nil
@@ -965,35 +974,6 @@ func (m *model) candidates(word string) []string {
 		}
 	}
 	return out
-}
-
-func (m *model) helpLines() []string {
-	lines := []string{
-		m.theme.Group.Render("Keys"),
-		"  " + m.theme.Detail.Render("ctrl+c") + "   stop the running command · " + m.theme.Detail.Render("ctrl+d") + "   leave",
-		"  " + m.theme.Detail.Render("ctrl+o") + "   show or hide the raw event log",
-		"  " + m.theme.Detail.Render("ctrl+e") + "   export all session output and events",
-		"  " + m.theme.Detail.Render("pgup/pgdn · shift+↑/↓") + "   scroll the session · " + m.theme.Detail.Render("ctrl+end") + "   jump to newest",
-		"  " + m.theme.Detail.Render("tab") + "         complete · " + m.theme.Detail.Render("↑/↓") + "         history",
-		"  " + m.theme.Detail.Render("F1") + "         show or hide the capability registry",
-		"  " + m.theme.Detail.Render("F2") + "         focus executions · " + m.theme.Detail.Render("enter/space") + "   expand a run",
-		"  " + m.theme.Detail.Render("wheel") + "        scroll · " + m.theme.Detail.Render("click") + "            select and jump",
-		"",
-		m.theme.Group.Render("Built-ins") + "  " + m.theme.Detail.Render("help · clear · quit"),
-		m.theme.Group.Render("Commands ") + strings.Join(commandNames(m.runner.Commands()), " · "),
-	}
-	// The form is listed only when the tool publishes something a form can be
-	// built from. Telling someone to type `form` in a tool that publishes no
-	// parameters teaches them a word that cannot work.
-	if formable := m.caps.Formable(); len(formable) > 0 {
-		lines = append(lines,
-			"",
-			m.theme.Group.Render("Forms")+"  "+
-				m.theme.Detail.Render("form")+"  fill in a capability's parameters"+
-				"  "+m.theme.Detail.Render("form <id>")+"  a specific one",
-		)
-	}
-	return lines
 }
 
 func commandNames(cmds []Command) []string {
