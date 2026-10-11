@@ -13,7 +13,7 @@ func TestCommandModelBackwardsCompat(t *testing.T) {
 		Short: "Scan a target",
 		Subs:  []string{"deep", "quick"},
 	}
-	
+
 	if cmd.Name != "scan" {
 		t.Errorf("Name = %q, want scan", cmd.Name)
 	}
@@ -28,12 +28,12 @@ func TestCommandModelBackwardsCompat(t *testing.T) {
 // TestCommandModelExtended tests the new fields.
 func TestCommandModelExtended(t *testing.T) {
 	cmd := Command{
-		Name:  "scan",
-		Short: "Scan a target",
-		Long:  "Performs a comprehensive scan of the specified target.",
-		Usage: "scan <target> [flags]",
+		Name:    "scan",
+		Short:   "Scan a target",
+		Long:    "Performs a comprehensive scan of the specified target.",
+		Usage:   "scan <target> [flags]",
 		Aliases: []string{"s", "probe"},
-		Group: "Recon",
+		Group:   "Recon",
 		Flags: []Flag{
 			{
 				Name:    "--depth",
@@ -51,7 +51,7 @@ func TestCommandModelExtended(t *testing.T) {
 		},
 		SeeAlso: []string{"analyze", "report"},
 	}
-	
+
 	if cmd.Long == "" {
 		t.Error("Long description should be set")
 	}
@@ -90,17 +90,17 @@ type mockCommandNode struct {
 	hidden     bool
 }
 
-func (m *mockCommandNode) Name() string              { return m.name }
-func (m *mockCommandNode) Short() string             { return m.short }
-func (m *mockCommandNode) Long() string              { return m.long }
-func (m *mockCommandNode) Usage() string             { return m.usage }
-func (m *mockCommandNode) Aliases() []string         { return m.aliases }
-func (m *mockCommandNode) Group() string             { return m.group }
-func (m *mockCommandNode) Flags() []FlagInfo         { return m.flags }
-func (m *mockCommandNode) Examples() []ExampleInfo   { return m.examples }
-func (m *mockCommandNode) Deprecated() string        { return m.deprecated }
-func (m *mockCommandNode) Children() []CommandNode   { return m.children }
-func (m *mockCommandNode) Hidden() bool              { return m.hidden }
+func (m *mockCommandNode) Name() string            { return m.name }
+func (m *mockCommandNode) Short() string           { return m.short }
+func (m *mockCommandNode) Long() string            { return m.long }
+func (m *mockCommandNode) Usage() string           { return m.usage }
+func (m *mockCommandNode) Aliases() []string       { return m.aliases }
+func (m *mockCommandNode) Group() string           { return m.group }
+func (m *mockCommandNode) Flags() []FlagInfo       { return m.flags }
+func (m *mockCommandNode) Examples() []ExampleInfo { return m.examples }
+func (m *mockCommandNode) Deprecated() string      { return m.deprecated }
+func (m *mockCommandNode) Children() []CommandNode { return m.children }
+func (m *mockCommandNode) Hidden() bool            { return m.hidden }
 
 // TestCollectCommandsWithExtendedMetadata tests that CollectCommands
 // extracts all available metadata via optional interfaces.
@@ -130,13 +130,13 @@ func TestCollectCommandsWithExtendedMetadata(t *testing.T) {
 			},
 		},
 	}
-	
+
 	commands := CollectCommands(root)
-	
+
 	if len(commands) != 1 {
 		t.Fatalf("expected 1 command, got %d", len(commands))
 	}
-	
+
 	scan := commands[0]
 	if scan.Name != "scan" {
 		t.Errorf("Name = %q, want scan", scan.Name)
@@ -171,9 +171,9 @@ func TestCollectCommandsFiltersHidden(t *testing.T) {
 			&mockCommandNode{name: "hidden", short: "Hidden command", hidden: true},
 		},
 	}
-	
+
 	commands := CollectCommands(root)
-	
+
 	if len(commands) != 1 {
 		t.Fatalf("expected 1 command (hidden filtered), got %d", len(commands))
 	}
@@ -204,13 +204,13 @@ func TestCollectCommandsHandlesMinimalNode(t *testing.T) {
 			&minimalNode{name: "basic", short: "Basic command"},
 		},
 	}
-	
+
 	commands := CollectCommands(root)
-	
+
 	if len(commands) != 1 {
 		t.Fatalf("expected 1 command, got %d", len(commands))
 	}
-	
+
 	cmd := commands[0]
 	if cmd.Name != "basic" {
 		t.Errorf("Name = %q, want basic", cmd.Name)

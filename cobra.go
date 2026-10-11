@@ -36,7 +36,7 @@ func (c *CobraAdapter) Children() []CommandNode {
 	if !c.cmd.HasSubCommands() {
 		return nil
 	}
-	
+
 	var children []CommandNode
 	for _, sub := range c.cmd.Commands() {
 		children = append(children, NewCobraAdapter(sub))
@@ -67,23 +67,23 @@ func (c *CobraAdapter) Group() string {
 	if c.cmd.GroupID != "" {
 		return c.cmd.GroupID
 	}
-	
+
 	// Fallback: try to infer from annotations
 	if group, ok := c.cmd.Annotations["group"]; ok {
 		return group
 	}
-	
+
 	return ""
 }
 
 func (c *CobraAdapter) Flags() []FlagInfo {
 	var flags []FlagInfo
-	
+
 	// Process all flags (local + inherited)
 	c.cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		flags = append(flags, flagInfoFromPflag(f))
 	})
-	
+
 	return flags
 }
 
@@ -91,7 +91,7 @@ func (c *CobraAdapter) Examples() []ExampleInfo {
 	if c.cmd.Example == "" {
 		return nil
 	}
-	
+
 	// Cobra's Example field is multi-line text with examples.
 	// Parse it into structured ExampleInfo entries.
 	return parseCobraExamples(c.cmd.Example)
@@ -110,48 +110,49 @@ func flagInfoFromPflag(f *pflag.Flag) FlagInfo {
 		Desc:     f.Usage,
 		Required: false, // pflag doesn't track required directly
 	}
-	
+
 	// Add short flag if available
 	if f.Shorthand != "" {
 		info.Short = "-" + f.Shorthand
 	}
-	
+
 	// Determine type from value
 	info.Type = f.Value.Type()
-	
+
 	// Get default value
 	if f.DefValue != "" && f.DefValue != "false" && f.DefValue != "[]" {
 		info.Default = f.DefValue
 	}
-	
+
 	// Check if required via annotations (common pattern)
 	if f.Annotations != nil {
 		if _, ok := f.Annotations["required"]; ok {
 			info.Required = true
 		}
 	}
-	
+
 	return info
 }
 
 // parseCobraExamples parses Cobra's multi-line Example field into structured entries.
 // Cobra examples are typically formatted as:
-//   command args
-//   command args  # with optional comment
+//
+//	command args
+//	command args  # with optional comment
 func parseCobraExamples(exampleText string) []ExampleInfo {
 	if exampleText == "" {
 		return nil
 	}
-	
+
 	var examples []ExampleInfo
 	lines := strings.Split(exampleText, "\n")
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		
+
 		// Split on # for comments
 		parts := strings.SplitN(line, "#", 2)
 		cmd := strings.TrimSpace(parts[0])
@@ -159,7 +160,7 @@ func parseCobraExamples(exampleText string) []ExampleInfo {
 		if len(parts) > 1 {
 			note = strings.TrimSpace(parts[1])
 		}
-		
+
 		if cmd != "" {
 			examples = append(examples, ExampleInfo{
 				Cmd:  cmd,
@@ -167,7 +168,7 @@ func parseCobraExamples(exampleText string) []ExampleInfo {
 			})
 		}
 	}
-	
+
 	return examples
 }
 

@@ -99,7 +99,7 @@ func collectRecursive(node CommandNode, depth int) []Command {
 	if node == nil {
 		return nil
 	}
-	
+
 	var out []Command
 	for _, child := range node.Children() {
 		if child == nil || child.Hidden() {
@@ -109,13 +109,13 @@ func collectRecursive(node CommandNode, depth int) []Command {
 		if name == "" || name == "help" || name == "completion" {
 			continue
 		}
-		
+
 		// Build command with all available metadata
 		c := Command{
 			Name:  name,
 			Short: child.Short(),
 		}
-		
+
 		// Try optional interfaces
 		if longer, ok := child.(Longer); ok {
 			c.Long = longer.Long()
@@ -156,7 +156,7 @@ func collectRecursive(node CommandNode, depth int) []Command {
 		if deprecator, ok := child.(Deprecator); ok {
 			c.Deprecated = deprecator.Deprecated()
 		}
-		
+
 		// Collect subcommands (still as []string for backwards compat)
 		// TODO: Migrate to recursive []Command structure
 		for _, sub := range child.Children() {
@@ -167,9 +167,9 @@ func collectRecursive(node CommandNode, depth int) []Command {
 				c.Subs = append(c.Subs, n)
 			}
 		}
-		
+
 		out = append(out, c)
-		
+
 		// Recursively collect subcommands if needed (for now, only go 2 levels deep)
 		// Full recursion would require changing Subs to []Command
 	}
