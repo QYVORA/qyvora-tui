@@ -59,6 +59,11 @@ func (r *InProcessRunner) Run(ctx context.Context, args []string, events io.Writ
 	// work rather than merely the UI.
 	var code int
 	err := Capture(events, func() error {
+		// The signal is set inside the capture, not around it: it should be
+		// visible to the tool for exactly as long as the tool is running, and no
+		// standalone banner printed elsewhere in this process should see it.
+		restore := enterTUISession()
+		defer restore()
 		code = r.Execute(ctx, full)
 		return nil
 	})

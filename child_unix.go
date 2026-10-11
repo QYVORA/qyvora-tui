@@ -35,6 +35,10 @@ func startChild(ctx context.Context, path string, args []string, stderr io.Write
 	_ = ctx
 	cmd := exec.Command(path, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Every child this function starts is running on the console's behalf, so
+	// it carries the session signal: the tool suppresses its own banner and lets
+	// the TUI's header be the only identity on screen.
+	cmd.Env = childEnv(os.Environ())
 
 	pr, pw, err := os.Pipe()
 	if err != nil {

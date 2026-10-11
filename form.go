@@ -116,6 +116,35 @@ func (f *Form) Insert(r rune) {
 	fl.cursor = len(fl.value[:fl.cursor] + string(r))
 }
 
+// fieldRune decides whether a decoded rune may be inserted into a field, and
+// returns the rune to insert when it may.
+//
+// A field holds one value, and a paste arrives as a single KeyMsg carrying many
+// runes straight from the clipboard. A terminal clipboard can carry tabs,
+// carriage returns, newlines and stray control bytes along with the visible
+// text. Inserting them verbatim corrupts the value and the argument it becomes,
+// and because they are not printable they render as gaps or as overlapping
+// glyphs -- the "garbled input" a paste produces.
+//
+// The rule is at the insertion point rather than after the fact: a rune is
+// accepted or translated here, so no caller can put a control byte into a value
+// in the first place. Newlines and tabs become a single space, so a pasted list
+// stays separated; other C0 controls and DEL are dropped; a rune that is not
+// valid UTF-8 is dropped rather than allowed to split a neighbouring character
+// and produce mojibake.
+func fieldRune(r rune) (rune, bool) {
+	switch {
+	case r == '\n' || r == '\r' || r == '\t':
+		return ' ', true
+	case r < 0x20 || r == 0x7f:
+		return 0, false
+	case !utf8.ValidRune(r):
+		return 0, false
+	default:
+		return r, true
+	}
+}
+
 // Backspace deletes the rune before the cursor.
 func (f *Form) Backspace() {
 	fl := f.Focus()

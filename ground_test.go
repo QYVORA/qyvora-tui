@@ -203,6 +203,62 @@ func TestEveryFrameRowHasAGround(t *testing.T) {
 	}
 }
 
+func TestInputFieldFillSpansTheWholeField(t *testing.T) {
+	// The typed text and the hint each end with a reset, and a reset clears the
+	// background. The field's fill has to be re-established after the last one,
+	// or the empty width a short command does not fill shows the frame colour
+	// and the field reads as coloured text rather than as a box.
+	withColorProfile(t, termenv.TrueColor, func() {
+		m := modelFor(t, 80, 12, nil)
+		m.theme = newTheme(true, nil)
+		m.theme.Depth = DepthTrueColor
+		m.input.SetValue("probe scan")
+		m = refresh(m)
+
+		rows := strings.Split(m.View(), "\n")
+		field := rows[len(rows)-1]
+		raised := leadingSGR(m.theme.Raised.Render("x"))
+		lastReset := strings.LastIndex(field, "\x1b[0m")
+		if lastReset < 0 {
+			t.Fatalf("field row has no reset to recover from: %q", field)
+		}
+		if !strings.Contains(field[lastReset:], raised) {
+			t.Errorf("field fill does not cover the row after the text:\n%q", field)
+		}
+	})
+}
+
+func TestFormFocusedFieldFillSpansTheField(t *testing.T) {
+	// The form's focused field is the same filled box as the composer, and has
+	// the same reset to recover from: the value ends in a reset, and the fill has
+	// to cover the rest of the row or the field stops at the end of the value.
+	withColorProfile(t, termenv.TrueColor, func() {
+		caps := normalizeBytes(t, "mansa", "mansa.json")
+		m := modelFor(t, 80, 20, caps)
+		m.theme = newTheme(true, nil)
+		m.theme.Depth = DepthTrueColor
+		m.input.SetValue("form mansa.analyze")
+		m.submit()
+		if m.form == nil {
+			t.Fatal("the form did not open")
+		}
+		m = refresh(m)
+
+		surface := leadingSGR(m.theme.Surface.Render("x"))
+		for _, r := range strings.Split(m.View(), "\n") {
+			if !strings.HasPrefix(stripANSI(r), "> ") {
+				continue
+			}
+			lastReset := strings.LastIndex(r, "\x1b[0m")
+			if lastReset < 0 || !strings.Contains(r[lastReset:], surface) {
+				t.Errorf("focused field is not filled across its width:\n%q", r)
+			}
+			return
+		}
+		t.Fatal("no focused form field row found")
+	})
+}
+
 func TestSurfaceLadderIsUsedInOrder(t *testing.T) {
 	// A ladder that is defined but not used in order is four arbitrary colours.
 	// Each step has to be on screen for its value to mean anything: Inset is the

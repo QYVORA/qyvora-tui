@@ -191,13 +191,13 @@ func Table(cols []Col, rows [][]string, width int) []string {
 	for ri, row := range rows {
 		// Handle rows that might wrap (mainly the last column)
 		rowLines := formatTableRow(row, colWidths, cols)
-		
+
 		// Apply header styling to first row if it's a header
 		// (Caller should pass header as first row if desired)
 		if ri == 0 && len(rows) > 1 {
 			// Could apply Faint style here, but styling is caller's responsibility
 		}
-		
+
 		lines = append(lines, rowLines...)
 	}
 
@@ -225,16 +225,16 @@ func KeyValue(pairs [][2]string, width int) []string {
 	for _, pair := range pairs {
 		key := pair[0]
 		value := pair[1]
-		
+
 		// Pad key to maxKeyWidth + 2 spaces
 		keyPadded := key + strings.Repeat(" ", maxKeyWidth-displayWidth(key)+2)
-		
+
 		// Check if value wraps
 		valueWidth := width - maxKeyWidth - 2
 		if valueWidth < 20 {
 			valueWidth = 20 // minimum readable width
 		}
-		
+
 		if displayWidth(value) <= valueWidth {
 			lines = append(lines, keyPadded+value)
 		} else {
@@ -314,7 +314,7 @@ func Numbered(items []string, width int) []string {
 		num := formatInt(i + 1)
 		prefix := num + ". "
 		indent := displayWidth(prefix)
-		
+
 		wrapped := Wrap(item, WrapOpts{
 			Width:         width,
 			FirstIndent:   indent,
@@ -335,7 +335,7 @@ func Truncate(s string, width int) string {
 	if w <= width {
 		return s
 	}
-	
+
 	// Truncate and add ellipsis
 	runes := []rune(s)
 	var truncated []rune
@@ -348,7 +348,7 @@ func Truncate(s string, width int) string {
 		truncated = append(truncated, r)
 		curWidth += rw
 	}
-	
+
 	return string(truncated) + "…"
 }
 
@@ -359,15 +359,15 @@ func TruncateMiddle(s string, width int) string {
 	if w <= width {
 		return s
 	}
-	
+
 	// Keep roughly 40% head, 40% tail, 20% for ...
 	headWidth := (width * 4) / 10
 	tailWidth := headWidth
 	ellipsis := "..."
-	
+
 	runes := []rune(s)
 	var head, tail []rune
-	
+
 	curWidth := 0
 	for _, r := range runes {
 		rw := runeWidth(r)
@@ -378,7 +378,7 @@ func TruncateMiddle(s string, width int) string {
 			break
 		}
 	}
-	
+
 	curWidth = 0
 	for i := len(runes) - 1; i >= 0; i-- {
 		r := runes[i]
@@ -390,7 +390,7 @@ func TruncateMiddle(s string, width int) string {
 			break
 		}
 	}
-	
+
 	return string(head) + ellipsis + string(tail)
 }
 
@@ -427,7 +427,7 @@ func splitWords(s string) []string {
 // Used for tool output with aligned tables.
 func wrapPreserving(s string, width, firstIndent, hangIndent int) []string {
 	var lines []string
-	
+
 	// Find leading spaces (for future use if needed)
 	_ = 0 // leadingSpaces placeholder
 	for i, r := range s {
@@ -436,12 +436,12 @@ func wrapPreserving(s string, width, firstIndent, hangIndent int) []string {
 			break
 		}
 	}
-	
+
 	// If line fits, return as-is with first indent
 	if displayWidth(s) <= width-firstIndent {
 		return []string{strings.Repeat(" ", firstIndent) + s}
 	}
-	
+
 	// Wrap at nearest space before width
 	runes := []rune(s)
 	curWidth := firstIndent
@@ -449,11 +449,11 @@ func wrapPreserving(s string, width, firstIndent, hangIndent int) []string {
 	if firstIndent > 0 {
 		curLine.WriteString(strings.Repeat(" ", firstIndent))
 	}
-	
+
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
 		rw := runeWidth(r)
-		
+
 		if curWidth+rw > width {
 			// Find last space to break at
 			lineStr := curLine.String()
@@ -473,15 +473,15 @@ func wrapPreserving(s string, width, firstIndent, hangIndent int) []string {
 				curWidth = hangIndent
 			}
 		}
-		
+
 		curLine.WriteRune(r)
 		curWidth += rw
 	}
-	
+
 	if curLine.Len() > 0 {
 		lines = append(lines, curLine.String())
 	}
-	
+
 	return lines
 }
 
@@ -490,12 +490,12 @@ func hardSplit(word string, width int) []string {
 	if width <= 0 {
 		width = 1
 	}
-	
+
 	var splits []string
 	runes := []rune(word)
 	var chunk []rune
 	curWidth := 0
-	
+
 	for _, r := range runes {
 		rw := runeWidth(r)
 		if curWidth+rw > width && len(chunk) > 0 {
@@ -506,11 +506,11 @@ func hardSplit(word string, width int) []string {
 		chunk = append(chunk, r)
 		curWidth += rw
 	}
-	
+
 	if len(chunk) > 0 {
 		splits = append(splits, string(chunk))
 	}
-	
+
 	return splits
 }
 
@@ -519,13 +519,13 @@ func computeColumnWidths(cols []Col, rows [][]string, totalWidth int) []int {
 	if len(cols) == 0 {
 		return nil
 	}
-	
+
 	// Start with minimum widths
 	widths := make([]int, len(cols))
 	for i, col := range cols {
 		widths[i] = col.Min
 	}
-	
+
 	// Calculate maximum needed width for each column
 	maxNeeded := make([]int, len(cols))
 	for _, row := range rows {
@@ -536,7 +536,7 @@ func computeColumnWidths(cols []Col, rows [][]string, totalWidth int) []int {
 			}
 		}
 	}
-	
+
 	// Apply max constraints
 	for i, col := range cols {
 		if col.Max > 0 && maxNeeded[i] > col.Max {
@@ -546,7 +546,7 @@ func computeColumnWidths(cols []Col, rows [][]string, totalWidth int) []int {
 			widths[i] = maxNeeded[i]
 		}
 	}
-	
+
 	// Calculate total used width (including separators)
 	usedWidth := 0
 	for i, w := range widths {
@@ -555,7 +555,7 @@ func computeColumnWidths(cols []Col, rows [][]string, totalWidth int) []int {
 			usedWidth += 2 // separator between columns
 		}
 	}
-	
+
 	// Distribute remaining width to flex columns
 	remaining := totalWidth - usedWidth
 	if remaining > 0 {
@@ -574,8 +574,41 @@ func computeColumnWidths(cols []Col, rows [][]string, totalWidth int) []int {
 			}
 		}
 	}
-	
+
+	// Shrink columns back inside the total width when the content (plus the
+	// two-column separators) still overruns it. Without this a table whose
+	// natural widths exceed the terminal would be rendered wider than its box
+	// and shear whatever sits beside it. The widest column that is still above
+	// its minimum is reduced first, one step at a time, so the excess comes
+	// out of the column with room to give rather than starved evenly across
+	// all of them.
+	for tableWidth(widths) > totalWidth {
+		victim := -1
+		for i, w := range widths {
+			if w > cols[i].Min && (victim == -1 || w > widths[victim]) {
+				victim = i
+			}
+		}
+		if victim == -1 {
+			break
+		}
+		widths[victim]--
+	}
+
 	return widths
+}
+
+// tableWidth is the total rendered width of a column set: the columns plus the
+// two-column separator between each pair.
+func tableWidth(widths []int) int {
+	used := 0
+	for i, w := range widths {
+		used += w
+		if i < len(widths)-1 {
+			used += 2
+		}
+	}
+	return used
 }
 
 // formatTableRow formats one row with the given column widths.
@@ -583,7 +616,7 @@ func formatTableRow(row []string, widths []int, cols []Col) []string {
 	if len(row) == 0 {
 		return nil
 	}
-	
+
 	// Check if any cell needs wrapping
 	needsWrap := false
 	for i := 0; i < len(row) && i < len(widths); i++ {
@@ -592,14 +625,14 @@ func formatTableRow(row []string, widths []int, cols []Col) []string {
 			break
 		}
 	}
-	
+
 	if !needsWrap {
 		// Simple case - no wrapping needed
 		var parts []string
 		for i := 0; i < len(row) && i < len(widths); i++ {
 			cell := row[i]
 			w := widths[i]
-			
+
 			// Truncate or pad
 			if displayWidth(cell) > w {
 				if cols[i].Policy == "truncate" {
@@ -609,7 +642,7 @@ func formatTableRow(row []string, widths []int, cols []Col) []string {
 					cell = Truncate(cell, w)
 				}
 			}
-			
+
 			// Align
 			padding := w - displayWidth(cell)
 			if cols[i].Align == "right" {
@@ -617,21 +650,21 @@ func formatTableRow(row []string, widths []int, cols []Col) []string {
 			} else {
 				cell = cell + strings.Repeat(" ", padding)
 			}
-			
+
 			parts = append(parts, cell)
 		}
 		return []string{strings.Join(parts, "  ")}
 	}
-	
+
 	// Complex case - wrap cells
 	// For now, only wrap the last column
 	wrappedCells := make([][]string, len(row))
 	maxLines := 1
-	
+
 	for i := 0; i < len(row) && i < len(widths); i++ {
 		cell := row[i]
 		w := widths[i]
-		
+
 		if displayWidth(cell) > w && cols[i].Policy == "wrap" {
 			wrapped := Wrap(cell, WrapOpts{Width: w})
 			wrappedCells[i] = wrapped
@@ -646,7 +679,7 @@ func formatTableRow(row []string, widths []int, cols []Col) []string {
 			wrappedCells[i] = []string{cell}
 		}
 	}
-	
+
 	// Format each line
 	var lines []string
 	for lineIdx := 0; lineIdx < maxLines; lineIdx++ {
@@ -658,24 +691,24 @@ func formatTableRow(row []string, widths []int, cols []Col) []string {
 			} else {
 				cell = "" // empty cell for wrapped overflow
 			}
-			
+
 			w := widths[i]
 			padding := w - displayWidth(cell)
 			if padding < 0 {
 				padding = 0
 			}
-			
+
 			if cols[i].Align == "right" {
 				cell = strings.Repeat(" ", padding) + cell
 			} else {
 				cell = cell + strings.Repeat(" ", padding)
 			}
-			
+
 			parts = append(parts, cell)
 		}
 		lines = append(lines, strings.Join(parts, "  "))
 	}
-	
+
 	return lines
 }
 

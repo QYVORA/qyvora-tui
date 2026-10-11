@@ -66,6 +66,12 @@ type Config struct {
 	// invented colour is worse than the shared one, and most tools should
 	// inherit.
 	Theme *Palette
+
+	// OutputCap is how many lines of one command's printed output the session
+	// retains per execution. The tail is kept, so commands that print without
+	// bound grow no further than this, and the transcript says when it trips.
+	// Zero uses the shared default (outputCap).
+	OutputCap int
 }
 
 // errNotInteractive means the streams cannot support a full-screen TUI. Tools
@@ -188,6 +194,12 @@ type model struct {
 	// running, and is cleared when that execution reports back.
 	cancel context.CancelFunc
 
+	// queued holds command lines submitted while an execution was in flight.
+	// The runner is single-flight, so instead of being silently dropped a
+	// new command waits here and starts automatically when the current run
+	// finishes. A queue is explicit: the composer says how many are waiting.
+	queued [][]string
+
 	// caps is the tool's normalised capability registry, or nil when the tool
 	// publishes none. It is read from the tool's own `capabilities -o json`
 	// output rather than authored here, so it cannot drift from the tool.
@@ -210,6 +222,10 @@ type model struct {
 	// open. A form only exists for a capability whose registry describes
 	// parameters, so most sessions never have one.
 	form *Form
+
+	// outputCap is the per-execution output retention limit, resolved from
+	// Config.OutputCap (defaulting to the shared outputCap) at startup.
+	outputCap int
 }
 
 // Run starts an interactive session and returns the process exit code.
@@ -296,6 +312,10 @@ func newModel(cfg Config, theme Theme) model {
 		height:    24,
 		state:     stateReady,
 	}
+	m.outputCap = cfg.OutputCap
+	if m.outputCap <= 0 {
+		m.outputCap = outputCap
+	}
 	m.input.Width = 60
 	m.input.PlaceholderStyle = m.theme.Detail
 	m.input.PromptStyle = m.theme.Prompt
@@ -361,8 +381,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case runDoneMsg:
-		m.finish(msg)
-		return m, nil
+		cmd := m.finish(msg)
+		return m, cmd
 
 	case capabilitiesMsg:
 		// Capabilities arriving after startup: the interface adopts them
@@ -386,7 +406,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // finish records an execution's outcome.
-func (m *model) finish(msg runDoneMsg) {
+//
+// It returns the command that starts the next queued execution, when one is
+// waiting, so FIX-005's "type and queue while one runs" behaves visibly rather
+// than dropping the command.
+func (m *model) finish(msg runDoneMsg) tea.Cmd {
 	m.running = false
 	m.cancel = nil
 
@@ -417,6 +441,29 @@ func (m *model) finish(msg runDoneMsg) {
 	// the narrower live view, and the transcript is rebuilt at its new width.
 	m.applyLayout(m.width, m.height)
 	m.refreshViewport()
+	return m.runNextQueued()
+}
+
+// runNextQueued starts the oldest queued command now that nothing is running.
+//
+// The queue is drained one command at a time: each run's completion calls back
+// here, so a queued command that fails or is cancelled simply leaves the next
+// one in line. The notice added after start names the command that is about to
+// run, because start clears the session's notices to give each run a clean
+// slate.
+func (m *model) runNextQueued() tea.Cmd {
+	if m.running || len(m.queued) == 0 {
+		return nil
+	}
+	args := m.queued[0]
+	m.queued = m.queued[1:]
+	cmd := m.start(args)
+	if n := len(m.queued); n > 0 {
+		m.notices = append(m.notices, fmt.Sprintf("%d more command(s) queued", n))
+	}
+	m.notices = append(m.notices, "Running next command: "+commandArgs(args))
+	m.refreshViewport()
+	return cmd
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -436,8 +483,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// returns to the prompt and lands in it.
 	if m.regionFocus {
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyEsc, tea.KeyTab, tea.KeyF2:
+		case tea.KeyCtrlD, tea.KeyEsc, tea.KeyTab, tea.KeyF2:
 			m.regionFocus = false
+			m.refreshViewport()
+		case tea.KeyCtrlC:
+			// Ctrl+C is deliberately not swallowed by region focus. It has a
+			// real job -- stop the work in flight -- and the operator pressing
+			// it from anywhere must be speaking to the run, not merely taking
+			// the keyboard to the composer. Cancellation is handled here so it
+			// works even while the region is focused, which is exactly when it
+			// is most needed.
+			m.regionFocus = false
+			if m.running {
+				return m.cancelExecution()
+			}
 			m.refreshViewport()
 		case tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown,
 			tea.KeyHome, tea.KeyEnd, tea.KeyCtrlA, tea.KeyCtrlE,
@@ -458,7 +517,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// preserves.
 		switch {
 		case m.running:
-			m.cancelExecution()
+			return m.cancelExecution()
 		case m.input.Value() != "":
 			m.input.SetValue("")
 		default:
@@ -632,7 +691,11 @@ func (m *model) submit() tea.Cmd {
 		if len(parts) > 1 {
 			query = parts[1]
 		}
-		helpLines := GetHelpLines(query, m.runner.Commands(), m.cfg.Title, m.width-4, &m.theme)
+		// Help is written into the transcript, so it is laid out to the
+		// transcript's width -- not the terminal's. On a wide shell with a side
+		// region drawn the two differ, and help rendered to the terminal width
+		// would run under the region.
+		helpLines := GetHelpLines(query, m.runner.Commands(), m.cfg.Title, m.transcriptWidth(m.width), &m.theme)
 		m.notices = append(m.notices, helpLines...)
 		m.refreshViewport()
 		return nil
@@ -645,6 +708,7 @@ func (m *model) submit() tea.Cmd {
 		m.regionFocus = false
 		m.execSel = 0
 		m.execOffset = 0
+		m.queued = nil
 		m.applyLayout(m.width, m.height)
 		m.refreshViewport()
 		return nil
@@ -684,9 +748,18 @@ func (m *model) submit() tea.Cmd {
 func (m *model) start(args []string) tea.Cmd {
 	// One execution at a time. Two overlapping runs would interleave two
 	// event streams into one transcript, and the in-process runner could not
-	// do it safely at all, since both would write to the captured stdout.
+	// do it safely at all, since both would write to the captured stdout. A
+	// command submitted mid-run is queued, not dropped and not run out of
+	// turn: the composer keeps working, the operator is told it is waiting,
+	// and finish() starts it when the current run reports back.
 	if m.running {
-		m.notices = append(m.notices, "An execution is already running; Ctrl+C stops it")
+		m.queued = append(m.queued, args)
+		n := len(m.queued)
+		notice := "Queued: " + commandArgs(args)
+		if n > 1 {
+			notice += fmt.Sprintf(" (%d waiting)", n)
+		}
+		m.notices = append(m.notices, notice)
 		m.refreshViewport()
 		return nil
 	}
@@ -696,6 +769,7 @@ func (m *model) start(args []string) tea.Cmd {
 	// next command would make a resolved error look permanent.
 	m.notices = nil
 	b := newBlock(m.nextID, args)
+	b.cap = m.outputCap
 	m.blocks = append(m.blocks, b)
 	m.activeID = b.id
 	m.running = true
@@ -839,9 +913,9 @@ func (m *model) applyStream(items []tea.Msg) {
 }
 
 // cancelExecution interrupts the in-flight execution.
-func (m *model) cancelExecution() {
+func (m *model) cancelExecution() (tea.Model, tea.Cmd) {
 	if m.cancel == nil {
-		return
+		return m, nil
 	}
 	m.state = stateCancelled
 	m.notices = append(m.notices, "Cancelling...")
@@ -850,6 +924,7 @@ func (m *model) cancelExecution() {
 	// down, the tool persists what it already produced, and the transcript
 	// records the outcome.
 	m.cancel()
+	return m, nil
 }
 
 // complete offers completions for the word under the cursor.
@@ -1036,14 +1111,10 @@ func clamp(v, lo, hi int) int {
 // registry describes no parameters yields no form, and the notice says so
 // rather than opening an empty one.
 func (m *model) openFormFor(id string) {
-	// One execution at a time, as everywhere else: a form is a way of starting
-	// a run, and opening one mid-run would leave the operator with an input they
-	// cannot submit.
-	if m.running {
-		m.notices = append(m.notices, "An execution is already running; Ctrl+C stops it")
-		m.refreshViewport()
-		return
-	}
+	// A form is a way of starting a run, and starting one mid-run queues it the
+	// same way a typed command does, so opening a form while an execution is in
+	// flight is allowed: the operator prepares the next command while the
+	// current one drains the queue.
 	if m.caps == nil || len(m.caps.Items) == 0 {
 		m.notices = append(m.notices, "No capability registry is available for "+m.cfg.Title)
 		m.refreshViewport()
@@ -1074,11 +1145,8 @@ func (m *model) openFormFor(id string) {
 // named rather than guessed at, because picking the first would be a choice the
 // tool never expressed.
 func (m *model) openForm() {
-	if m.running {
-		m.notices = append(m.notices, "An execution is already running; Ctrl+C stops it")
-		m.refreshViewport()
-		return
-	}
+	// See openFormFor: a form mid-run queues its submission rather than being
+	// refused, so the operator can prepare the next command while one runs.
 	if m.caps == nil {
 		m.notices = append(m.notices, "No capability registry is available for "+m.cfg.Title)
 		m.refreshViewport()
@@ -1244,8 +1312,15 @@ func (m model) handleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.Type == tea.KeyRunes {
+		// A paste arrives as one KeyMsg carrying many runes. Each is filtered at
+		// the insertion point so control bytes from the clipboard cannot corrupt
+		// the value; see fieldRune. Multi-byte input is already decoded into
+		// whole runes by the terminal layer, so nothing here can split a
+		// character.
 		for _, r := range msg.Runes {
-			m.form.Insert(r)
+			if r, ok := fieldRune(r); ok {
+				m.form.Insert(r)
+			}
 		}
 		m.refreshViewport()
 	}

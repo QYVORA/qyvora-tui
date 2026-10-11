@@ -6,14 +6,14 @@
 Probe wireless assessment                                                                                                                   
 │ CAPABILITIES                       ❯ probe analyze --last                                             EXECUTIONS                         │
 │ ──────────────────────────────────  │ ✓ completed 00:37 · 3 findings · 1 artifact                     ────────────────────────────────── │
-│ ● Scan                              │ FINDINGS  3                                                     ▸ ⠿ probe scan --band 2.4 00:47    │
-│ ● Assess                            │ ▌ CRITICAL  WPA2 uses a 4-character PSK     eduroam               ● scanning channels 1-11         │
-│ ● Discover                          │ ▌ HIGH      Management frame protection di… NETGEAR-42            ✗ 2 errors                       │
-│ ● Analyze                           │ ▌ MEDIUM    Beacon interval at the 102.4ms… linksys-guest         1284 events                      │
-│ ● Report                            │ ARTIFACTS  1                                                      ✓ 2 findings                     │
-│ ● Monitor                           │ ▪ analysis.sarif                                  84.2 kB         Channel change                   │
-│ ● Identify                                                                                            ▸ ✕ probe discover 00:01           │
-│ ● Export                           ❯ probe discover                                                   ▸ ✓ probe analyze --last 00:37     │
+│ ● Scan                              │ FINDINGS  3                                                     [⠋] probe scan --band 2.4 00:47    │
+│ ● Assess                            │ ▌ CRITICAL  WPA2 uses a 4-character PSK     eduroam                 ● scanning channels 1-11       │
+│ ● Discover                          │ ▌ HIGH      Management frame protection di… NETGEAR-42              ✗ 2 errors                     │
+│ ● Analyze                           │ ▌ MEDIUM    Beacon interval at the 102.4ms… linksys-guest           1284 events                    │
+│ ● Report                            │ ARTIFACTS  1                                                        ✓ 2 findings                   │
+│ ● Monitor                           │ ▪ analysis.sarif                                  84.2 kB           Channel change                 │
+│ ● Identify                                                                                            [✗] probe discover 00:01 ▸         │
+│ ● Export                           ❯ probe discover                                                   [✓] probe analyze --last 00:37 ▸   │
                                       │ ✗ failed 00:01 · no findings                                                                        
                                       │  output 1 line · F2 focus, enter expand                                                             
                                                                                                                                             

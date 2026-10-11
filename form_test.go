@@ -163,6 +163,46 @@ func TestFormEditingIsSafeForMultiByteCharacters(t *testing.T) {
 	}
 }
 
+func TestFormFieldInputIsFilteredForControlCharacters(t *testing.T) {
+	// A paste arrives as many runes at once, and a clipboard can carry tabs,
+	// carriage returns and other control bytes along with the visible text.
+	// They are handled at the insertion point, so a value never contains a byte
+	// the form would render as a gap or the tool would receive as corruption.
+	f := OpenForm(Capability{ID: "x.y", Input: []Parameter{{Name: "targets"}}})
+	// h, tab, o, newline, w, DEL, d, then a lone surrogate (not valid UTF-8).
+	for _, r := range []rune{'h', '\t', 'o', '\n', 'w', 0x7f, 'd', 0xD800} {
+		if r, ok := fieldRune(r); ok {
+			f.Insert(r)
+		}
+	}
+	// Tab and newline become a single space so a pasted list stays separated;
+	// DEL and the surrogate are dropped.
+	if got := f.Args()[1]; got != "h o wd" {
+		t.Errorf("filtered value = %q, want %q", got, "h o wd")
+	}
+}
+
+func TestFormPasteDoesNotCorruptTheValue(t *testing.T) {
+	// The wiring, not just the filter: a bracketed paste reaches the open form
+	// as one KeyMsg and must land as clean text.
+	caps := normalizeBytes(t, "mansa", "mansa.json")
+	m := modelFor(t, 200, 40, caps)
+	m.input.SetValue("form mansa.analyze")
+	m.submit()
+	if m.form == nil {
+		t.Fatal("the form did not open")
+	}
+	paste := "a\r\nb\tc\x01"
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	m = updated.(model)
+	if m.form == nil {
+		t.Fatal("the form closed on paste")
+	}
+	if got := m.form.Focus().value; strings.ContainsAny(got, "\r\n\t\x01") {
+		t.Errorf("paste left control characters in the field: %q", got)
+	}
+}
+
 func TestFormPrefillsDefaults(t *testing.T) {
 	// A default is the tool's own answer for the unset case, so it is filled in
 	// rather than left as a blank to be typed.
@@ -369,7 +409,7 @@ func TestHelpMentionsFormsOnlyWhereTheyWork(t *testing.T) {
 	// in the command help anymore. This test now verifies the help index structure.
 	caps := normalizeBytes(t, "mansa", "mansa.json")
 	withCaps := stripANSI(strings.Join(helpOf(modelFor(t, 200, 40, caps)), "\n"))
-	
+
 	// Should have the standard help structure
 	if !strings.Contains(withCaps, "COMMANDS") {
 		t.Errorf("help should have COMMANDS header:\n%s", withCaps)
@@ -489,9 +529,11 @@ func TestFormBlocksValidationErrors(t *testing.T) {
 	}
 }
 
-func TestFormIncompleteRunKeepsPartialOutput(t *testing.T) {
-	// The form path must not bypass the execution guards: one run at a time,
-	// and a notice rather than a silent no-op.
+func TestFormQueuesWhileARunIsInFlight(t *testing.T) {
+	// The form path honours the queue the same way a typed command does: a
+	// form opened mid-run is an operator preparing the next command, not a
+	// refusal, and submitting it queues rather than dropping it. Nothing may be
+	// silently ignored, and nothing may start out of turn.
 	caps := normalizeBytes(t, "mansa", "mansa.json")
 	m := modelFor(t, 200, 40, caps)
 	m.input.SetValue("form mansa.analyze")
@@ -505,16 +547,28 @@ func TestFormIncompleteRunKeepsPartialOutput(t *testing.T) {
 	if !m.running {
 		t.Fatal("the form did not start a run")
 	}
-	// Opening a form while a run is in flight is refused, for the same reason a
-	// second command is: the session can only be running one thing, and a form
-	// is a way of starting one.
+	// Opening a form while a run is in flight is preparation, not a refusal:
+	// the run continues and the form stands ready for the next command.
 	m.input.SetValue("form mansa.analyze")
 	m.submit()
-	if m.form != nil {
-		t.Error("a second form opened while a run was in flight")
+	if m.form == nil {
+		t.Fatal("a form opened mid-run was refused")
+	}
+	// Submitting the second form queues its command rather than running it.
+	for _, r := range "s" {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if !m.running {
+		t.Fatal("the run stopped when the second command was submitted")
+	}
+	if len(m.queued) != 1 {
+		t.Errorf("the second command was not queued: %d waiting", len(m.queued))
 	}
 	if len(m.notices) == 0 {
-		t.Error("no notice explained the refusal")
+		t.Error("no notice explained the queue")
 	}
 }
 

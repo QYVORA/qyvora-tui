@@ -6,46 +6,51 @@ import (
 	"strings"
 )
 
+// minHelpWidth is the narrowest help is ever laid out at. It is small because a
+// transcript can legitimately be narrow; the old floor of 40 overflowed any
+// terminal beneath it rather than wrapping.
+const minHelpWidth = 20
+
 // RenderHelpIndex produces the help index view per PROMPT1.md §4.
 // Groups commands by Group field, presents as two-column table with hanging indent.
 func RenderHelpIndex(cmds []Command, toolName string, width int, theme *Theme) []string {
-	if width < 40 {
-		width = 40
+	if width < minHelpWidth {
+		width = minHelpWidth
 	}
-	
+
 	var lines []string
-	
+
 	// Header
 	lines = append(lines, theme.Group.Render("COMMANDS"))
 	lines = append(lines, "")
-	
+
 	// Group commands
 	grouped := groupCommands(cmds)
 	groups := sortedGroupNames(grouped)
-	
+
 	// Add built-ins as their own group
 	builtins := []Command{
 		{Name: "help", Short: "List commands, or describe one"},
 		{Name: "clear", Short: "Clear the session transcript"},
 		{Name: "quit", Short: "Leave the TUI (Ctrl+D also works)"},
 	}
-	
+
 	// Render each group
 	for i, groupName := range groups {
 		if i > 0 {
 			lines = append(lines, "")
 		}
-		
+
 		groupCmds := grouped[groupName]
 		lines = append(lines, theme.Group.Render(groupName))
-		
+
 		// Two-column table with hanging indent
 		tableLines := renderCommandTable(groupCmds, width-2, theme)
 		for _, line := range tableLines {
 			lines = append(lines, "  "+line)
 		}
 	}
-	
+
 	// Built-ins at the end
 	if len(groups) > 0 {
 		lines = append(lines, "")
@@ -55,10 +60,10 @@ func RenderHelpIndex(cmds []Command, toolName string, width int, theme *Theme) [
 	for _, line := range tableLines {
 		lines = append(lines, "  "+line)
 	}
-	
+
 	lines = append(lines, "")
 	lines = append(lines, theme.Detail.Render("Type 'help <command>' for details."))
-	
+
 	return lines
 }
 
@@ -73,14 +78,14 @@ func groupCommands(cmds []Command) map[string][]Command {
 		}
 		grouped[group] = append(grouped[group], cmd)
 	}
-	
+
 	// Sort within each group
 	for _, cmds := range grouped {
 		sort.Slice(cmds, func(i, j int) bool {
 			return cmds[i].Name < cmds[j].Name
 		})
 	}
-	
+
 	return grouped
 }
 
@@ -89,14 +94,14 @@ func groupCommands(cmds []Command) map[string][]Command {
 func sortedGroupNames(grouped map[string][]Command) []string {
 	priority := []string{"Recon", "Analysis", "Reporting", "Session"}
 	var names []string
-	
+
 	// Add priority groups if they exist
 	for _, p := range priority {
 		if _, ok := grouped[p]; ok {
 			names = append(names, p)
 		}
 	}
-	
+
 	// Add remaining groups alphabetically
 	var others []string
 	for name := range grouped {
@@ -113,7 +118,7 @@ func sortedGroupNames(grouped map[string][]Command) []string {
 	}
 	sort.Strings(others)
 	names = append(names, others...)
-	
+
 	return names
 }
 
@@ -123,15 +128,15 @@ func renderCommandTable(cmds []Command, width int, theme *Theme) []string {
 	if len(cmds) == 0 {
 		return nil
 	}
-	
+
 	// Find longest name for column sizing
 	maxNameLen := 0
 	for _, cmd := range cmds {
-		if len(cmd.Name) > maxNameLen {
-			maxNameLen = len(cmd.Name)
+		if w := displayWidth(cmd.Name); w > maxNameLen {
+			maxNameLen = w
 		}
 	}
-	
+
 	// Column 1 width: name + padding
 	col1Width := maxNameLen + 2
 	if col1Width < 12 {
@@ -140,26 +145,35 @@ func renderCommandTable(cmds []Command, width int, theme *Theme) []string {
 	if col1Width > 20 {
 		col1Width = 20
 	}
-	
-	// Column 2 width: remaining space
-	col2Width := width - col1Width
-	if col2Width < 30 {
-		col2Width = 30
+
+	// The description needs a readable minimum. If the terminal cannot afford
+	// both columns, the name column gives way rather than the row overrunning
+	// the width and being truncated with an ellipsis — a wrapped description is
+	// legible, a clipped one is not.
+	const minDesc = 24
+	if width-col1Width < minDesc {
+		col1Width = max(8, width-minDesc)
 	}
-	
+	col2Width := width - col1Width
+	if col2Width < 1 {
+		col2Width = 1
+	}
+
 	var lines []string
 	for _, cmd := range cmds {
-		name := theme.Detail.Render(cmd.Name)
+		name := theme.Detail.Render(pad(truncate(cmd.Name, col1Width-1), col1Width))
 		desc := cmd.Short
-		
+
 		// Wrap description if needed
 		wrappedDesc := Wrap(desc, WrapOpts{Width: col2Width})
-		
+		if len(wrappedDesc) == 0 {
+			wrappedDesc = []string{""}
+		}
+
 		for i, descLine := range wrappedDesc {
 			if i == 0 {
 				// First line: name + description
-				namePart := name + strings.Repeat(" ", col1Width-displayWidth(cmd.Name))
-				lines = append(lines, namePart+descLine)
+				lines = append(lines, name+descLine)
 			} else {
 				// Continuation lines: indent to align with description
 				indent := strings.Repeat(" ", col1Width)
@@ -167,22 +181,22 @@ func renderCommandTable(cmds []Command, width int, theme *Theme) []string {
 			}
 		}
 	}
-	
+
 	return lines
 }
 
 // RenderHelpDetail produces detailed help for a single command per PROMPT1.md §4.
 // Sections: NAME, USAGE, DESCRIPTION, SUBCOMMANDS, FLAGS, EXAMPLES, SEE ALSO.
 func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []string {
-	if width < 40 {
-		width = 40
+	if width < minHelpWidth {
+		width = minHelpWidth
 	}
 	if width > 100 {
 		width = 100
 	}
-	
+
 	var lines []string
-	
+
 	// NAME section
 	lines = append(lines, theme.Group.Render("NAME"))
 	nameText := cmd.Name + " - " + cmd.Short
@@ -190,7 +204,7 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 	for _, line := range wrapped {
 		lines = append(lines, "  "+line)
 	}
-	
+
 	// USAGE section (if available)
 	if cmd.Usage != "" {
 		lines = append(lines, "")
@@ -205,7 +219,7 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 			lines = append(lines, "  "+line)
 		}
 	}
-	
+
 	// DESCRIPTION section (Long field)
 	if cmd.Long != "" {
 		lines = append(lines, "")
@@ -215,7 +229,7 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 			lines = append(lines, "  "+line)
 		}
 	}
-	
+
 	// ALIASES section (if available)
 	if len(cmd.Aliases) > 0 {
 		lines = append(lines, "")
@@ -226,7 +240,7 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 			lines = append(lines, "  "+line)
 		}
 	}
-	
+
 	// SUBCOMMANDS section (if available)
 	if len(cmd.Subs) > 0 {
 		lines = append(lines, "")
@@ -237,7 +251,7 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 			lines = append(lines, "  "+line)
 		}
 	}
-	
+
 	// FLAGS section (if available)
 	if len(cmd.Flags) > 0 {
 		lines = append(lines, "")
@@ -247,7 +261,7 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 			lines = append(lines, "  "+line)
 		}
 	}
-	
+
 	// EXAMPLES section (if available)
 	if len(cmd.Examples) > 0 {
 		lines = append(lines, "")
@@ -265,7 +279,7 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 			}
 		}
 	}
-	
+
 	// SEE ALSO section (if available)
 	if len(cmd.SeeAlso) > 0 {
 		lines = append(lines, "")
@@ -276,7 +290,7 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 			lines = append(lines, "  "+line)
 		}
 	}
-	
+
 	// DEPRECATED notice (if applicable)
 	if cmd.Deprecated != "" {
 		lines = append(lines, "")
@@ -287,14 +301,14 @@ func RenderHelpDetail(cmd Command, toolName string, width int, theme *Theme) []s
 			lines = append(lines, "  "+line)
 		}
 	}
-	
+
 	return lines
 }
 
 // renderFlags produces formatted flag descriptions.
 func renderFlags(flags []Flag, width int, theme *Theme) []string {
 	var lines []string
-	
+
 	for _, f := range flags {
 		// Flag line: --name, -s
 		flagParts := []string{}
@@ -305,7 +319,7 @@ func renderFlags(flags []Flag, width int, theme *Theme) []string {
 			flagParts = append(flagParts, f.Short)
 		}
 		flagLine := strings.Join(flagParts, ", ")
-		
+
 		// Add type and default if available
 		if f.Type != "" && f.Type != "bool" {
 			flagLine += " <" + f.Type + ">"
@@ -316,9 +330,9 @@ func renderFlags(flags []Flag, width int, theme *Theme) []string {
 		if f.Default != "" {
 			flagLine += " [default: " + f.Default + "]"
 		}
-		
+
 		lines = append(lines, theme.Detail.Render(flagLine))
-		
+
 		// Description wrapped with indent
 		if f.Desc != "" {
 			descWrapped := Wrap(f.Desc, WrapOpts{Width: width - 2})
@@ -326,28 +340,28 @@ func renderFlags(flags []Flag, width int, theme *Theme) []string {
 				lines = append(lines, "  "+line)
 			}
 		}
-		
+
 		lines = append(lines, "")
 	}
-	
+
 	// Remove trailing blank line
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	
+
 	return lines
 }
 
 // RenderHelpNotFound produces help for an unknown command with suggestions.
 func RenderHelpNotFound(query string, cmds []Command, theme *Theme) []string {
 	var lines []string
-	
+
 	lines = append(lines, theme.Group.Render(fmt.Sprintf("Unknown command: %s", query)))
 	lines = append(lines, "")
-	
+
 	// Find suggestions using edit distance
 	suggestions := findSuggestions(query, cmds, 3)
-	
+
 	if len(suggestions) > 0 {
 		lines = append(lines, "Did you mean:")
 		for _, s := range suggestions {
@@ -355,9 +369,9 @@ func RenderHelpNotFound(query string, cmds []Command, theme *Theme) []string {
 		}
 		lines = append(lines, "")
 	}
-	
+
 	lines = append(lines, "Type 'help' to see all commands.")
-	
+
 	return lines
 }
 
@@ -367,9 +381,9 @@ func findSuggestions(query string, cmds []Command, maxSuggestions int) []Command
 		cmd      Command
 		distance int
 	}
-	
+
 	var candidates []candidate
-	
+
 	// Add built-ins
 	builtins := []Command{
 		{Name: "help", Short: "List commands, or describe one"},
@@ -378,14 +392,14 @@ func findSuggestions(query string, cmds []Command, maxSuggestions int) []Command
 	}
 	allCmds := append([]Command{}, cmds...)
 	allCmds = append(allCmds, builtins...)
-	
+
 	for _, cmd := range allCmds {
 		dist := levenshtein(query, cmd.Name)
 		if dist <= 3 { // Only suggest if distance is reasonable
 			candidates = append(candidates, candidate{cmd, dist})
 		}
 	}
-	
+
 	// Sort by distance, then alphabetically
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].distance != candidates[j].distance {
@@ -393,13 +407,13 @@ func findSuggestions(query string, cmds []Command, maxSuggestions int) []Command
 		}
 		return candidates[i].cmd.Name < candidates[j].cmd.Name
 	})
-	
+
 	// Return top N
 	result := []Command{}
 	for i := 0; i < len(candidates) && i < maxSuggestions; i++ {
 		result = append(result, candidates[i].cmd)
 	}
-	
+
 	return result
 }
 
@@ -407,20 +421,20 @@ func findSuggestions(query string, cmds []Command, maxSuggestions int) []Command
 func levenshtein(a, b string) int {
 	a = strings.ToLower(a)
 	b = strings.ToLower(b)
-	
+
 	if len(a) == 0 {
 		return len(b)
 	}
 	if len(b) == 0 {
 		return len(a)
 	}
-	
+
 	// Create matrix
 	matrix := make([][]int, len(a)+1)
 	for i := range matrix {
 		matrix[i] = make([]int, len(b)+1)
 	}
-	
+
 	// Initialize first row and column
 	for i := 0; i <= len(a); i++ {
 		matrix[i][0] = i
@@ -428,7 +442,7 @@ func levenshtein(a, b string) int {
 	for j := 0; j <= len(b); j++ {
 		matrix[0][j] = j
 	}
-	
+
 	// Fill matrix
 	for i := 1; i <= len(a); i++ {
 		for j := 1; j <= len(b); j++ {
@@ -443,7 +457,7 @@ func levenshtein(a, b string) int {
 			)
 		}
 	}
-	
+
 	return matrix[len(a)][len(b)]
 }
 
@@ -466,7 +480,7 @@ func GetHelpLines(query string, cmds []Command, toolName string, width int, them
 	if query == "" {
 		return RenderHelpIndex(cmds, toolName, width, theme)
 	}
-	
+
 	// Search for the command (including built-ins)
 	builtins := []Command{
 		{
@@ -486,10 +500,10 @@ func GetHelpLines(query string, cmds []Command, toolName string, width int, them
 			Long:  "Exit the interactive session. All unsaved state will be lost. You can also press Ctrl+D to quit.",
 		},
 	}
-	
+
 	allCmds := append([]Command{}, cmds...)
 	allCmds = append(allCmds, builtins...)
-	
+
 	for _, cmd := range allCmds {
 		if cmd.Name == query {
 			return RenderHelpDetail(cmd, toolName, width, theme)
@@ -501,7 +515,7 @@ func GetHelpLines(query string, cmds []Command, toolName string, width int, them
 			}
 		}
 	}
-	
+
 	// Not found
 	return RenderHelpNotFound(query, cmds, theme)
 }

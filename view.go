@@ -172,15 +172,26 @@ func (m model) View() string {
 		b.WriteString("\n")
 	}
 
+	var composer string
 	if m.form != nil {
 		// The form replaces the composer while it is open. Two input lines at
 		// once would leave the operator unsure which one their keystrokes are
 		// going to.
-		b.WriteString(m.renderForm())
-		return m.paintFrame(strings.Split(b.String(), "\n"), transcriptRows)
+		composer = m.renderForm()
+	} else {
+		composer = m.renderComposer()
 	}
-	b.WriteString(m.renderComposer())
-	return m.paintFrame(strings.Split(b.String(), "\n"), transcriptRows)
+	// The composer block grounds itself: each of its rows carries the fill it
+	// should have and re-establishes it after every reset the row contains.
+	// paintFrame must therefore leave the block alone -- laying the frame's
+	// ground over it would clear the field's fill at the first reset the input
+	// text emits, which is exactly the "coloured text instead of a field" bug.
+	// The block is always the last rows of the frame, so it is counted from the
+	// end rather than located by searching the frame.
+	b.WriteString(composer)
+	frame := strings.Split(b.String(), "\n")
+	selfGrounded := strings.Count(composer, "\n") + 1
+	return m.paintFrame(frame, transcriptRows, selfGrounded)
 }
 
 // paintFrame puts the whole frame on the tool's own ground.
@@ -201,12 +212,23 @@ func (m model) View() string {
 // The ground goes down first and the panels paint over it, so a row is painted
 // twice but never twice in the wrong order: Inset covers the frame, and the
 // transcript and panels that already carry their own fills replace it.
-func (m model) paintFrame(rows []string, transcriptRows int) string {
+//
+// selfGrounded is the number of trailing rows that ground themselves and must be
+// left untouched: the composer and the form, whose rows carry a fill (Raised for
+// the input field, Surface for the focused form row) and re-establish it after
+// every reset. Grounding those rows with Inset here would overwrite that fill at
+// the first reset they contain, which is the bug this parameter exists to avoid.
+func (m model) paintFrame(rows []string, transcriptRows, selfGrounded int) string {
 	if !m.theme.Color {
 		return strings.Join(rows, "\n")
 	}
+	first := len(rows) - selfGrounded
 	painted := make([]string, 0, len(rows))
 	for i, row := range rows {
+		if i >= first {
+			painted = append(painted, row)
+			continue
+		}
 		row = ground(m.theme.Inset, row, m.width)
 		// The transcript is the field the work happens on: one step above the
 		// frame, so the panels beside it read as raised off it. It starts below
@@ -230,7 +252,7 @@ func (m model) renderForm() string {
 		return m.renderComposer()
 	}
 	var b strings.Builder
-	b.WriteString(m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))))
+	b.WriteString(ground(m.theme.Inset, m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))), m.width))
 	b.WriteString("\n")
 	// The form takes the composer's place, so it takes the mode bar too. Without
 	// it the keyboard's location is stated only in the footer hint, which is the
@@ -238,7 +260,7 @@ func (m model) renderForm() string {
 	b.WriteString(m.renderModeBar())
 	b.WriteString("\n")
 	title := m.theme.Title.Render("FILL IN  " + f.Capability.Name)
-	b.WriteString(clampLine(title, m.width))
+	b.WriteString(ground(m.theme.Inset, clampLine(title, m.width), m.width))
 	b.WriteString("\n")
 
 	for i, fl := range f.fields {
@@ -262,16 +284,23 @@ func (m model) renderForm() string {
 		if fl.cursor > 0 && i == f.focus {
 			row += "▏"
 		}
+		// The focused field is a filled box, and it has to be a solid one: the
+		// value's own styling ends in a reset, so the field is grounded with the
+		// fill re-established after every reset rather than rendered with a bare
+		// Render that would leave the box's tail unpainted. The remaining rows
+		// sit on the frame's ground.
 		row = padTo(clampLine(row, m.width), m.width)
 		if i == f.focus {
-			row = m.theme.Surface.Render(row)
+			row = ground(m.theme.Inset, ground(m.theme.Surface, row, m.width), m.width)
+		} else {
+			row = ground(m.theme.Inset, row, m.width)
 		}
 		b.WriteString(row)
 		b.WriteString("\n")
 	}
 
 	if f.Err() != "" {
-		b.WriteString(clampLine(m.theme.Failed.Render("  "+f.Err()), m.width))
+		b.WriteString(ground(m.theme.Inset, clampLine(m.theme.Failed.Render("  "+f.Err()), m.width), m.width))
 		b.WriteString("\n")
 	}
 	// The keys are drawn with the shared key hint, so the form's footer and the
@@ -279,7 +308,7 @@ func (m model) renderForm() string {
 	hint := "  " + keyHint(m.theme, "enter", "run", m.width-2) +
 		"  " + keyHint(m.theme, "tab", "next field", m.width-2) +
 		"  " + keyHint(m.theme, "esc", "cancel", m.width-2)
-	b.WriteString(clampLine(hint, m.width))
+	b.WriteString(ground(m.theme.Inset, clampLine(hint, m.width), m.width))
 	return b.String()
 }
 
@@ -609,7 +638,14 @@ func (m model) renderModeBar() string {
 	if w := lipgloss.Width(bar); w < m.width {
 		bar += strings.Repeat(" ", m.width-w)
 	}
-	return m.theme.ModeBar.Render(clampLine(bar, m.width))
+	// The mode bar carries its own fill, and the label inside it ends with a
+	// reset that would clear that fill for every cell to the right of the label.
+	// It is grounded twice, exactly as paintFrame grounds the frame: Inset goes
+	// down first so the row still sits on the frame's field, and the mode bar's
+	// own fill is raised on top of it and re-established after each reset. A
+	// single bare Render would leave the strip past the label on the frame
+	// colour instead of on the bar.
+	return ground(m.theme.Inset, ground(m.theme.ModeBar, clampLine(bar, m.width), m.width), m.width)
 }
 
 // renderStrip is the row between the transcript and the composer. It is the
@@ -638,7 +674,7 @@ func (m model) renderComposer() string {
 	// panel: a rule above it, a mode bar naming where the keyboard is, and a
 	// green prompt are enough.
 	var b strings.Builder
-	b.WriteString(m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))))
+	b.WriteString(ground(m.theme.Inset, m.theme.Rule.Render(strings.Repeat("─", max(1, m.width))), m.width))
 	b.WriteString("\n")
 	b.WriteString(m.renderModeBar())
 	b.WriteString("\n")
@@ -661,8 +697,15 @@ func (m model) renderComposer() string {
 	// panels. Drawn on Surface -- which is what it did -- the field the caret
 	// sits in is indistinguishable from a panel being read, and the eye has no
 	// place to rest while typing.
+	//
+	// The fill goes on through ground rather than a bare Render. The typed text
+	// and the hint both end with a reset, and a reset clears the background, so
+	// a bare Render would colour the characters and leave the rest of the field
+	// -- the empty width a short command does not fill -- on the terminal's own
+	// background. That is the "coloured text rather than a field" the field
+	// looked like before.
 	line = padTo(clampLine(line, m.width), m.width)
-	b.WriteString(m.theme.Raised.Render(line))
+	b.WriteString(ground(m.theme.Inset, ground(m.theme.Raised, line, m.width), m.width))
 	return b.String()
 }
 
@@ -697,6 +740,12 @@ func (m model) hint() string {
 		return "↑↓ move · enter/space expand · esc back"
 	}
 	if m.running {
+		// The queue is the most important thing to say while work is in
+		// flight: the operator may have typed ahead, and knowing a second
+		// command is waiting is what stops a queued run from looking dropped.
+		if n := len(m.queued); n > 0 {
+			return fmt.Sprintf("ctrl+c stop · %d queued", n)
+		}
 		return "ctrl+c stop · ctrl+e export"
 	}
 	if m.showCapabilities {
@@ -1296,7 +1345,7 @@ func (m model) renderOutput(b *block, expanded bool) []string {
 	// speaking for itself.
 	lines := []string{"  " + m.theme.Heading.Render("OUTPUT")}
 	if b.outputOmitted {
-		lines = append(lines, "   "+m.theme.Detail.Render("(truncated to the last "+plural(outputCap, "line", "lines")+")"))
+		lines = append(lines, "   "+m.theme.Detail.Render("(truncated to the last "+plural(b.capLimit(), "line", "lines")+")"))
 	}
 	width := m.contentWidth() - 2
 	for _, raw := range b.output {

@@ -417,16 +417,49 @@ func TestFailedExecutionRecordsTheExitStatus(t *testing.T) {
 	}
 }
 
-func TestSecondExecutionIsRefusedWhileOneRuns(t *testing.T) {
+func TestSecondExecutionQueuesWhileOneRuns(t *testing.T) {
 	th := newTheme(false, nil)
 	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
 	m = resize(m, 100, 30)
 	m.running = true
 	if cmd := m.start([]string{"scan", "x"}); cmd != nil {
-		t.Error("a second execution was started while one was in flight")
+		t.Error("a queued execution started immediately while one was in flight")
 	}
 	if len(m.blocks) != 0 {
-		t.Errorf("a block was created for the refused execution: %d", len(m.blocks))
+		t.Errorf("a block was created for the queued execution: %d", len(m.blocks))
+	}
+	if len(m.queued) != 1 {
+		t.Fatalf("the second execution was not queued: %d waiting", len(m.queued))
+	}
+	if len(m.notices) == 0 {
+		t.Error("no notice explained the queue")
+	}
+}
+
+func TestQueuedExecutionStartsWhenTheRunFinishes(t *testing.T) {
+	// The queue is drained by completion, not by a timer: when a run reports
+	// back, the oldest waiting command takes its place and the finish handler
+	// returns the command that launches it.
+	th := newTheme(false, nil)
+	m := newModel(Config{Runner: &InProcessRunner{Execute: func(context.Context, []string) int { return 0 }, ToolName: "test"}}, th)
+	m = resize(m, 100, 30)
+	m.activeID = 1
+	m.running = true
+	m.blocks = append(m.blocks, newBlock(1, []string{"scan", "first"}))
+	m.queued = [][]string{{"scan", "second"}}
+
+	cmd := m.finish(runDoneMsg{exitCode: 0})
+	if len(m.queued) != 0 {
+		t.Errorf("the queue was not drained: %d waiting", len(m.queued))
+	}
+	if !m.running {
+		t.Error("the queued execution did not start")
+	}
+	if cmd == nil {
+		t.Error("finish returned no command for the queued execution")
+	}
+	if len(m.blocks) != 2 {
+		t.Errorf("the queued execution did not create a block: %d blocks", len(m.blocks))
 	}
 }
 

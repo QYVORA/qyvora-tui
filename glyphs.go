@@ -61,7 +61,32 @@ const (
 	glyphStatusCross  = "✕" // ✕
 	glyphCircleHollow = "○" // ○
 	glyphWarn         = "⚠" // ⚠
+
+	// The executions region shows each run as a checkbox, the way a task list
+	// does: an empty box for a run that has not finished, a checked box for one
+	// that succeeded, a crossed box for a failure, a dashed box for a
+	// cancellation. Each is exactly three cells wide, so the command column
+	// never shifts as a run changes state. A run in flight does not get its own
+	// mark: it borrows the interface's spinner (see spinnerFrames), which is
+	// what the rest of the interface uses to say "working".
+	glyphBoxPending   = "[ ]"
+	glyphBoxDone      = "[✓]"
+	glyphBoxFailed    = "[✗]"
+	glyphBoxCancelled = "[-]"
+
+	// Disclosure marks for a region row that can be expanded. They are kept
+	// here with the checkboxes so the two never drift into a half-open list:
+	// the checkbox says what happened, the disclosure says whether the detail
+	// under it is showing.
+	glyphDisclosureClosed = "▸" // ▸
+	glyphDisclosureOpen   = "▾" // ▾
 )
+
+// glyphBoxRunning is the checkbox for a run in flight, carrying the spinner
+// frame so the running mark animates with the rest of the interface rather than
+// freezing. The frame is one cell, so the box keeps the checklist column three
+// cells wide.
+func glyphBoxRunning(frame string) string { return "[" + frame + "]" }
 
 // boxSet is one complete set of corner and edge glyphs for a drawn frame.
 //

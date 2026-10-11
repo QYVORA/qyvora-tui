@@ -162,6 +162,62 @@ func TestExecutionsRegionExpandsAFinishedRunUnderKeys(t *testing.T) {
 	}
 }
 
+func TestExecutionsRegionRendersAsAChecklist(t *testing.T) {
+	// Each outcome leads with its own checkbox so the state is legible at a
+	// glance down the column: a checked box for success, a crossed box for a
+	// failure, a dashed box for a cancellation, and the interface's spinner
+	// inside the box while a run is in flight. A run that has finished carries a
+	// trailing disclosure mark; a running one does not, because it cannot be
+	// expanded.
+	m := modelFor(t, 200, 40, nil)
+	made := func(status Status) *block {
+		b := &block{command: "probe " + status.String(), started: nowish(), status: status}
+		if status != StatusRunning {
+			b.finished = nowish()
+		}
+		return b
+	}
+	blocks := []*block{made(StatusDone), made(StatusFailed), made(StatusCancelled), made(StatusRunning)}
+	m.blocks = blocks
+
+	const width = 40
+	headers := make(map[Status]string, len(blocks))
+	for _, b := range blocks {
+		headers[b.status] = stripANSI(m.execEntryHeader(b, width, 0))
+	}
+
+	for status, box := range map[Status]string{
+		StatusDone:      glyphBoxDone,
+		StatusFailed:    glyphBoxFailed,
+		StatusCancelled: glyphBoxCancelled,
+	} {
+		if got := headers[status]; !strings.HasPrefix(got, box) {
+			t.Errorf("%s row does not lead with %q: %q", status, box, got)
+		}
+		if !strings.Contains(headers[status], glyphDisclosureClosed) {
+			t.Errorf("%s row has no disclosure mark: %q", status, headers[status])
+		}
+	}
+
+	run := headers[StatusRunning]
+	if !strings.HasPrefix(run, "[") || !strings.Contains(run, spinnerFrames[m.spinner]) {
+		t.Errorf("running row does not carry the spinner box: %q", run)
+	}
+	if strings.Contains(run, glyphDisclosureClosed) || strings.Contains(run, glyphDisclosureOpen) {
+		t.Errorf("a running row shows a disclosure mark it cannot use: %q", run)
+	}
+
+	// The four states have to read differently; two rendering identically would
+	// make the column a lie.
+	seen := make(map[string]Status, len(headers))
+	for status, header := range headers {
+		if other, dup := seen[header]; dup {
+			t.Errorf("%s and %s render identically: %q", status, other, header)
+		}
+		seen[header] = status
+	}
+}
+
 func TestRegionFocusReturnsToTheComposer(t *testing.T) {
 	m := modelFor(t, 200, 40, nil)
 	m.start([]string{"scan"})

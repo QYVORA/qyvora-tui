@@ -20,14 +20,14 @@ func TestRenderHelpIndex(t *testing.T) {
 		{Name: "report", Short: "Generate report", Group: "Reporting"},
 		{Name: "info", Short: "Show info"},
 	}
-	
+
 	lines := RenderHelpIndex(cmds, "testtool", 80, testTheme)
-	
+
 	// Should have COMMANDS header
 	if len(lines) == 0 || !strings.Contains(lines[0], "COMMANDS") {
 		t.Error("Expected COMMANDS header")
 	}
-	
+
 	// Should have groups
 	text := strings.Join(lines, "\n")
 	if !strings.Contains(text, "Recon") {
@@ -39,7 +39,7 @@ func TestRenderHelpIndex(t *testing.T) {
 	if !strings.Contains(text, "Built-ins") {
 		t.Error("Expected Built-ins group")
 	}
-	
+
 	// Should have built-in commands
 	if !strings.Contains(text, "help") {
 		t.Error("Expected help command")
@@ -59,9 +59,9 @@ func TestGroupCommands(t *testing.T) {
 		{Name: "analyze", Group: "Analysis"},
 		{Name: "info"}, // No group
 	}
-	
+
 	grouped := groupCommands(cmds)
-	
+
 	if len(grouped["Recon"]) != 2 {
 		t.Errorf("Recon group: expected 2 commands, got %d", len(grouped["Recon"]))
 	}
@@ -87,10 +87,10 @@ func TestRenderHelpDetail(t *testing.T) {
 		},
 		SeeAlso: []string{"analyze", "report"},
 	}
-	
+
 	lines := RenderHelpDetail(cmd, "testtool", 80, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Should have all sections
 	if !strings.Contains(text, "NAME") {
 		t.Error("Expected NAME section")
@@ -110,7 +110,7 @@ func TestRenderHelpDetail(t *testing.T) {
 	if !strings.Contains(text, "SEE ALSO") {
 		t.Error("Expected SEE ALSO section")
 	}
-	
+
 	// Should have command details
 	if !strings.Contains(text, "scan") {
 		t.Error("Expected command name")
@@ -135,10 +135,10 @@ func TestRenderHelpDetailMinimal(t *testing.T) {
 		Name:  "basic",
 		Short: "Basic command",
 	}
-	
+
 	lines := RenderHelpDetail(cmd, "testtool", 80, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Should have NAME section
 	if !strings.Contains(text, "NAME") {
 		t.Error("Expected NAME section")
@@ -146,7 +146,7 @@ func TestRenderHelpDetailMinimal(t *testing.T) {
 	if !strings.Contains(text, "basic") {
 		t.Error("Expected command name")
 	}
-	
+
 	// Should NOT have optional sections
 	if strings.Contains(text, "USAGE") {
 		t.Error("Should not have USAGE section for minimal command")
@@ -164,10 +164,10 @@ func TestRenderHelpNotFound(t *testing.T) {
 		{Name: "scan", Short: "Scan a target"},
 		{Name: "analyze", Short: "Analyze results"},
 	}
-	
+
 	lines := RenderHelpNotFound("scam", cmds, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Should have error message
 	if !strings.Contains(text, "Unknown command") {
 		t.Error("Expected 'Unknown command' message")
@@ -175,7 +175,7 @@ func TestRenderHelpNotFound(t *testing.T) {
 	if !strings.Contains(text, "scam") {
 		t.Error("Expected query in error message")
 	}
-	
+
 	// Should have suggestions
 	if !strings.Contains(text, "Did you mean") {
 		t.Error("Expected suggestions")
@@ -200,7 +200,7 @@ func TestLevenshteinDistance(t *testing.T) {
 		{"help", "halp", 1},
 		{"quit", "quick", 2},
 	}
-	
+
 	for _, tt := range tests {
 		got := levenshtein(tt.a, tt.b)
 		if got != tt.expected {
@@ -215,7 +215,7 @@ func TestFindSuggestions(t *testing.T) {
 		{Name: "analyze", Short: "Analyze"},
 		{Name: "report", Short: "Report"},
 	}
-	
+
 	// Test close match
 	suggestions := findSuggestions("scam", cmds, 3)
 	if len(suggestions) == 0 {
@@ -224,13 +224,13 @@ func TestFindSuggestions(t *testing.T) {
 	if suggestions[0].Name != "scan" {
 		t.Errorf("Expected 'scan' as first suggestion, got %q", suggestions[0].Name)
 	}
-	
+
 	// Test no close matches
 	suggestions = findSuggestions("xyzabc", cmds, 3)
 	if len(suggestions) != 0 {
 		t.Errorf("Expected no suggestions for 'xyzabc', got %d", len(suggestions))
 	}
-	
+
 	// Test max suggestions limit
 	manyCommands := []Command{
 		{Name: "a1"},
@@ -249,10 +249,10 @@ func TestGetHelpLinesIndex(t *testing.T) {
 	cmds := []Command{
 		{Name: "scan", Short: "Scan"},
 	}
-	
+
 	lines := GetHelpLines("", cmds, "testtool", 80, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Empty query should return index
 	if !strings.Contains(text, "COMMANDS") {
 		t.Error("Expected index view for empty query")
@@ -266,10 +266,10 @@ func TestGetHelpLinesDetail(t *testing.T) {
 	cmds := []Command{
 		{Name: "scan", Short: "Scan", Long: "Detailed scan description"},
 	}
-	
+
 	lines := GetHelpLines("scan", cmds, "testtool", 80, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Should return detail view
 	if !strings.Contains(text, "NAME") {
 		t.Error("Expected detail view for command query")
@@ -281,10 +281,10 @@ func TestGetHelpLinesDetail(t *testing.T) {
 
 func TestGetHelpLinesBuiltin(t *testing.T) {
 	cmds := []Command{}
-	
+
 	lines := GetHelpLines("help", cmds, "testtool", 80, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Should return help for built-in command
 	if !strings.Contains(text, "NAME") {
 		t.Error("Expected detail view for built-in help command")
@@ -298,10 +298,10 @@ func TestGetHelpLinesAlias(t *testing.T) {
 	cmds := []Command{
 		{Name: "scan", Short: "Scan", Aliases: []string{"s", "probe"}},
 	}
-	
+
 	lines := GetHelpLines("s", cmds, "testtool", 80, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Should find command by alias
 	if !strings.Contains(text, "NAME") {
 		t.Error("Expected detail view when querying by alias")
@@ -315,10 +315,10 @@ func TestGetHelpLinesNotFound(t *testing.T) {
 	cmds := []Command{
 		{Name: "scan", Short: "Scan"},
 	}
-	
+
 	lines := GetHelpLines("unknown", cmds, "testtool", 80, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Should return not found view
 	if !strings.Contains(text, "Unknown command") {
 		t.Error("Expected not found view for unknown command")
@@ -330,19 +330,93 @@ func TestRenderCommandTable(t *testing.T) {
 		{Name: "scan", Short: "Scan a target"},
 		{Name: "analyze", Short: "Analyze scan results in depth"},
 	}
-	
+
 	lines := renderCommandTable(cmds, 60, testTheme)
-	
+
 	if len(lines) < 2 {
 		t.Fatal("Expected at least 2 lines from command table")
 	}
-	
+
 	text := strings.Join(lines, "\n")
 	if !strings.Contains(text, "scan") {
 		t.Error("Expected 'scan' in command table")
 	}
 	if !strings.Contains(text, "analyze") {
 		t.Error("Expected 'analyze' in command table")
+	}
+}
+
+func TestRenderCommandTableDegradesAtNarrowWidths(t *testing.T) {
+	// One command per line, aligned, is only useful if the row actually fits the
+	// terminal it is drawn in: a row that overruns the width gets clipped, and a
+	// clipped description is worse than a wrapped one.
+	cmds := []Command{
+		{Name: "scan", Short: "Scan a target for open ports and services"},
+		{Name: "enumerate-subdomains", Short: "Enumerate every subdomain of a domain"},
+	}
+	for _, width := range []int{40, 56, 80} {
+		for _, line := range renderCommandTable(cmds, width, testTheme) {
+			if w := displayWidth(line); w > width {
+				t.Errorf("width %d: line is %d columns wide: %q", width, w, line)
+			}
+		}
+	}
+}
+
+func TestRenderCommandTableKeepsDescriptionsWhole(t *testing.T) {
+	// The narrow layout must make room by shrinking the name column, not by
+	// cutting the description short: "wrap descriptions, not truncate them".
+	cmds := []Command{{Name: "scan", Short: "Scan a target for open ports and services"}}
+	for _, width := range []int{40, 60, 80} {
+		text := strings.Join(renderCommandTable(cmds, width, testTheme), " ")
+		if strings.Contains(text, "…") {
+			t.Errorf("width %d: description was truncated: %q", width, text)
+		}
+		if !strings.Contains(text, "services") {
+			t.Errorf("width %d: description lost its tail: %q", width, text)
+		}
+	}
+}
+
+func TestRenderCommandTableHandlesNamesLongerThanTheColumn(t *testing.T) {
+	// A name wider than the name column must not underflow the padding count
+	// (strings.Repeat panics on a negative count).
+	cmds := []Command{
+		{Name: "an-extraordinarily-long-subcommand-name", Short: "Does something"},
+	}
+	lines := renderCommandTable(cmds, 60, testTheme)
+	if len(lines) == 0 {
+		t.Fatal("expected a rendered row")
+	}
+	if w := displayWidth(lines[0]); w > 60 {
+		t.Errorf("row is %d columns wide: %q", w, lines[0])
+	}
+}
+
+func TestHelpFitsTheTranscriptColumnWhenARegionIsDrawn(t *testing.T) {
+	// On a wide shell the help is written into the transcript, which is narrower
+	// than the terminal once the executions region appears. Laid out to the
+	// terminal width, the rows would run beneath the region.
+	m := modelFor(t, 80, 24, nil)
+	b := newBlock(1, []string{"scan"})
+	b.status = StatusDone
+	m = addBlock(m, b)
+	m = resize(m, 80, 24)
+	if !m.layout.ShowRegions {
+		t.Fatal("expected a side region to be drawn at width 80 with a finished run")
+	}
+
+	m.input.SetValue("help")
+	m.submit()
+	if len(m.notices) == 0 {
+		t.Fatal("help produced no lines")
+	}
+
+	limit := m.transcriptWidth(m.width)
+	for _, line := range m.notices {
+		if w := displayWidth(line); w > limit {
+			t.Errorf("help line is %d columns wide, transcript is %d: %q", w, limit, line)
+		}
 	}
 }
 
@@ -364,10 +438,10 @@ func TestRenderFlags(t *testing.T) {
 			Required: true,
 		},
 	}
-	
+
 	lines := renderFlags(flags, 80, testTheme)
 	text := strings.Join(lines, "\n")
-	
+
 	// Should have flag names
 	if !strings.Contains(text, "--verbose") {
 		t.Error("Expected --verbose flag")
@@ -375,12 +449,12 @@ func TestRenderFlags(t *testing.T) {
 	if !strings.Contains(text, "--config") {
 		t.Error("Expected --config flag")
 	}
-	
+
 	// Should have short names
 	if !strings.Contains(text, "-v") {
 		t.Error("Expected -v short flag")
 	}
-	
+
 	// Should have type and default
 	if !strings.Contains(text, "string") {
 		t.Error("Expected type in flag")
@@ -388,7 +462,7 @@ func TestRenderFlags(t *testing.T) {
 	if !strings.Contains(text, "config.yaml") {
 		t.Error("Expected default value")
 	}
-	
+
 	// Should indicate required
 	if !strings.Contains(text, "required") {
 		t.Error("Expected required indicator")

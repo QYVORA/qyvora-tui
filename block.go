@@ -69,18 +69,22 @@ type eventRow struct {
 	Data   map[string]any
 }
 
-// outputCap is how many lines of a command's printed output a block retains.
-// A command that prints without limit must not grow the transcript until the
-// interface stalls, and the tail is kept because that is where a failure and
-// its explanation end up. When the cap trips, the block says so rather than
-// silently showing less.
-const outputCap = 500
+// outputCap is how many lines of a command's printed output a block retains by
+// default. A command that prints without limit must not grow the transcript
+// until the interface stalls, and the tail is kept because that is where a
+// failure and its explanation end up. 500 lines was too low for a security
+// tool: a long recon pass prints thousands of lines of scaffolding before the
+// actual findings, and the oldest of those are still worth keeping. 5000 is
+// the default, and a tool that knows its own output can set Config.OutputCap
+// to change it. When the cap trips, the block says so rather than silently
+// showing less.
+const outputCap = 5000
 
 // addOutput records a line of the tool's printed output.
 func (b *block) addOutput(line string) {
 	b.rawOutput = append(b.rawOutput, line)
-	if len(b.output) >= outputCap {
-		b.output = b.output[len(b.output)-outputCap+1:]
+	if limit := b.capLimit(); len(b.output) >= limit {
+		b.output = b.output[len(b.output)-limit+1:]
 		b.outputOmitted = true
 	}
 	b.output = append(b.output, line)
@@ -126,6 +130,20 @@ type block struct {
 	// the truncation. rowsOmitted is the same for the event log.
 	outputOmitted bool
 	rowsOmitted   bool
+
+	// cap is this block's output retention limit, set from the session
+	// configuration at start. Zero means "use the shared default" and is what
+	// hand-built blocks in tests and golden scenes carry.
+	cap int
+}
+
+// capLimit returns the output retention limit for this block, falling back to
+// the shared default when the block has no specific cap.
+func (b *block) capLimit() int {
+	if b.cap > 0 {
+		return b.cap
+	}
+	return outputCap
 }
 
 func newBlock(id int, args []string) *block {

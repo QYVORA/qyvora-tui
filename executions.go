@@ -34,25 +34,17 @@ func (m model) execEntries(width int) []execEntry {
 	return entries
 }
 
-// execEntryHeader is one execution's line in the region: an expand glyph, the
-// outcome, the command, and its duration.
+// execEntryHeader is one execution's line in the region: a checklist box that
+// says what happened, the command, its duration, and a disclosure mark when the
+// row can be expanded.
+//
+// The row leads with the box rather than a disclosure triangle because the
+// question this panel answers is "what happened to each run", not "which rows
+// are open". The disclosure is demoted to a trailing mark and shown only for a
+// finished run, so the checklist reads top to bottom without a column of
+// triangles competing with it.
 func (m model) execEntryHeader(b *block, width, index int) string {
-	glyph := "▸"
-	if b.expanded {
-		glyph = "▾"
-	}
-	symStyle := m.theme.Detail
-	sym := statusSymbol(b)
-	switch b.status {
-	case StatusRunning:
-		symStyle = m.theme.Running
-	case StatusDone:
-		symStyle = m.theme.Success
-	case StatusFailed:
-		symStyle = m.theme.Failed
-	case StatusCancelled:
-		symStyle = m.theme.Cancelled
-	}
+	box, boxStyle := m.checklistBox(b)
 
 	selected := m.regionFocus && index == m.execSel
 	style := m.theme.Detail
@@ -64,8 +56,13 @@ func (m model) execEntryHeader(b *block, width, index int) string {
 		cmdStyle = m.theme.Selection
 	}
 
-	prefix := style.Render(glyph+" ") + symStyle.Render(sym) + " "
-	tail := " " + style.Render(duration(b.elapsed()))
+	prefix := boxStyle.Render(box) + " "
+	toggle := ""
+	if b.status != StatusRunning {
+		// A running run cannot be expanded, so it carries no disclosure mark.
+		toggle = " " + style.Render(disclosureMark(b.expanded))
+	}
+	tail := " " + style.Render(duration(b.elapsed())) + toggle
 	avail := width - lipgloss.Width(prefix) - lipgloss.Width(tail)
 	if avail < 4 {
 		avail = 4
@@ -74,20 +71,38 @@ func (m model) execEntryHeader(b *block, width, index int) string {
 	return clampLine(line, width)
 }
 
-// statusSymbol is the outcome glyph an execution entry leads with.
-func statusSymbol(b *block) string {
+// checklistBox is the checkbox an execution entry leads with, and the style it
+// is drawn in. The shape carries the state at a glance -- filled for success,
+// crossed for failure, dashed for a cancellation, empty for anything that has
+// not finished -- and the spinner stands in while a run is in flight.
+func (m model) checklistBox(b *block) (string, lipgloss.Style) {
 	switch b.status {
 	case StatusRunning:
-		return "⠿"
+		return glyphBoxRunning(spinnerFrames[m.spinner]), m.theme.Running
 	case StatusDone:
-		return "✓"
+		return glyphBoxDone, m.theme.Success
 	case StatusFailed:
-		return "✕"
+		return glyphBoxFailed, m.theme.Failed
 	case StatusCancelled:
-		return "■"
+		return glyphBoxCancelled, m.theme.Cancelled
 	}
-	return "·"
+	return glyphBoxPending, m.theme.Detail
 }
+
+// disclosureMark is the trailing mark on a row that can be expanded.
+func disclosureMark(expanded bool) string {
+	if expanded {
+		return glyphDisclosureOpen
+	}
+	return glyphDisclosureClosed
+}
+
+// execDetailIndent lines an entry's detail up under its command, past the
+// checkbox and the space that follows it. The detail belongs to the row above
+// it, and aligning it with the command rather than the checkbox is what keeps a
+// long checklist easy to scan: every fact sits in one column, under the run it
+// describes.
+const execDetailIndent = "    "
 
 // execEntryDetail is the body beneath an entry's header. A running command
 // carries its live state -- stage, counts, errors -- because that is the
@@ -103,16 +118,16 @@ func (m model) execEntryDetail(b *block, width int) []string {
 	}
 	var lines []string
 	if b.err != "" {
-		lines = append(lines, m.theme.Failed.Render(clampLine("  ✗ "+truncate(b.err, max(8, width-4)), width)))
+		lines = append(lines, m.theme.Failed.Render(clampLine(execDetailIndent+"✗ "+truncate(b.err, max(8, width-4)), width)))
 		return lines
 	}
 	if n := len(b.findings); n > 0 {
-		lines = append(lines, m.theme.Success.Render(clampLine("  ✓ "+plural(n, "finding", "findings")+" · "+plural(len(b.artifacts), "artifact", "artifacts"), width)))
+		lines = append(lines, m.theme.Success.Render(clampLine(execDetailIndent+"✓ "+plural(n, "finding", "findings")+" · "+plural(len(b.artifacts), "artifact", "artifacts"), width)))
 	} else if n := len(b.artifacts); n > 0 {
-		lines = append(lines, m.theme.Value.Render(clampLine("  "+plural(n, "artifact", "artifacts"), width)))
+		lines = append(lines, m.theme.Value.Render(clampLine(execDetailIndent+plural(n, "artifact", "artifacts"), width)))
 	}
 	if n := b.known; n > 0 {
-		lines = append(lines, m.theme.Detail.Render(clampLine("  "+plural(n, "event", "events"), width)))
+		lines = append(lines, m.theme.Detail.Render(clampLine(execDetailIndent+plural(n, "event", "events"), width)))
 	}
 	if len(lines) == 0 {
 		// "No output" was the wrong sentence here. A run that printed a
@@ -123,9 +138,9 @@ func (m model) execEntryDetail(b *block, width int) []string {
 		// panel, so the two cases are named separately.
 		if n := len(b.output); n > 0 {
 			lines = append(lines, m.theme.Detail.Render(
-				clampLine("  "+plural(n, "line", "lines")+" printed", width)))
+				clampLine(execDetailIndent+plural(n, "line", "lines")+" printed", width)))
 		} else {
-			lines = append(lines, m.theme.Detail.Render(clampLine("  no output", width)))
+			lines = append(lines, m.theme.Detail.Render(clampLine(execDetailIndent+"no output", width)))
 		}
 	}
 	return lines
@@ -139,26 +154,26 @@ func (m model) execEntryDetail(b *block, width int) []string {
 func (m model) runningDetail(b *block, width int) []string {
 	a := m.activity
 	if a == nil || a.Total == 0 {
-		return []string{m.theme.Detail.Render(clampLine("  starting…", width))}
+		return []string{m.theme.Detail.Render(clampLine(execDetailIndent+"starting…", width))}
 	}
 	var lines []string
 	if stage := a.stageLine(); stage != "" {
-		lines = append(lines, m.theme.Value.Render(clampLine("  "+stage, width)))
+		lines = append(lines, m.theme.Value.Render(clampLine(execDetailIndent+stage, width)))
 	}
 	if errs := a.errorCount(); errs > 0 {
-		lines = append(lines, m.theme.Failed.Render(clampLine("  ✗ "+plural(errs, "error", "errors"), width)))
+		lines = append(lines, m.theme.Failed.Render(clampLine(execDetailIndent+"✗ "+plural(errs, "error", "errors"), width)))
 	}
 	events := a.Total
-	lines = append(lines, m.theme.Detail.Render(clampLine(fmt.Sprintf("  %d events", events), width)))
+	lines = append(lines, m.theme.Detail.Render(clampLine(fmt.Sprintf("%s%d events", execDetailIndent, events), width)))
 	if a.Findings > 0 {
-		lines = append(lines, m.theme.Success.Render(clampLine("  ✓ "+plural(a.Findings, "finding", "findings"), width)))
+		lines = append(lines, m.theme.Success.Render(clampLine(execDetailIndent+"✓ "+plural(a.Findings, "finding", "findings"), width)))
 	}
 	if n := len(a.Recent); n > 0 {
 		last := a.Recent[n-1]
 		if b.status == StatusRunning && len(a.Recent) > 1 {
 			last = a.Recent[n-2]
 		}
-		lines = append(lines, m.theme.Activity.Render(clampLine("  "+humanEvent(last), width)))
+		lines = append(lines, m.theme.Activity.Render(clampLine(execDetailIndent+humanEvent(last), width)))
 	}
 	return lines
 }
