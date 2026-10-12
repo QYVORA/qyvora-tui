@@ -100,4 +100,4 @@ event data is included as JSONL for later inspection.
 
 ## Licence
 
-See the QYVORA toolchain repositories.
+MIT — see [LICENSE](LICENSE).
