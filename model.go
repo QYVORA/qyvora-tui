@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QYVORA/qyvora-tui/internal/layout"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -213,7 +214,7 @@ type model struct {
 	// layout is the resolved geometry for the current terminal size, recomputed
 	// on every resize. Components read it rather than asking the terminal
 	// themselves, so a region and the transcript cannot disagree about width.
-	layout Layout
+	geom layout.Layout
 
 	// showCapabilities toggles the capability region.
 	showCapabilities bool

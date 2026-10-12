@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/QYVORA/qyvora-tui/internal/layout"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -93,8 +94,8 @@ func TestShellKeepsANarrowTerminalSingleColumn(t *testing.T) {
 		if strings.Contains(out, "CAPABILITIES") {
 			t.Errorf("width %d: a region was drawn on a narrow terminal:\n%s", w, out)
 		}
-		if m.layout.Mode != ModeCompact {
-			t.Errorf("width %d: mode = %v, want compact", w, m.layout.Mode)
+		if m.geom.Mode != layout.ModeCompact {
+			t.Errorf("width %d: mode = %v, want compact", w, m.geom.Mode)
 		}
 	}
 }
@@ -116,7 +117,7 @@ func TestShellDrawsActivityWhileRunning(t *testing.T) {
 	if !strings.Contains(out, "error") {
 		t.Errorf("the error count is missing:\n%s", out)
 	}
-	if m.layout.Activity == 0 {
+	if m.geom.Activity == 0 {
 		t.Error("the layout granted no activity width while running")
 	}
 }
@@ -204,8 +205,8 @@ func TestShellResizesWithoutLosingTheSession(t *testing.T) {
 	for _, w := range []int{40, 80, 60, 200, 120, 20, 140} {
 		updated, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 40})
 		m = updated.(model)
-		if m.layout.Width != w {
-			t.Errorf("width %d: layout.Width = %d", w, m.layout.Width)
+		if m.geom.Width != w {
+			t.Errorf("width %d: layout.Width = %d", w, m.geom.Width)
 		}
 		out := stripANSI(m.View())
 		if !strings.Contains(out, "first") {
@@ -330,10 +331,10 @@ func TestShellRegionsDoNotEllipsiseTheTranscript(t *testing.T) {
 // own width so a region on the right is not read as part of it.
 func (m model) transcriptColumnLines(t *testing.T, width int) []string {
 	t.Helper()
-	l := m.layout
+	l := m.geom
 	start := 0
 	if l.Navigation > 0 && m.capabilitiesRegion(l.Navigation) != nil {
-		start = l.Navigation + regionChrome + regionGap
+		start = l.Navigation + layout.RegionChrome + layout.RegionGap
 	}
 	out := make([]string, 0, 8)
 	for _, line := range strings.Split(m.View(), "\n") {

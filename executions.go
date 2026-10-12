@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 
+	"github.com/QYVORA/qyvora-tui/internal/layout"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -223,7 +224,7 @@ func (m model) expandedRegionWindow(entries []execEntry) (rows []string, more bo
 // the keyboard. It resolves the layout rather than checking a stored flag, so
 // a terminal resized while the region had focus decides freshly.
 func (m model) canFocusRegion() bool {
-	if len(m.blocks) == 0 || m.width < CompactWidth || m.height < minRegionHeight {
+	if len(m.blocks) == 0 || m.width < layout.CompactWidth || m.height < layout.MinRegionHeight {
 		return false
 	}
 	l := m.resolveLayout(m.width)
@@ -236,7 +237,7 @@ func (m model) canFocusRegion() bool {
 // collapse the selected execution in both the region and the transcript, and
 // every other key returns to the composer untouched.
 func (m model) handleRegionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	width := m.layout.Activity
+	width := m.geom.Activity
 	entries := m.execEntries(width)
 	total := len(entries)
 	switch msg.Type {
@@ -328,7 +329,7 @@ func (m *model) ensureEntryVisible(entries []execEntry, sel int) {
 
 // execScroll scrolls the region by a delta of rows, clamped to its content.
 func (m *model) execScroll(delta int) {
-	width := m.layout.Activity
+	width := m.geom.Activity
 	all := m.entryRows(m.execEntries(width))
 	m.execOffset = clamp(m.execOffset+delta, 0, max(0, len(all)-1))
 }
@@ -415,7 +416,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // a click on an entry's header row selects it and toggles its expansion, a
 // click on its detail selects it. Rows past the end of the list are ignored.
 func (m *model) regionRowClick(x, row int) {
-	width := m.layout.Activity
+	width := m.geom.Activity
 	entries := m.execEntries(width)
 	if len(entries) == 0 {
 		return
@@ -487,10 +488,10 @@ func (m model) composerInputRow() int {
 
 // regionXRange is the executions region's column span, when drawn.
 func (m model) regionXRange() (start, end int, present bool) {
-	if m.layout.Activity <= 0 || m.executionsRegion(m.layout.Activity) == nil {
+	if m.geom.Activity <= 0 || m.executionsRegion(m.geom.Activity) == nil {
 		return 0, 0, false
 	}
-	return m.width - (m.layout.Activity + regionChrome), m.width, true
+	return m.width - (m.geom.Activity + layout.RegionChrome), m.width, true
 }
 
 // overRegionColumn reports whether a column falls inside the executions

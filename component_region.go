@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 
+	"github.com/QYVORA/qyvora-tui/internal/layout"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -91,7 +93,7 @@ const chromeRows = 2
 // the alternative is a panel whose contents move under the operator's fingers
 // every time it repaints.
 func (r *Region) Render(t Theme) string {
-	if r == nil || r.Width < minRegionWidth {
+	if r == nil || r.Width < layout.MinRegionWidth {
 		return ""
 	}
 	budget := 0

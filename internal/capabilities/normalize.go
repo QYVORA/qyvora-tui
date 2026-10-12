@@ -1,4 +1,4 @@
-package tui
+package capabilities
 
 import (
 	"encoding/json"
@@ -6,15 +6,10 @@ import (
 	"strings"
 )
 
-// capabilityFamilies maps the registry shapes found across the fleet onto the
-// normalised field names.
-//
-// Four shapes are in use, and they are not variations of one schema:
-//
 //	sekhmet, shaka                       id/name/description/framework/category/
 //	                                      output_schema/risk/authorization_required/
 //	                                      target_type/confirmation_required/reversible
-//	imhotep, amanirenas, kush,           Document wrapper + Capability{id,name,
+//	imhotep, amanirenas, kush,           Document wrapper + {id,name,
 //	sundiata, timbuktu                   implemented,live,note} + provider flags
 //	mansa, nzinga                        the above, plus parameters and
 //	                                      changes_state/target_types/duration
@@ -97,7 +92,7 @@ var capabilityFamilies = []capabilityFamily{
 
 // capField describes how one registry key reaches the normalised type.
 type capField struct {
-	// name is the destination on Capability. Empty means the key is a
+	// name is the destination on . Empty means the key is a
 	// container rather than a value.
 	name string
 	// bool coerces a value to bool and records that it was stated, which is how
@@ -433,27 +428,26 @@ func setField(c *Capability, name string, v any) {
 // metadata yields no parameters, and the form layer then stays out of the way
 // instead of inventing fields the operation never asked for.
 func readParams(raw any) []Parameter {
+	if m, ok := raw.(map[string]any); ok {
+		if _, has := m["name"]; has {
+			return []Parameter{readParam(m)}
+		}
+		out := make([]Parameter, 0, len(m))
+		for name, def := range m {
+			d, ok := def.(map[string]any)
+			if !ok {
+				out = append(out, Parameter{Name: name})
+				continue
+			}
+			if d["name"] == nil {
+				d["name"] = name
+			}
+			out = append(out, readParam(d))
+		}
+		return out
+	}
 	arr, ok := raw.([]any)
 	if !ok {
-		if m, ok := raw.(map[string]any); ok {
-			// A single parameter, or a map of name to definition.
-			if _, has := m["name"]; has {
-				return []Parameter{readParam(m)}
-			}
-			out := make([]Parameter, 0, len(m))
-			for name, def := range m {
-				d, ok := def.(map[string]any)
-				if !ok {
-					out = append(out, Parameter{Name: name})
-					continue
-				}
-				if d["name"] == nil {
-					d["name"] = name
-				}
-				out = append(out, readParam(d))
-			}
-			return out
-		}
 		return nil
 	}
 	out := make([]Parameter, 0, len(arr))

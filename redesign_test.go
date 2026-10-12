@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QYVORA/qyvora-tui/internal/layout"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -25,8 +27,8 @@ func TestContentWidthFollowsTheTranscriptNotTheTerminal(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF1})
 	m = updated.(model)
 
-	if m.layout.Transcript >= m.width {
-		t.Fatalf("the test needs a region to shrink the transcript; got %d of %d", m.layout.Transcript, m.width)
+	if m.geom.Transcript >= m.width {
+		t.Fatalf("the test needs a region to shrink the transcript; got %d of %d", m.geom.Transcript, m.width)
 	}
 	if got := m.contentWidth(); got != m.viewport.Width-2 {
 		t.Errorf("contentWidth = %d, want viewport width (%d) minus the indent", got, m.viewport.Width-2)
@@ -422,7 +424,7 @@ func TestRegionRenderingFitsTheColumn(t *testing.T) {
 	if !present {
 		t.Fatal("no region to test")
 	}
-	start := end - (m.layout.Activity + regionChrome)
+	start := end - (m.geom.Activity + layout.RegionChrome)
 	for i, line := range strings.Split(m.View(), "\n") {
 		if visibleWidth(line) > m.width {
 			t.Fatalf("line %d overruns the terminal: %d", i, visibleWidth(line))
@@ -473,7 +475,7 @@ func TestViewportHasNoLineWiderThanItsColumn(t *testing.T) {
 	m.blocks[0].expanded = true
 	m.refreshViewport()
 
-	if m.layout.Activity == 0 {
+	if m.geom.Activity == 0 {
 		t.Fatal("no region was granted; this test needs one")
 	}
 	start, _, present := m.regionXRange()

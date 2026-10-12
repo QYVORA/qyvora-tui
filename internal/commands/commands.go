@@ -1,4 +1,6 @@
-package tui
+package commands
+
+import "github.com/QYVORA/qyvora-tui/internal/domain"
 
 // CommandNode is the minimal shape of a command tree that the TUI needs in
 // order to offer completion and help.
@@ -88,19 +90,19 @@ type Deprecator interface {
 //
 // Per PROMPT1.md §3: Now walks the WHOLE tree recursively and fills every
 // field it can via optional interface type assertions.
-func CollectCommands(root CommandNode) []Command {
+func CollectCommands(root CommandNode) []domain.Command {
 	if root == nil {
 		return nil
 	}
 	return collectRecursive(root, 0)
 }
 
-func collectRecursive(node CommandNode, depth int) []Command {
+func collectRecursive(node CommandNode, depth int) []domain.Command {
 	if node == nil {
 		return nil
 	}
 
-	var out []Command
+	var out []domain.Command
 	for _, child := range node.Children() {
 		if child == nil || child.Hidden() {
 			continue
@@ -111,7 +113,7 @@ func collectRecursive(node CommandNode, depth int) []Command {
 		}
 
 		// Build command with all available metadata
-		c := Command{
+		c := domain.Command{
 			Name:  name,
 			Short: child.Short(),
 		}
@@ -131,9 +133,9 @@ func collectRecursive(node CommandNode, depth int) []Command {
 		}
 		if flagger, ok := child.(Flagger); ok {
 			flagInfos := flagger.Flags()
-			c.Flags = make([]Flag, len(flagInfos))
+			c.Flags = make([]domain.Flag, len(flagInfos))
 			for i, fi := range flagInfos {
-				c.Flags[i] = Flag{
+				c.Flags[i] = domain.Flag{
 					Name:     fi.Name,
 					Short:    fi.Short,
 					Type:     fi.Type,
@@ -145,9 +147,9 @@ func collectRecursive(node CommandNode, depth int) []Command {
 		}
 		if exampler, ok := child.(Exampler); ok {
 			exampleInfos := exampler.Examples()
-			c.Examples = make([]Example, len(exampleInfos))
+			c.Examples = make([]domain.Example, len(exampleInfos))
 			for i, ei := range exampleInfos {
-				c.Examples[i] = Example{
+				c.Examples[i] = domain.Example{
 					Cmd:  ei.Cmd,
 					Note: ei.Note,
 				}
@@ -178,4 +180,4 @@ func collectRecursive(node CommandNode, depth int) []Command {
 
 // StaticCommands adapts a fixed list into the metadata type, for tools whose
 // registry is not a tree.
-func StaticCommands(cmds []Command) []Command { return cmds }
+func StaticCommands(cmds []domain.Command) []domain.Command { return cmds }

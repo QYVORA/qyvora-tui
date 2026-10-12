@@ -1,4 +1,4 @@
-package tui
+package commands
 
 // historyLimit caps how many commands are remembered. A long session should
 // not grow without bound; the oldest entries fall off the top.

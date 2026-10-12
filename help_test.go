@@ -402,7 +402,7 @@ func TestHelpFitsTheTranscriptColumnWhenARegionIsDrawn(t *testing.T) {
 	b.status = StatusDone
 	m = addBlock(m, b)
 	m = resize(m, 80, 24)
-	if !m.layout.ShowRegions {
+	if !m.geom.ShowRegions {
 		t.Fatal("expected a side region to be drawn at width 80 with a finished run")
 	}
 

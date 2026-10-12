@@ -324,8 +324,8 @@ func TestCapabilityRegionShowsEveryOneThatFits(t *testing.T) {
 	total := len(normalize(t, "a", manyCapsJSON).Items)
 	for _, h := range []int{16, 20, 24, 30, 40} {
 		m := capsModel(t, 140, h)
-		m.layout = m.resolveLayout(m.width)
-		r := m.capabilitiesRegion(m.layout.Navigation)
+		m.geom = m.resolveLayout(m.width)
+		r := m.capabilitiesRegion(m.geom.Navigation)
 		if r == nil {
 			t.Fatalf("h=%d: no region", h)
 		}
@@ -352,8 +352,8 @@ func TestCapabilityRegionShowsEveryOneThatFits(t *testing.T) {
 func TestCapabilityRegionAlwaysSaysHowManyAreHidden(t *testing.T) {
 	for _, h := range []int{10, 12, 14, 16, 18, 24} {
 		m := capsModel(t, 140, h)
-		m.layout = m.resolveLayout(m.width)
-		r := m.capabilitiesRegion(m.layout.Navigation)
+		m.geom = m.resolveLayout(m.width)
+		r := m.capabilitiesRegion(m.geom.Navigation)
 		if r == nil {
 			continue
 		}
@@ -389,8 +389,8 @@ func moreCount(s string) int {
 // bottom edge cannot be told from a complete one.
 func TestCapabilityRowsMatchWhatIsActuallyDrawn(t *testing.T) {
 	m := capsModel(t, 140, 16)
-	m.layout = m.resolveLayout(m.width)
-	r := m.capabilitiesRegion(m.layout.Navigation)
+	m.geom = m.resolveLayout(m.width)
+	r := m.capabilitiesRegion(m.geom.Navigation)
 	if r == nil {
 		t.Fatal("no region")
 	}

@@ -1,4 +1,4 @@
-package tui
+package layout
 
 // The layout breaks at the widths where the session can still be read.
 //
@@ -27,7 +27,7 @@ const (
 	// panel that pushed the transcript below its minimum. The layout then took
 	// the panel away and reported a wide layout with no regions, which is the
 	// confusing outcome this avoids.
-	CompactWidth = minRegionWidth + regionChrome + regionGap + minTranscriptWidth
+	CompactWidth = MinRegionWidth + RegionChrome + RegionGap + MinTranscriptWidth
 
 	// WideWidth is the width at which a full multi-region shell becomes
 	// affordable: both panels beside a transcript wide enough that the left one
@@ -115,12 +115,12 @@ const (
 	// a capability name and its detail on the same line and forcing them onto
 	// separate wrapped lines is what made the left panel read as a list of
 	// fragments.
-	minRegionWidth = 28
+	MinRegionWidth = 28
 
 	// maxRegionWidth is the widest a side panel grows. Past this a panel stops
 	// being a panel and becomes the interface, and the transcript it was
 	// accompanying is now the accessory.
-	maxRegionWidth = 36
+	MaxRegionWidth = 36
 )
 
 // minTranscriptWidth is the narrowest a transcript is still readable at. Below
@@ -132,11 +132,11 @@ const (
 // the fleet prints -- a finding, a stage transition, an argument echo -- run to
 // around 36 columns before they wrap. A transcript narrower than that wraps
 // every line, which is the failure the side regions must not cause.
-const minTranscriptWidth = 36
+const MinTranscriptWidth = 36
 
 // minRegionHeight is the shortest terminal a region is drawn on. A 24-column
 // panel beside a four-line transcript adds nothing a person can use.
-const minRegionHeight = 8
+const MinRegionHeight = 8
 
 // The columns a region costs beyond its own width.
 //
@@ -148,17 +148,17 @@ const minRegionHeight = 8
 // transcript -- which then clamps every line and fills the panel's space with an
 // ellipsis.
 const (
-	regionChrome = 2
-	regionGap    = 1
+	RegionChrome = 2
+	RegionGap    = 1
 )
 
 // regionColumns is the terminal width a set of regions occupies once each is
 // boxed and separated. A region granted no width is not drawn and costs nothing.
-func regionColumns(widths ...int) int {
+func RegionColumns(widths ...int) int {
 	total := 0
 	for _, w := range widths {
 		if w > 0 {
-			total += w + regionChrome + regionGap
+			total += w + RegionChrome + RegionGap
 		}
 	}
 	return total
@@ -190,7 +190,7 @@ func regionColumns(widths ...int) int {
 // dropped rather than allowed to starve the thing it was meant to accompany.
 func LayoutFor(width, height int, opts LayoutOptions) Layout {
 	l := Layout{Width: width, Height: height, Mode: ModeCompact, Transcript: max(1, width)}
-	if width < CompactWidth || height < minRegionHeight {
+	if width < CompactWidth || height < MinRegionHeight {
 		return l
 	}
 
@@ -199,14 +199,14 @@ func LayoutFor(width, height int, opts LayoutOptions) Layout {
 	// panels and the words between them.
 	nav := 0
 	if wide && opts.Navigation {
-		nav = regionFor(true, regionWidth(width), width)
+		nav = RegionFor(true, RegionWidth(width), width)
 	}
-	act := regionFor(opts.Activity, regionWidth(width), width)
+	act := RegionFor(opts.Activity, RegionWidth(width), width)
 
 	// Two regions need the wide breakpoint and room for both plus a usable
 	// transcript. Below that there is room for one, and it is the executions
 	// region.
-	both := nav > 0 && act > 0 && fits(width, nav, act)
+	both := nav > 0 && act > 0 && Fits(width, nav, act)
 	// With no run in flight there is no executions region to show, so a wide
 	// terminal falls back to the registry rather than to an empty column.
 	if act > 0 && !both {
@@ -216,15 +216,15 @@ func LayoutFor(width, height int, opts LayoutOptions) Layout {
 	switch {
 	case both:
 		l.Navigation, l.Activity = nav, act
-		l.Transcript = width - regionColumns(nav, act)
+		l.Transcript = width - RegionColumns(nav, act)
 		l.Mode = ModeWide
 	case act > 0:
 		l.Activity = act
-		l.Transcript = width - regionColumns(act)
+		l.Transcript = width - RegionColumns(act)
 		l.Mode = ModeAdaptive
 	case nav > 0:
 		l.Navigation = nav
-		l.Transcript = width - regionColumns(nav)
+		l.Transcript = width - RegionColumns(nav)
 		l.Mode = ModeAdaptive
 	default:
 		// Wide enough, but there is nothing to show. A wide terminal with no
@@ -242,15 +242,15 @@ func LayoutFor(width, height int, opts LayoutOptions) Layout {
 // single condition is what stops a 70-column terminal being carved into a
 // 20-column transcript and two useless panels: a region is dropped rather than
 // allowed to starve the thing it was meant to accompany.
-func regionFor(want bool, region, width int) int {
-	if !want || !fits(width, region) {
+func RegionFor(want bool, region, width int) int {
+	if !want || !Fits(width, region) {
 		return 0
 	}
 	return region
 }
 
 // fits reports whether the given regions leave the transcript usable.
-func fits(width int, regions ...int) bool {
+func Fits(width int, regions ...int) bool {
 	if len(regions) == 0 {
 		return false
 	}
@@ -259,7 +259,7 @@ func fits(width int, regions ...int) bool {
 			return false
 		}
 	}
-	return width-regionColumns(regions...) >= minTranscriptWidth
+	return width-RegionColumns(regions...) >= MinTranscriptWidth
 }
 
 // regionWidth is the width both side regions are drawn at.
@@ -275,15 +275,15 @@ func fits(width int, regions ...int) bool {
 // content and would each prefer a different width, but a layout that sizes them
 // differently depending on which is present makes the transcript jump sideways
 // when a region opens and closes.
-func regionWidth(width int) int {
-	return clampInt((width-regionMargin)/4, minRegionWidth, maxRegionWidth)
+func RegionWidth(width int) int {
+	return ClampInt((width-RegionMargin)/4, MinRegionWidth, MaxRegionWidth)
 }
 
 // regionMargin is the four columns held back from the region share. The right
 // two are the composer's own margin, and the left two are what keeps a panel's
 // outer edge off the terminal edge, where it reads as a clipped column rather
 // than as a deliberate border.
-const regionMargin = 4
+const RegionMargin = 4
 
 // LayoutOptions is what the shell knows about the tool when it resolves a
 // layout. Regions are offered, not imposed: a tool with no capability registry
@@ -297,7 +297,7 @@ type LayoutOptions struct {
 }
 
 // clampInt bounds a value between lo and hi.
-func clampInt(v, lo, hi int) int {
+func ClampInt(v, lo, hi int) int {
 	if v < lo {
 		return lo
 	}

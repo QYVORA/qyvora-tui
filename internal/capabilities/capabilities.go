@@ -1,17 +1,10 @@
-package tui
+package capabilities
 
 import (
 	"sort"
 	"strings"
 )
 
-// Capabilities describes what a tool can do, as data.
-//
-// This is a normalised view over the capability registries the tools already
-// maintain. Ten of the thirteen tools expose a `capabilities -o json` command
-// backed by their own `internal/capabilities` package, but those registries
-// predate this type and are not uniform: four distinct shapes are in the fleet,
-// two tools expose none at all, and one (jabari) describes device support
 // rather than runnable operations.
 //
 // Rather than a fifth schema, or forcing every tool to rewrite a registry that

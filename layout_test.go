@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/QYVORA/qyvora-tui/internal/layout"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -15,23 +16,23 @@ func TestLayoutBreakpoints(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		width      int
-		wantMode   LayoutMode
+		wantMode   layout.LayoutMode
 		wantRegion bool
 	}{
 		// Below the compact breakpoint nothing is offered a region, whatever it
 		// has to show. A 40-column terminal has no room for two columns and
 		// never will.
-		{name: "tiny", width: 20, wantMode: ModeCompact},
-		{name: "just below compact", width: CompactWidth - 1, wantMode: ModeCompact},
+		{name: "tiny", width: 20, wantMode: layout.ModeCompact},
+		{name: "just below compact", width: layout.CompactWidth - 1, wantMode: layout.ModeCompact},
 		// 60 is where a single region becomes possible.
-		{name: "at compact boundary", width: CompactWidth, wantMode: ModeAdaptive, wantRegion: true},
-		{name: "mid", width: 100, wantMode: ModeAdaptive, wantRegion: true},
+		{name: "at compact boundary", width: layout.CompactWidth, wantMode: layout.ModeAdaptive, wantRegion: true},
+		{name: "mid", width: 100, wantMode: layout.ModeAdaptive, wantRegion: true},
 		// Beyond 120 both sides fit.
-		{name: "at wide boundary", width: WideWidth, wantMode: ModeWide, wantRegion: true},
-		{name: "very wide", width: 200, wantMode: ModeWide, wantRegion: true},
+		{name: "at wide boundary", width: layout.WideWidth, wantMode: layout.ModeWide, wantRegion: true},
+		{name: "very wide", width: 200, wantMode: layout.ModeWide, wantRegion: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			l := LayoutFor(tc.width, 40, LayoutOptions{Navigation: true, Activity: true})
+			l := layout.LayoutFor(tc.width, 40, layout.LayoutOptions{Navigation: true, Activity: true})
 			if l.Mode != tc.wantMode {
 				t.Errorf("Mode = %v, want %v at width %d", l.Mode, tc.wantMode, tc.width)
 			}
@@ -47,7 +48,7 @@ func TestLayoutOffersNoRegionWithoutContent(t *testing.T) {
 	// any terminal. This is the rule that keeps an empty column from appearing
 	// beside a working session.
 	for _, w := range []int{40, 80, 200} {
-		l := LayoutFor(w, 40, LayoutOptions{})
+		l := layout.LayoutFor(w, 40, layout.LayoutOptions{})
 		if l.ShowRegions {
 			t.Errorf("width %d: regions offered with nothing to show", w)
 		}
@@ -67,15 +68,15 @@ func TestLayoutTranscriptAlwaysFits(t *testing.T) {
 	// layout promised it, and the composer then clamps every line to make them
 	// fit -- ellipsising the transcript in exactly the space the region vacated.
 	for _, w := range []int{1, 20, 59, 60, 61, 80, 100, 120, 121, 200, 400} {
-		for _, opts := range []LayoutOptions{
+		for _, opts := range []layout.LayoutOptions{
 			{}, {Navigation: true}, {Activity: true},
 			{Navigation: true, Activity: true},
 		} {
-			l := LayoutFor(w, 40, opts)
+			l := layout.LayoutFor(w, 40, opts)
 			if l.Transcript < 1 {
 				t.Errorf("width %d opts %+v: transcript = %d, want at least 1", w, opts, l.Transcript)
 			}
-			used := l.Transcript + regionColumns(l.Navigation, l.Activity)
+			used := l.Transcript + layout.RegionColumns(l.Navigation, l.Activity)
 			if used > w {
 				t.Errorf("width %d opts %+v: columns total %d, over the terminal width", w, opts, used)
 			}
@@ -94,7 +95,7 @@ func TestLayoutIgnoresNonsensicalSizes(t *testing.T) {
 	// during teardown. It must not produce a negative column width for a region
 	// to render into.
 	for _, w := range []int{0, -1, -100} {
-		l := LayoutFor(w, 40, LayoutOptions{Navigation: true, Activity: true})
+		l := layout.LayoutFor(w, 40, layout.LayoutOptions{Navigation: true, Activity: true})
 		if l.Transcript < 1 {
 			t.Errorf("width %d: transcript = %d", w, l.Transcript)
 		}
@@ -108,7 +109,7 @@ func TestLayoutHeightGatesRegions(t *testing.T) {
 	// A region needs vertical room to be worth anything. On a very short
 	// terminal it is dropped rather than squeezed: a 3-line activity region
 	// next to a 5-line transcript helps nobody.
-	l := LayoutFor(200, 3, LayoutOptions{Navigation: true, Activity: true})
+	l := layout.LayoutFor(200, 3, layout.LayoutOptions{Navigation: true, Activity: true})
 	if l.ShowRegions {
 		t.Error("regions offered on a 3-line terminal")
 	}
@@ -120,9 +121,9 @@ func TestLayoutHeightGatesRegions(t *testing.T) {
 func TestLayoutIsStableForAStableSize(t *testing.T) {
 	// The transcript width must not vary between renders, or a region and the
 	// viewport disagree and the columns shear.
-	first := LayoutFor(100, 40, LayoutOptions{Navigation: true, Activity: true})
+	first := layout.LayoutFor(100, 40, layout.LayoutOptions{Navigation: true, Activity: true})
 	for i := 0; i < 5; i++ {
-		l := LayoutFor(100, 40, LayoutOptions{Navigation: true, Activity: true})
+		l := layout.LayoutFor(100, 40, layout.LayoutOptions{Navigation: true, Activity: true})
 		if l != first {
 			t.Fatalf("layout is not deterministic: %+v then %+v", first, l)
 		}
@@ -206,9 +207,9 @@ func TestComposeRegionsDoesNotEllipsiseTheTranscript(t *testing.T) {
 // capability registry is reference material behind F1; executions are the live
 // session. Below WideWidth the transcript goes to the one that cannot wait.
 func TestSidebarWinsBelowWideWidth(t *testing.T) {
-	both := LayoutOptions{Navigation: true, Activity: true}
-	for _, w := range []int{CompactWidth, 80, 100, WideWidth - 1} {
-		l := LayoutFor(w, 40, both)
+	both := layout.LayoutOptions{Navigation: true, Activity: true}
+	for _, w := range []int{layout.CompactWidth, 80, 100, layout.WideWidth - 1} {
+		l := layout.LayoutFor(w, 40, both)
 		if l.Navigation != 0 {
 			t.Errorf("width %d: navigation = %d, want 0 below WideWidth", w, l.Navigation)
 		}
@@ -216,8 +217,8 @@ func TestSidebarWinsBelowWideWidth(t *testing.T) {
 			t.Errorf("width %d: no executions region, but activity was offered", w)
 		}
 	}
-	for _, w := range []int{WideWidth, WideWidth + 1, 200} {
-		l := LayoutFor(w, 40, both)
+	for _, w := range []int{layout.WideWidth, layout.WideWidth + 1, 200} {
+		l := layout.LayoutFor(w, 40, both)
 		if l.Navigation == 0 || l.Activity == 0 {
 			t.Errorf("width %d: navigation = %d, activity = %d; want both at WideWidth and above", w, l.Navigation, l.Activity)
 		}
@@ -228,14 +229,14 @@ func TestSidebarWinsBelowWideWidth(t *testing.T) {
 // flight: a wide terminal with nothing to execute falls back to the registry
 // rather than to an empty column.
 func TestRegistryFillsTheWideTerminalAlone(t *testing.T) {
-	l := LayoutFor(200, 40, LayoutOptions{Navigation: true})
+	l := layout.LayoutFor(200, 40, layout.LayoutOptions{Navigation: true})
 	if l.Navigation == 0 {
 		t.Fatal("no navigation region on a wide terminal with nothing to execute")
 	}
 	if l.Activity != 0 {
 		t.Errorf("activity = %d with no executions to show", l.Activity)
 	}
-	if used := l.Transcript + regionColumns(l.Navigation, l.Activity); used != 200 {
+	if used := l.Transcript + layout.RegionColumns(l.Navigation, l.Activity); used != 200 {
 		t.Errorf("columns total %d, want the terminal exactly", used)
 	}
 }
@@ -245,21 +246,21 @@ func TestRegistryFillsTheWideTerminalAlone(t *testing.T) {
 // moment minRegionWidth changes, and the failure is a layout that grants a panel
 // it then has to take back.
 func TestCompactWidthIsDerivedFromTheParts(t *testing.T) {
-	want := minRegionWidth + regionChrome + regionGap + minTranscriptWidth
-	if CompactWidth != want {
-		t.Errorf("CompactWidth = %d, want %d from the region floor and the transcript minimum", CompactWidth, want)
+	want := layout.MinRegionWidth + layout.RegionChrome + layout.RegionGap + layout.MinTranscriptWidth
+	if layout.CompactWidth != want {
+		t.Errorf("CompactWidth = %d, want %d from the region floor and the transcript minimum", layout.CompactWidth, want)
 	}
 	// Exactly at the breakpoint the narrowest region and the narrowest
 	// transcript must both fit. One column either side must not both.
-	l := LayoutFor(CompactWidth, 40, LayoutOptions{Activity: true})
+	l := layout.LayoutFor(layout.CompactWidth, 40, layout.LayoutOptions{Activity: true})
 	if l.Activity == 0 {
-		t.Errorf("no region at CompactWidth %d", CompactWidth)
+		t.Errorf("no region at CompactWidth %d", layout.CompactWidth)
 	}
-	if got := l.Transcript; got < minTranscriptWidth {
-		t.Errorf("transcript = %d at CompactWidth, below the %d minimum", got, minTranscriptWidth)
+	if got := l.Transcript; got < layout.MinTranscriptWidth {
+		t.Errorf("transcript = %d at CompactWidth, below the %d minimum", got, layout.MinTranscriptWidth)
 	}
-	if l := LayoutFor(CompactWidth-1, 40, LayoutOptions{Activity: true}); l.ShowRegions {
-		t.Errorf("width %d granted a region below CompactWidth", CompactWidth-1)
+	if l := layout.LayoutFor(layout.CompactWidth-1, 40, layout.LayoutOptions{Activity: true}); l.ShowRegions {
+		t.Errorf("width %d granted a region below CompactWidth", layout.CompactWidth-1)
 	}
 }
 
@@ -267,14 +268,14 @@ func TestCompactWidthIsDerivedFromTheParts(t *testing.T) {
 // a quarter of the terminal less a margin, clamped at both ends.
 func TestRegionWidthFollowsTheShare(t *testing.T) {
 	for _, tc := range []struct{ width, want int }{
-		{CompactWidth, minRegionWidth},
-		{116, minRegionWidth}, // (116-4)/4 = 28, the floor exactly
-		{120, 29},             // the share is live from here
+		{layout.CompactWidth, layout.MinRegionWidth},
+		{116, layout.MinRegionWidth},
+		{120, 29}, // the share is live from here
 		{140, 34},
-		{148, 36},             // (148-4)/4 = 36, the ceiling exactly
-		{240, maxRegionWidth}, // clamped
+		{148, 36}, // (148-4)/4 = 36, the ceiling exactly
+		{240, layout.MaxRegionWidth},
 	} {
-		if got := regionWidth(tc.width); got != tc.want {
+		if got := layout.RegionWidth(tc.width); got != tc.want {
 			t.Errorf("regionWidth(%d) = %d, want %d", tc.width, got, tc.want)
 		}
 	}
@@ -283,8 +284,8 @@ func TestRegionWidthFollowsTheShare(t *testing.T) {
 // Both regions are drawn at the same width so the transcript does not change
 // size as a panel opens and closes.
 func TestBothRegionsShareOneWidth(t *testing.T) {
-	for _, w := range []int{CompactWidth, 100, WideWidth, 200} {
-		l := LayoutFor(w, 40, LayoutOptions{Navigation: true, Activity: true})
+	for _, w := range []int{layout.CompactWidth, 100, layout.WideWidth, 200} {
+		l := layout.LayoutFor(w, 40, layout.LayoutOptions{Navigation: true, Activity: true})
 		if l.Navigation == 0 || l.Activity == 0 {
 			continue
 		}

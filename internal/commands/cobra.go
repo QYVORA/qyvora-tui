@@ -1,8 +1,9 @@
-package tui
+package commands
 
 import (
 	"strings"
 
+	"github.com/QYVORA/qyvora-tui/internal/domain"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -94,7 +95,7 @@ func (c *CobraAdapter) Examples() []ExampleInfo {
 
 	// Cobra's Example field is multi-line text with examples.
 	// Parse it into structured ExampleInfo entries.
-	return parseCobraExamples(c.cmd.Example)
+	return ParseCobraExamples(c.cmd.Example)
 }
 
 func (c *CobraAdapter) Deprecated() string {
@@ -134,12 +135,12 @@ func flagInfoFromPflag(f *pflag.Flag) FlagInfo {
 	return info
 }
 
-// parseCobraExamples parses Cobra's multi-line Example field into structured entries.
+// ParseCobraExamples parses Cobra's multi-line Example field into structured entries.
 // Cobra examples are typically formatted as:
 //
 //	command args
 //	command args  # with optional comment
-func parseCobraExamples(exampleText string) []ExampleInfo {
+func ParseCobraExamples(exampleText string) []ExampleInfo {
 	if exampleText == "" {
 		return nil
 	}
@@ -176,7 +177,7 @@ func parseCobraExamples(exampleText string) []ExampleInfo {
 // and calls CollectCommands, returning the full Command metadata.
 //
 // This is the typical entry point for tools using Cobra.
-func CobraCommands(root *cobra.Command) []Command {
+func CobraCommands(root *cobra.Command) []domain.Command {
 	adapter := NewCobraAdapter(root)
 	return CollectCommands(adapter)
 }
