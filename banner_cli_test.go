@@ -6,11 +6,11 @@ import (
 )
 
 func TestThinBannerCarriesNameAndTagline(t *testing.T) {
-	got := ThinBanner("anansi", "Attack Surface Intelligence Engine")
+	got := ThinBanner("anansi", "Web Application Penetration Testing Framework")
 	if !strings.Contains(got, "ANANSI") {
 		t.Errorf("ThinBanner = %q, want the name", got)
 	}
-	if !strings.Contains(got, "Attack Surface Intelligence Engine") {
+	if !strings.Contains(got, "Web Application Penetration Testing Framework") {
 		t.Errorf("ThinBanner = %q, want the tagline", got)
 	}
 	if strings.Count(got, "\n") != 0 {
