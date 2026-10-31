@@ -16,8 +16,8 @@ type (
 
 // Helpers
 var (
-	CapabilitiesFrom     = capabilities.CapabilitiesFrom
+	CapabilitiesFrom      = capabilities.CapabilitiesFrom
 	NormalizeCapabilities = capabilities.NormalizeCapabilities
-	IsLifecycle          = capabilities.IsLifecycle
-	IsStage              = capabilities.IsStage
+	IsLifecycle           = capabilities.IsLifecycle
+	IsStage               = capabilities.IsStage
 )

@@ -1,5 +1,7 @@
 # qyvora-tui
 
+**Status:** `CURRENT` · **Version:** `v0.11.1`
+
 The shared interactive terminal application for the QYVORA security toolchain.
 
 All fourteen QYVORA frameworks expose the same interactive experience, built once
