@@ -1,6 +1,6 @@
 # qyvora-tui
 
-**Status:** `CURRENT` · **Version:** `v0.11.1`
+**Status:** `CURRENT` · **Version:** `v0.12.0`
 
 The shared interactive terminal application for the QYVORA security toolchain.
 
@@ -40,6 +40,57 @@ if tui.IsNotInteractive(err) {
 `ExecRunner` is the alternative for tools whose entry point is not re-entrant:
 it runs the tool's own binary with `--events stdout` and reads the same JSONL
 off the pipe, so it needs no changes to the tool at all.
+
+## AI terminal mode
+
+The same module now also provides a conversation surface for the QYVORA AI
+layer. `Run` remains the command console and is unchanged; `RunChat` is additive:
+
+```go
+code, err := tui.RunChat(tui.ChatConfig{
+	Runner:    runner,                    // implements tui.ChatRunner
+	Title:     "QYVORA / AFRICA AI",
+	Version:   "0.3.0",
+	SessionID: sessionID,                 // shown in the composer
+})
+if tui.IsNotInteractive(err) {
+	// No terminal: the caller should fall back to a one-shot command.
+}
+```
+
+A `ChatRunner` owns the turn. It emits `ChatEvent` values for complete messages,
+streaming deltas, transient status, tool/workflow blocks, and errors:
+
+```go
+type ChatRunner interface {
+	Name() string
+	Send(ctx context.Context, input string, emit func(ChatEvent) error) error
+}
+```
+
+The UI owns the transcript, input history, scrolling, cancellation and rendering.
+The runner owns model calls, approval policy, tool execution and session
+persistence. Approval is deliberately not a UI feature: a runner that needs it
+prints the pending action and interprets the next turn itself, so the terminal
+cannot execute anything the runner did not authorize.
+
+`ChatEventDelta` is supported for providers that stream tokens; a runner may also
+send one complete `ChatEventMessage` per response.
+
+### AI terminal keys
+
+| Key | Effect |
+| --- | --- |
+| `Enter` | Send the current line |
+| `PgUp` / `PgDn` | Scroll the transcript |
+| `Ctrl+C` | Stop the current turn; when idle, quit |
+| `Ctrl+D` | Quit when the input is empty |
+| `Ctrl+L` | Clear the transcript |
+| `↑` / `↓` | Message history |
+| `/help` `/clear` `/quit` | Built-ins, handled locally |
+
+`/assess <target>` is not a TUI built-in; it is passed to the runner, which may
+choose to treat it as a shortcut. The UI never assumes what the runner can do.
 
 ### Consuming this module
 
@@ -95,6 +146,8 @@ repeats the check against the released binary.
 | `Tab` | Complete from the tool's own command registry |
 | `↑` / `↓` | Command history |
 | `help` `clear` `quit` | Built-ins, handled locally |
+
+The AI terminal uses a different key map; see the section above.
 
 Export writes a new file named `<tool>-session-<timestamp>.log`. Printed output
 is exported in full even when the on-screen transcript has folded older lines;
