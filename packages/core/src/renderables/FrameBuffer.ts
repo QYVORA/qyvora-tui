@@ -1,0 +1,74 @@
+import { type RenderableOptions, Renderable, type NativeRenderableIntegration } from "../Renderable.js"
+import { OptimizedBuffer } from "../buffer.js"
+import type { RenderContext } from "../types.js"
+
+export interface FrameBufferOptions extends RenderableOptions<FrameBufferRenderable> {
+  width: number
+  height: number
+  /** Blend the buffer's cells into the frame. Without it, the cells are copied, transparent ones too. */
+  respectAlpha?: boolean
+}
+
+export class FrameBufferRenderable extends Renderable {
+  static override readonly nativeIntegration: NativeRenderableIntegration = {
+    kind: "custom",
+    body: { native: this.prototype.renderSelf },
+  }
+
+  declare public frameBuffer: OptimizedBuffer
+  protected respectAlpha: boolean
+
+  constructor(ctx: RenderContext, options: FrameBufferOptions) {
+    super(ctx, options)
+    try {
+      this.respectAlpha = options.respectAlpha || false
+      this.frameBuffer?.destroy()
+      this.frameBuffer = OptimizedBuffer.create(options.width, options.height, this._ctx.widthMethod, {
+        respectAlpha: this.respectAlpha,
+        id: options.id || `framebufferrenderable-${this.id}`,
+        owner: ctx.nativeScene,
+      })
+      this._refreshNativeSceneSurface()
+    } catch (error) {
+      this.abortConstruction(error)
+    }
+  }
+
+  /** @internal A subclass field can replace the accessor after this constructor returns; refreshHooks() rebinds it. */
+  override _refreshNativeSceneSurface(): void {
+    if (Object.getOwnPropertyDescriptor(this, "frameBuffer")?.get) return
+    let surface: OptimizedBuffer | null = this.frameBuffer
+    this._ctx.nativeScene.setSurface(this, surface)
+    Object.defineProperty(this, "frameBuffer", {
+      enumerable: true,
+      configurable: true,
+      get: () => surface,
+      set: (value: OptimizedBuffer | null) => {
+        if (this.isDestroyed) {
+          surface = null
+          return
+        }
+        if (value === surface) return
+        this._ctx.nativeScene.setSurface(this, value)
+        // Replaced wrappers remain caller-owned; the scene releases only its retained reference.
+        surface = value
+        this.requestRender()
+      },
+    })
+  }
+
+  protected onResize(width: number, height: number): void {
+    if (width <= 0 || height <= 0) {
+      throw new Error(`Invalid resize dimensions for FrameBufferRenderable ${this.id}: ${width}x${height}`)
+    }
+
+    this.frameBuffer.resize(width, height)
+    super.onResize(width, height)
+    this.requestRender()
+  }
+
+  protected renderSelf(buffer: OptimizedBuffer): void {
+    if (!this.visible || this.isDestroyed) return
+    buffer.drawFrameBuffer(Math.trunc(this._screenX), Math.trunc(this._screenY), this.frameBuffer)
+  }
+}

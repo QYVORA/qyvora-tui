@@ -1,0 +1,1422 @@
+import { MeasureMode } from "../yoga.js"
+import { type RenderableOptions, Renderable } from "../Renderable.js"
+import type { OptimizedBuffer } from "../buffer.js"
+import { type BorderStyle, BorderCharArrays, parseBorderStyle } from "../lib/border.js"
+import { convertGlobalToLocalSelection, type Selection, type LocalSelectionBounds } from "../lib/selection.js"
+import { StyledText, stringToStyledText } from "../lib/styled-text.js"
+import { RGBA, parseColor, type ColorInput } from "../lib/RGBA.js"
+import { type TextChunk, TextBuffer } from "../text-buffer.js"
+import { TextBufferView } from "../text-buffer-view.js"
+import type { RenderContext, WidthMethod } from "../types.js"
+import type { MeasureResult, NativeEncodedStyledText } from "../zig.js"
+import { allocateProportionalColumnWidths } from "./text-table-width.js"
+
+// Large sentinel height for text measurement. The Zig measure path currently
+// ignores height, but we pass an effectively unbounded value so if height-aware
+// measuring is introduced later, table sizing remains stable.
+const MEASURE_HEIGHT = 10_000
+
+export type TextTableCellContent = TextChunk[] | null | undefined
+export type TextTableContent = TextTableCellContent[][]
+export type TextTableColumnWidthMode = "content" | "full"
+export type TextTableColumnFitter = "proportional" | "balanced"
+export type TextTableColumnAlignment = "left" | "center" | "right"
+
+interface ResolvedTableBorderLayout {
+  left: boolean
+  right: boolean
+  top: boolean
+  bottom: boolean
+  innerVertical: boolean
+  innerHorizontal: boolean
+}
+
+interface TextTableCellState {
+  textBuffer: TextBuffer
+  textBufferView: TextBufferView
+}
+
+interface TextTableLayout {
+  columnWidths: number[]
+  rowHeights: number[]
+  columnOffsets: number[]
+  rowOffsets: number[]
+  columnOffsetsI32: Int32Array
+  rowOffsetsI32: Int32Array
+  tableWidth: number
+  tableHeight: number
+}
+
+interface CellPosition {
+  rowIdx: number
+  colIdx: number
+}
+
+type TableSelectionMode = "single-cell" | "column-locked" | "grid"
+
+interface SelectionResolution {
+  mode: TableSelectionMode
+  anchorCell: CellPosition | null
+  anchorColumn: number | null
+}
+
+interface CellSelectionCoords {
+  anchorX: number
+  anchorY: number
+  focusX: number
+  focusY: number
+}
+
+export interface TextTableOptions extends RenderableOptions<TextTableRenderable> {
+  content?: TextTableContent
+  wrapMode?: "none" | "char" | "word"
+  columnWidthMode?: TextTableColumnWidthMode
+  columnFitter?: TextTableColumnFitter
+  /** Each column's line alignment in its cells, by column; a missing entry is `"left"`. */
+  columnAlignments?: TextTableColumnAlignment[]
+  cellPadding?: number
+  cellPaddingX?: number
+  cellPaddingY?: number
+  columnGap?: number
+  showBorders?: boolean
+  border?: boolean
+  outerBorder?: boolean
+  selectable?: boolean
+  selectionBg?: ColorInput
+  selectionFg?: ColorInput
+  borderStyle?: BorderStyle
+  borderColor?: ColorInput
+  borderBackgroundColor?: ColorInput
+  backgroundColor?: ColorInput
+  fg?: ColorInput
+  bg?: ColorInput
+  attributes?: number
+}
+
+export class TextTableRenderable extends Renderable {
+  private _content: TextTableContent
+  /** The width method the cells measure with; a terminal reply can change the renderer's. */
+  private _cellWidthMethod?: WidthMethod
+  /** The cells hold the accepted selection in document offsets; its cells no longer name its text. */
+  private _selectionInCells = false
+  /** The cell a press without a drag pinned, which the gesture's first drag keeps as its anchor. */
+  private _pressedCell: CellPosition | null = null
+  /** The pressed cell's view still holds the press as its anchor. */
+  private _pressPinned = false
+  // The pinned press's character offset once its cell shows another selection, or null.
+  private _pressAnchor: number | null = null
+  // A width change moved the pinned press: its old screen cell no longer names its character, the anchor does.
+  private _pressMoved = false
+  private _wrapMode: "none" | "char" | "word"
+  private _columnWidthMode: TextTableColumnWidthMode
+  private _columnFitter: TextTableColumnFitter
+  private _columnAlignments: TextTableColumnAlignment[]
+  private _cellPaddingX: number
+  private _cellPaddingY: number
+  private _columnGap: number
+  private _showBorders: boolean
+  private _border: boolean
+  private _outerBorder: boolean
+  private _hasExplicitOuterBorder: boolean
+  private _borderStyle: BorderStyle
+  private _borderColor: RGBA
+  private _borderBackgroundColor: RGBA
+  private _backgroundColor: RGBA
+  private _defaultFg: RGBA
+  private _defaultBg: RGBA
+  private _defaultAttributes: number
+  private _selectionBg: RGBA | undefined
+  private _selectionFg: RGBA | undefined
+  private _lastLocalSelection: LocalSelectionBounds | null = null
+  private _lastSelectionMode: TableSelectionMode | null = null
+
+  private _cells: TextTableCellState[][] = []
+  private _prevCellContent: TextTableCellContent[][] = []
+  private _rowCount: number = 0
+  private _columnCount: number = 0
+
+  private _layout: TextTableLayout = this.createEmptyLayout()
+  private _layoutDirty: boolean = true
+
+  private _cachedMeasureLayout: TextTableLayout | null = null
+  private _cachedMeasureWidth: number | undefined = undefined
+
+  private readonly _defaultOptions = {
+    content: [] as TextTableContent,
+    wrapMode: "word" as "none" | "char" | "word",
+    columnWidthMode: "full" as TextTableColumnWidthMode,
+    columnFitter: "proportional" as TextTableColumnFitter,
+    cellPadding: 0,
+    cellPaddingX: undefined as number | undefined,
+    cellPaddingY: undefined as number | undefined,
+    columnGap: 0,
+    showBorders: true,
+    border: true,
+    outerBorder: true,
+    selectable: true,
+    selectionBg: undefined as ColorInput | undefined,
+    selectionFg: undefined as ColorInput | undefined,
+    borderStyle: "single" as BorderStyle,
+    borderColor: "#FFFFFF",
+    borderBackgroundColor: "transparent",
+    backgroundColor: "transparent",
+    fg: "#FFFFFF",
+    bg: "transparent",
+    attributes: 0,
+  } satisfies Partial<TextTableOptions>
+
+  constructor(ctx: RenderContext, options: TextTableOptions = {}) {
+    super(ctx, { ...options, flexShrink: options.flexShrink ?? 0 })
+
+    try {
+      this._content = options.content ?? this._defaultOptions.content
+      this._wrapMode = options.wrapMode ?? this._defaultOptions.wrapMode
+      this._columnWidthMode = options.columnWidthMode ?? this._defaultOptions.columnWidthMode
+      this._columnFitter = this.resolveColumnFitter(options.columnFitter)
+      this._columnAlignments = [...(options.columnAlignments ?? [])]
+      this._cellPaddingX = this.resolveCellPadding(options.cellPaddingX ?? options.cellPadding)
+      this._cellPaddingY = this.resolveCellPadding(options.cellPaddingY ?? options.cellPadding)
+      this._columnGap = this.resolveColumnGap(options.columnGap)
+      this._showBorders = options.showBorders ?? this._defaultOptions.showBorders
+      this._border = options.border ?? this._defaultOptions.border
+      this._hasExplicitOuterBorder = options.outerBorder !== undefined
+      this._outerBorder = options.outerBorder ?? this._border
+      this.selectable = options.selectable ?? this._defaultOptions.selectable
+      this._selectionBg = options.selectionBg ? RGBA.clone(parseColor(options.selectionBg)) : undefined
+      this._selectionFg = options.selectionFg ? RGBA.clone(parseColor(options.selectionFg)) : undefined
+      this._borderStyle = parseBorderStyle(options.borderStyle, this._defaultOptions.borderStyle)
+      this._borderColor = RGBA.clone(parseColor(options.borderColor ?? this._defaultOptions.borderColor))
+      this._borderBackgroundColor = RGBA.clone(
+        parseColor(options.borderBackgroundColor ?? this._defaultOptions.borderBackgroundColor),
+      )
+      this._backgroundColor = RGBA.clone(parseColor(options.backgroundColor ?? this._defaultOptions.backgroundColor))
+      this._defaultFg = RGBA.clone(parseColor(options.fg ?? this._defaultOptions.fg))
+      this._defaultBg = RGBA.clone(parseColor(options.bg ?? this._defaultOptions.bg))
+      this._defaultAttributes = options.attributes ?? this._defaultOptions.attributes
+
+      this.setupMeasureFunc()
+      this.runMutation(() => this.rebuildCells(this._content))
+      this.setBuiltinLifecyclePass(() => {
+        if (this._ctx.widthMethod !== this._cellWidthMethod) this.runMutation(() => this.followWidthMethod())
+      })
+    } catch (error) {
+      this.abortConstruction(error, () => this.destroyCells())
+    }
+  }
+
+  /** Cells re-measure in place: their views keep their selections on the same text. */
+  private followWidthMethod(): void {
+    const method = this._ctx.widthMethod
+    // A press held outside its cell moves with its character, through a view of its own.
+    const pressed = this._pressedCell && this._cells[this._pressedCell.rowIdx]?.[this._pressedCell.colIdx]
+    const anchor = this._pressAnchor !== null && pressed ? TextBufferView.create(pressed.textBuffer) : null
+    if (this._pressPinned) this._pressMoved = true
+    try {
+      anchor?._selectCharacter(this._pressAnchor!)
+      for (const row of this._cells) for (const cell of row) cell.textBuffer.setWidthMethod(method)
+      if (anchor) this._pressAnchor = anchor.getSelection()?.start ?? this._pressAnchor
+    } finally {
+      anchor?.destroy()
+    }
+    this._cellWidthMethod = method
+    if (this._lastLocalSelection?.isActive) this._selectionInCells = true
+    this.invalidateLayout()
+  }
+
+  public get content(): TextTableContent {
+    return this._content
+  }
+
+  public set content(value: TextTableContent) {
+    this.runMutation(() => this.rebuildCells(value ?? []))
+  }
+
+  public get wrapMode(): "none" | "char" | "word" {
+    return this._wrapMode
+  }
+
+  public set wrapMode(value: "none" | "char" | "word") {
+    if (this._wrapMode === value) return
+    this.runMutation(() => {
+      this._wrapMode = value
+      for (const row of this._cells) {
+        for (const cell of row) cell.textBufferView.setWrapMode(value)
+      }
+      this.invalidateLayout()
+    })
+  }
+
+  public get columnWidthMode(): TextTableColumnWidthMode {
+    return this._columnWidthMode
+  }
+
+  public set columnWidthMode(value: TextTableColumnWidthMode) {
+    if (this._columnWidthMode === value) return
+    this._columnWidthMode = value
+    this.invalidateLayout()
+  }
+
+  public get columnFitter(): TextTableColumnFitter {
+    return this._columnFitter
+  }
+
+  public set columnFitter(value: TextTableColumnFitter) {
+    const next = this.resolveColumnFitter(value)
+    if (this._columnFitter === next) return
+    this._columnFitter = next
+    this.invalidateLayout()
+  }
+
+  public get columnAlignments(): TextTableColumnAlignment[] {
+    return [...this._columnAlignments]
+  }
+
+  public set columnAlignments(value: TextTableColumnAlignment[] | undefined) {
+    this._columnAlignments = [...(value ?? [])]
+    // The views take it with the layout; no size changes.
+    this.invalidateLayout(false)
+  }
+
+  public get cellPadding(): number {
+    return this._cellPaddingX === this._cellPaddingY ? this._cellPaddingX : 0
+  }
+
+  public set cellPadding(value: number) {
+    const next = this.resolveCellPadding(value)
+    if (this._cellPaddingX === next && this._cellPaddingY === next) return
+    this._cellPaddingX = next
+    this._cellPaddingY = next
+    this.invalidateLayout()
+  }
+
+  public get cellPaddingX(): number {
+    return this._cellPaddingX
+  }
+
+  public set cellPaddingX(value: number) {
+    const next = this.resolveCellPadding(value)
+    if (this._cellPaddingX === next) return
+    this._cellPaddingX = next
+    this.invalidateLayout()
+  }
+
+  public get cellPaddingY(): number {
+    return this._cellPaddingY
+  }
+
+  public set cellPaddingY(value: number) {
+    const next = this.resolveCellPadding(value)
+    if (this._cellPaddingY === next) return
+    this._cellPaddingY = next
+    this.invalidateLayout()
+  }
+
+  public get columnGap(): number {
+    return this._columnGap
+  }
+
+  public set columnGap(value: number) {
+    const next = this.resolveColumnGap(value)
+    if (this._columnGap === next) return
+    this._columnGap = next
+    this.invalidateLayout()
+  }
+
+  public get showBorders(): boolean {
+    return this._showBorders
+  }
+
+  public set showBorders(value: boolean) {
+    if (this._showBorders === value) return
+    this._showBorders = value
+    this.requestRender()
+  }
+
+  public get outerBorder(): boolean {
+    return this._outerBorder
+  }
+
+  public set outerBorder(value: boolean) {
+    // A nullish write restores the constructor default: follow `border`.
+    if (value == null) this._hasExplicitOuterBorder = false
+    const next = value ?? this._border
+    if (this._outerBorder === next) return
+
+    this._hasExplicitOuterBorder = value != null
+    this._outerBorder = next
+    this.invalidateLayout()
+  }
+
+  public get border(): boolean {
+    return this._border
+  }
+
+  public set border(value: boolean) {
+    if (this._border === value) return
+
+    this._border = value
+
+    if (!this._hasExplicitOuterBorder) {
+      this._outerBorder = value
+    }
+
+    this.invalidateLayout()
+  }
+
+  public get borderStyle(): BorderStyle {
+    return this._borderStyle
+  }
+
+  public set borderStyle(value: BorderStyle) {
+    const next = parseBorderStyle(value, this._defaultOptions.borderStyle)
+    if (this._borderStyle === next) return
+    this._borderStyle = next
+    this.requestRender()
+  }
+
+  public get borderColor(): RGBA {
+    return RGBA.clone(this._borderColor)
+  }
+
+  public set borderColor(value: ColorInput) {
+    this._borderColor = RGBA.clone(parseColor(value ?? this._defaultOptions.borderColor))
+    this.requestRender()
+  }
+
+  public get fg(): RGBA {
+    return this._defaultFg
+  }
+
+  public set fg(value: ColorInput | undefined) {
+    const next = parseColor(value ?? this._defaultOptions.fg)
+    if (this._defaultFg.equals(next)) return
+    this._defaultFg = next
+    for (const row of this._cells) {
+      for (const cell of row) {
+        cell.textBuffer.setDefaultFg(next)
+      }
+    }
+    this.requestRender()
+  }
+
+  public shouldStartSelection(x: number, y: number): boolean {
+    if (!this.selectable) return false
+
+    this.ensureLayoutReady()
+
+    const localX = x - this.x
+    const localY = y - this.y
+    return this.getCellAtLocalPosition(localX, localY) !== null
+  }
+
+  public onSelectionChanged(selection: Selection | null): boolean {
+    this.ensureLayoutReady()
+
+    const localSelection = convertGlobalToLocalSelection(selection, Math.trunc(this.x), Math.trunc(this.y))
+    this._lastLocalSelection = localSelection
+    this._selectionInCells = false
+
+    if (!localSelection?.isActive) {
+      this.resetCellSelections()
+      this._lastSelectionMode = null
+      this._pressedCell = null
+      this._pressPinned = false
+      this._pressAnchor = null
+      this._pressMoved = false
+    } else {
+      this.applySelectionToCells(localSelection, selection?.isStart ?? false)
+    }
+
+    this.requestRender()
+    return this.hasSelection()
+  }
+
+  public hasSelection(): boolean {
+    for (const row of this._cells) {
+      for (const cell of row) {
+        if (cell.textBufferView.hasSelection()) {
+          return true
+        }
+      }
+    }
+
+    return false
+  }
+
+  public getSelection(): { start: number; end: number } | null {
+    for (const row of this._cells) {
+      for (const cell of row) {
+        const selection = cell.textBufferView.getSelection()
+        if (selection) {
+          return selection
+        }
+      }
+    }
+
+    return null
+  }
+
+  public getSelectedText(): string {
+    const selectedRows: string[] = []
+
+    for (let rowIdx = 0; rowIdx < this._rowCount; rowIdx++) {
+      const rowSelections: string[] = []
+
+      for (let colIdx = 0; colIdx < this._columnCount; colIdx++) {
+        const cell = this._cells[rowIdx]?.[colIdx]
+        if (!cell || !cell.textBufferView.hasSelection()) continue
+
+        const selectedText = cell.textBufferView.getSelectedText()
+        if (selectedText.length > 0) {
+          rowSelections.push(selectedText)
+        }
+      }
+
+      if (rowSelections.length > 0) {
+        selectedRows.push(rowSelections.join("\t"))
+      }
+    }
+
+    return selectedRows.join("\n")
+  }
+
+  protected onResize(width: number, height: number): void {
+    this.invalidateLayout(false)
+    super.onResize(width, height)
+  }
+
+  protected renderSelf(buffer: OptimizedBuffer): void {
+    if (!this.visible || this.isDestroyed) return
+
+    this.ensureLayoutReady()
+
+    const [x, y] = this._paintOrigin(buffer)
+    buffer.pushScissorRect(x, y, this._paintWidth, this._paintHeight)
+    if (buffer === this.frameBuffer) buffer.clear(this._backgroundColor)
+    else if (this._backgroundColor.a > 0) {
+      buffer.fillRect(x, y, this._paintWidth, this._paintHeight, this._backgroundColor)
+    }
+    this.drawBorders(buffer, x, y)
+    this.drawCells(buffer, x, y)
+    buffer.popScissorRect()
+  }
+
+  protected destroySelf(): void {
+    this.destroyCells()
+    super.destroySelf()
+  }
+
+  private setupMeasureFunc(): void {
+    const measureFunc = (
+      width: number,
+      widthMode: MeasureMode,
+      _height: number,
+      _heightMode: MeasureMode,
+    ): { width: number; height: number } => {
+      const hasWidthConstraint = widthMode !== MeasureMode.Undefined && Number.isFinite(width)
+      const rawWidthConstraint = hasWidthConstraint ? Math.max(1, Math.floor(width)) : undefined
+      const widthConstraint = this.resolveLayoutWidthConstraint(rawWidthConstraint)
+      const measuredLayout = this.computeLayout(widthConstraint)
+      this._cachedMeasureLayout = measuredLayout
+      this._cachedMeasureWidth = widthConstraint
+
+      let measuredWidth = measuredLayout.tableWidth > 0 ? measuredLayout.tableWidth : 1
+      let measuredHeight = measuredLayout.tableHeight > 0 ? measuredLayout.tableHeight : 1
+
+      if (widthMode === MeasureMode.AtMost && rawWidthConstraint !== undefined && this._positionType !== "absolute") {
+        measuredWidth = Math.min(rawWidthConstraint, measuredWidth)
+      }
+
+      // Keep intrinsic height even under AtMost constraints. Clamping here can under-report
+      // content height during Yoga measure passes and leave parent scroll extents stale.
+      return {
+        width: measuredWidth,
+        height: measuredHeight,
+      }
+    }
+
+    this.setMeasureProvider(measureFunc)
+  }
+
+  private rebuildCells(content: TextTableContent): void {
+    const previous = this._cells
+    const previousContent = this._prevCellContent
+    const newRowCount = content.length
+    const rows = Array.from({ length: newRowCount }, (_, index) => content[index] ?? [])
+    const newColumnCount = rows.reduce((max, row) => Math.max(max, row.length), 0)
+    const cells: TextTableCellState[][] = []
+    const refs: TextTableCellContent[][] = []
+    const created: TextTableCellState[] = []
+    const changes: { row: number; col: number; text: NativeEncodedStyledText }[] = []
+    const assertCurrent = () => {
+      if (this.isDestroyed || this._cells !== previous) throw new Error("TextTable changed during cell preparation")
+    }
+
+    // Snapshot every getter before native acceptance, including the oversized fallback.
+    const lib = this._ctx.nativeScene.driver.renderLib
+    for (let rowIdx = 0; rowIdx < newRowCount; rowIdx++) {
+      const row = rows[rowIdx]
+      const rowRefs: TextTableCellContent[] = []
+      for (let colIdx = 0; colIdx < newColumnCount; colIdx++) {
+        const cellContent = row[colIdx]
+        rowRefs.push(cellContent)
+        if (!previous[rowIdx]?.[colIdx] || cellContent !== previousContent[rowIdx][colIdx]) {
+          changes.push({
+            row: rowIdx,
+            col: colIdx,
+            text: lib.encodeTextBufferStyledText(this.toStyledText(cellContent)),
+          })
+        }
+      }
+      refs.push(rowRefs)
+      cells.push(previous[rowIdx]?.slice(0, newColumnCount) ?? [])
+    }
+    assertCurrent()
+    // A width change not yet followed moves the current cells first, so they hold their selections before replaced
+    // cells reset theirs; new cells measure with the renderer's method.
+    if (this._cellWidthMethod !== undefined && this._cellWidthMethod !== this._ctx.widthMethod) this.followWidthMethod()
+    // After a width change the cells hold the selection, not the old screen coordinates: a cell restyled with the
+    // same text keeps its range.
+    const kept = this._selectionInCells
+      ? changes.flatMap(({ row, col }) => {
+          const cell = previous[row]?.[col]
+          const range = cell?.textBufferView.getSelection()
+          return cell && range ? [{ row, col, range, text: cell.textBuffer.getPlainText() }] : []
+        })
+      : []
+    const reused =
+      newRowCount === this._rowCount &&
+      newColumnCount === this._columnCount &&
+      TextBuffer._replaceStyledTextBatch(
+        changes.map(({ row, col, text }) => ({ ...previous[row][col], text })),
+        assertCurrent,
+      )
+
+    // Prepare every changed cell before publishing or releasing accepted resources.
+    try {
+      if (!reused) {
+        for (const { row, col, text } of changes) {
+          const cell = this.createCell(text)
+          created.push(cell)
+          cells[row][col] = cell
+        }
+        for (const cell of created) cell.textBufferView.setWrapMode(this._wrapMode)
+        assertCurrent()
+      }
+    } catch (error) {
+      try {
+        this.runCleanup((run) => {
+          for (const cell of created) run(() => this.destroyCell(cell))
+        })
+      } catch {
+        // Preserve the rejected replacement rather than a cleanup failure.
+      }
+      throw error
+    }
+
+    this._content = content
+    this._cells = cells
+    this._prevCellContent = refs
+    this._rowCount = newRowCount
+    this._columnCount = newColumnCount
+    this._cellWidthMethod = this._ctx.widthMethod
+    for (const { row, col, range, text } of kept) {
+      const cell = cells[row][col]
+      if (cell.textBuffer.getPlainText() === text) {
+        cell.textBufferView.setSelection(range.start, range.end, this._selectionBg, this._selectionFg)
+      }
+    }
+    this.runCleanup((run) => {
+      run(() => this.invalidateLayout())
+      for (let rowIdx = 0; rowIdx < previous.length; rowIdx++) {
+        for (let colIdx = 0; colIdx < previous[rowIdx].length; colIdx++) {
+          const cell = previous[rowIdx][colIdx]
+          if (cell !== cells[rowIdx]?.[colIdx]) run(() => this.destroyCell(cell))
+        }
+      }
+    })
+  }
+
+  private createCell(text: NativeEncodedStyledText): TextTableCellState {
+    const textBuffer = TextBuffer.create(this._ctx.widthMethod, this._ctx.nativeScene)
+    let textBufferView: TextBufferView | undefined
+    try {
+      textBuffer._setDefaults(this._defaultFg, this._defaultBg, this._defaultAttributes)
+      textBuffer._setEncodedStyledText(text)
+
+      textBufferView = TextBufferView.create(textBuffer)
+      return { textBuffer, textBufferView }
+    } catch (error) {
+      try {
+        this.runCleanup((run) => {
+          run(() => textBufferView?.destroy())
+          run(() => textBuffer.destroy())
+        })
+      } catch {
+        // Preserve the first cell construction failure.
+      }
+      throw error
+    }
+  }
+
+  private toStyledText(content: TextTableCellContent): StyledText {
+    if (Array.isArray(content)) {
+      return new StyledText(content)
+    }
+
+    if (content === null || content === undefined) {
+      return stringToStyledText("")
+    }
+
+    return stringToStyledText(String(content))
+  }
+
+  private destroyCell(cell: TextTableCellState): void {
+    this.runCleanup((run) => {
+      run(() => cell.textBufferView.destroy())
+      run(() => cell.textBuffer.destroy())
+    })
+  }
+
+  private destroyCells(): void {
+    const cells = this._cells
+    this._cells = []
+    this._prevCellContent = []
+    this._rowCount = 0
+    this._columnCount = 0
+    this._layout = this.createEmptyLayout()
+    this.runCleanup((run) => {
+      for (const row of cells) {
+        for (const cell of row) run(() => this.destroyCell(cell))
+      }
+    })
+  }
+
+  private rebuildLayoutForCurrentWidth(): void {
+    const maxTableWidth = this.resolveLayoutWidthConstraint(this.width)
+
+    let layout: TextTableLayout
+    if (this._cachedMeasureLayout !== null && this._cachedMeasureWidth === maxTableWidth) {
+      layout = this._cachedMeasureLayout
+    } else {
+      layout = this.computeLayout(maxTableWidth)
+    }
+    this._cachedMeasureLayout = null
+    this._cachedMeasureWidth = undefined
+
+    this._layout = layout
+    this.applyLayoutToViews(layout)
+    this._layoutDirty = false
+
+    if (this._lastLocalSelection?.isActive && !this._selectionInCells) {
+      this.applySelectionToCells(this._lastLocalSelection, true)
+    }
+  }
+
+  private computeLayout(maxTableWidth?: number): TextTableLayout {
+    if (this._rowCount === 0 || this._columnCount === 0) {
+      return this.createEmptyLayout()
+    }
+
+    const borderLayout = this.resolveBorderLayout()
+    const intrinsicMeasures = this._cells.map((row) =>
+      row.map((cell) => cell.textBufferView.measureForDimensions(0, MEASURE_HEIGHT)),
+    )
+    const columnWidths = this.computeColumnWidths(maxTableWidth, borderLayout, intrinsicMeasures)
+    const rowHeights = this.computeRowHeights(columnWidths, intrinsicMeasures)
+    const columnOffsets = this.computeOffsets(
+      columnWidths,
+      borderLayout.left,
+      borderLayout.right,
+      borderLayout.innerVertical,
+      this.getInterColumnGap(borderLayout),
+    )
+    const rowOffsets = this.computeOffsets(
+      rowHeights,
+      borderLayout.top,
+      borderLayout.bottom,
+      borderLayout.innerHorizontal,
+    )
+    return {
+      columnWidths,
+      rowHeights,
+      columnOffsets,
+      rowOffsets,
+      columnOffsetsI32: new Int32Array(columnOffsets),
+      rowOffsetsI32: new Int32Array(rowOffsets),
+      tableWidth: (columnOffsets[columnOffsets.length - 1] ?? 0) + 1,
+      tableHeight: (rowOffsets[rowOffsets.length - 1] ?? 0) + 1,
+    }
+  }
+
+  private isFullWidthMode(): boolean {
+    return this._columnWidthMode === "full"
+  }
+
+  private computeColumnWidths(
+    maxTableWidth: number | undefined,
+    borderLayout: ResolvedTableBorderLayout,
+    intrinsicMeasures: (MeasureResult | null)[][],
+  ): number[] {
+    const horizontalPadding = this.getHorizontalCellPadding()
+    const intrinsicWidths = new Array(this._columnCount).fill(1 + horizontalPadding)
+
+    for (let rowIdx = 0; rowIdx < this._rowCount; rowIdx++) {
+      for (let colIdx = 0; colIdx < this._columnCount; colIdx++) {
+        const measure = intrinsicMeasures[rowIdx]?.[colIdx]
+        const measuredWidth = Math.max(1, measure?.widthColsMax ?? 0) + horizontalPadding
+        intrinsicWidths[colIdx] = Math.max(intrinsicWidths[colIdx], measuredWidth)
+      }
+    }
+
+    if (maxTableWidth === undefined || !Number.isFinite(maxTableWidth) || maxTableWidth <= 0) {
+      return intrinsicWidths
+    }
+
+    const maxContentWidth = Math.max(
+      1,
+      Math.floor(maxTableWidth) - this.getVerticalBorderCount(borderLayout) - this.getTotalInterColumnGap(borderLayout),
+    )
+    const currentWidth = intrinsicWidths.reduce((sum, width) => sum + width, 0)
+
+    if (currentWidth === maxContentWidth) {
+      return intrinsicWidths
+    }
+
+    if (currentWidth < maxContentWidth) {
+      if (this.isFullWidthMode()) {
+        return this.expandColumnWidths(intrinsicWidths, maxContentWidth)
+      }
+
+      return intrinsicWidths
+    }
+
+    if (this._wrapMode === "none") {
+      return intrinsicWidths
+    }
+
+    return this.fitColumnWidths(intrinsicWidths, maxContentWidth)
+  }
+
+  private expandColumnWidths(widths: number[], targetContentWidth: number): number[] {
+    const baseWidths = widths.map((width) => Math.max(1, Math.floor(width)))
+    const totalBaseWidth = baseWidths.reduce((sum, width) => sum + width, 0)
+
+    if (totalBaseWidth >= targetContentWidth) {
+      return baseWidths
+    }
+
+    const expanded = [...baseWidths]
+    const columns = expanded.length
+    const extraWidth = targetContentWidth - totalBaseWidth
+    const sharedWidth = Math.floor(extraWidth / columns)
+    const remainder = extraWidth % columns
+
+    for (let idx = 0; idx < columns; idx++) {
+      expanded[idx] += sharedWidth
+      if (idx < remainder) {
+        expanded[idx] += 1
+      }
+    }
+
+    return expanded
+  }
+
+  private fitColumnWidths(widths: number[], targetContentWidth: number): number[] {
+    if (this._columnFitter === "balanced") {
+      return this.fitColumnWidthsBalanced(widths, targetContentWidth)
+    }
+
+    return this.fitColumnWidthsProportional(widths, targetContentWidth)
+  }
+
+  private fitColumnWidthsProportional(widths: number[], targetContentWidth: number): number[] {
+    const minWidth = 1 + this.getHorizontalCellPadding()
+    return allocateProportionalColumnWidths(widths, targetContentWidth, minWidth)
+  }
+
+  private fitColumnWidthsBalanced(widths: number[], targetContentWidth: number): number[] {
+    const minWidth = 1 + this.getHorizontalCellPadding()
+    const hardMinWidths = new Array(widths.length).fill(minWidth)
+    const baseWidths = widths.map((width) => Math.max(1, Math.floor(width)))
+    const totalBaseWidth = baseWidths.reduce((sum, width) => sum + width, 0)
+    const columns = baseWidths.length
+
+    if (columns === 0 || totalBaseWidth <= targetContentWidth) {
+      return baseWidths
+    }
+
+    const evenShare = Math.max(minWidth, Math.floor(targetContentWidth / columns))
+    const preferredMinWidths = baseWidths.map((width) => Math.min(width, evenShare))
+    const preferredMinTotal = preferredMinWidths.reduce((sum, width) => sum + width, 0)
+    const floorWidths = preferredMinTotal <= targetContentWidth ? preferredMinWidths : hardMinWidths
+    const floorTotal = floorWidths.reduce((sum, width) => sum + width, 0)
+    const clampedTarget = Math.max(floorTotal, targetContentWidth)
+
+    if (totalBaseWidth <= clampedTarget) {
+      return baseWidths
+    }
+
+    const shrinkable = baseWidths.map((width, idx) => width - floorWidths[idx])
+    const totalShrinkable = shrinkable.reduce((sum, value) => sum + value, 0)
+    if (totalShrinkable <= 0) {
+      return [...floorWidths]
+    }
+
+    const targetShrink = totalBaseWidth - clampedTarget
+    const shrink = this.allocateShrinkByWeight(shrinkable, targetShrink, "sqrt")
+
+    return baseWidths.map((width, idx) => Math.max(floorWidths[idx], width - shrink[idx]))
+  }
+
+  private allocateShrinkByWeight(shrinkable: number[], targetShrink: number, mode: "linear" | "sqrt"): number[] {
+    const shrink = new Array(shrinkable.length).fill(0)
+
+    if (targetShrink <= 0) {
+      return shrink
+    }
+
+    const weights = shrinkable.map((value) => {
+      if (value <= 0) {
+        return 0
+      }
+
+      return mode === "sqrt" ? Math.sqrt(value) : value
+    })
+    const totalWeight = weights.reduce((sum, value) => sum + value, 0)
+
+    if (totalWeight <= 0) {
+      return shrink
+    }
+
+    const fractions = new Array(shrinkable.length).fill(0)
+    let usedShrink = 0
+
+    for (let idx = 0; idx < shrinkable.length; idx++) {
+      if (shrinkable[idx] <= 0 || weights[idx] <= 0) continue
+
+      const exact = (weights[idx] / totalWeight) * targetShrink
+      const whole = Math.min(shrinkable[idx], Math.floor(exact))
+      shrink[idx] = whole
+      fractions[idx] = exact - whole
+      usedShrink += whole
+    }
+
+    let remainingShrink = targetShrink - usedShrink
+
+    while (remainingShrink > 0) {
+      let bestIdx = -1
+      let bestFraction = -1
+
+      for (let idx = 0; idx < shrinkable.length; idx++) {
+        if (shrinkable[idx] - shrink[idx] <= 0) continue
+
+        if (
+          bestIdx === -1 ||
+          fractions[idx] > bestFraction ||
+          (fractions[idx] === bestFraction && shrinkable[idx] > shrinkable[bestIdx])
+        ) {
+          bestIdx = idx
+          bestFraction = fractions[idx]
+        }
+      }
+
+      if (bestIdx === -1) {
+        break
+      }
+
+      shrink[bestIdx] += 1
+      fractions[bestIdx] = 0
+      remainingShrink -= 1
+    }
+
+    return shrink
+  }
+
+  private computeRowHeights(columnWidths: number[], intrinsicMeasures: (MeasureResult | null)[][]): number[] {
+    const horizontalPadding = this.getHorizontalCellPadding()
+    const verticalPadding = this.getVerticalCellPadding()
+    const rowHeights = new Array(this._rowCount).fill(1 + verticalPadding)
+
+    for (let rowIdx = 0; rowIdx < this._rowCount; rowIdx++) {
+      for (let colIdx = 0; colIdx < this._columnCount; colIdx++) {
+        const cell = this._cells[rowIdx]?.[colIdx]
+        if (!cell) continue
+
+        const width = Math.max(1, (columnWidths[colIdx] ?? 1) - horizontalPadding)
+        const intrinsic = intrinsicMeasures[rowIdx]?.[colIdx]
+        const measure =
+          intrinsic && (this._wrapMode === "none" || intrinsic.widthColsMax <= width)
+            ? intrinsic
+            : cell.textBufferView.measureForDimensions(width, MEASURE_HEIGHT)
+        const lineCount = Math.max(1, measure?.lineCount ?? 1)
+        rowHeights[rowIdx] = Math.max(rowHeights[rowIdx], lineCount + verticalPadding)
+      }
+    }
+
+    return rowHeights
+  }
+
+  private computeOffsets(
+    parts: number[],
+    startBoundary: boolean,
+    endBoundary: boolean,
+    includeInnerBoundaries: boolean,
+    innerGap: number = 0,
+  ): number[] {
+    const offsets: number[] = [startBoundary ? 0 : -1]
+    let cursor = offsets[0] ?? 0
+
+    for (let idx = 0; idx < parts.length; idx++) {
+      const size = parts[idx] ?? 1
+      const separatorAfter = idx < parts.length - 1 ? (includeInnerBoundaries ? 1 : innerGap) : endBoundary ? 1 : 0
+      cursor += size + separatorAfter
+      offsets.push(cursor)
+    }
+
+    return offsets
+  }
+
+  private getInterColumnGap(borderLayout: ResolvedTableBorderLayout): number {
+    if (borderLayout.innerVertical) {
+      return 0
+    }
+
+    return this._columnGap
+  }
+
+  private getTotalInterColumnGap(borderLayout: ResolvedTableBorderLayout): number {
+    return Math.max(0, this._columnCount - 1) * this.getInterColumnGap(borderLayout)
+  }
+
+  private applyLayoutToViews(layout: TextTableLayout): void {
+    const horizontalPadding = this.getHorizontalCellPadding()
+    const verticalPadding = this.getVerticalCellPadding()
+
+    for (let rowIdx = 0; rowIdx < this._rowCount; rowIdx++) {
+      for (let colIdx = 0; colIdx < this._columnCount; colIdx++) {
+        const cell = this._cells[rowIdx]?.[colIdx]
+        if (!cell) continue
+
+        const colWidth = layout.columnWidths[colIdx] ?? 1
+        const rowHeight = layout.rowHeights[rowIdx] ?? 1
+        const contentWidth = Math.max(1, colWidth - horizontalPadding)
+        const contentHeight = Math.max(1, rowHeight - verticalPadding)
+
+        cell.textBufferView.setViewport(0, 0, contentWidth, contentHeight)
+        cell.textBufferView.setTextAlign(this._columnAlignments[colIdx] ?? "left")
+      }
+    }
+  }
+
+  private resolveBorderLayout(): ResolvedTableBorderLayout {
+    return {
+      left: this._outerBorder,
+      right: this._outerBorder,
+      top: this._outerBorder,
+      bottom: this._outerBorder,
+      innerVertical: this._border && this._columnCount > 1,
+      innerHorizontal: this._border && this._rowCount > 1,
+    }
+  }
+
+  private getVerticalBorderCount(borderLayout: ResolvedTableBorderLayout): number {
+    return (
+      (borderLayout.left ? 1 : 0) +
+      (borderLayout.right ? 1 : 0) +
+      (borderLayout.innerVertical ? Math.max(0, this._columnCount - 1) : 0)
+    )
+  }
+
+  private getHorizontalBorderCount(borderLayout: ResolvedTableBorderLayout): number {
+    return (
+      (borderLayout.top ? 1 : 0) +
+      (borderLayout.bottom ? 1 : 0) +
+      (borderLayout.innerHorizontal ? Math.max(0, this._rowCount - 1) : 0)
+    )
+  }
+
+  private drawBorders(buffer: OptimizedBuffer, x: number, y: number): void {
+    if (!this._showBorders) {
+      return
+    }
+
+    const borderLayout = this.resolveBorderLayout()
+
+    if (this.getVerticalBorderCount(borderLayout) === 0 && this.getHorizontalBorderCount(borderLayout) === 0) {
+      return
+    }
+
+    // The grid takes buffer positions: shift the layout's offsets to the paint origin in its own arrays.
+    const { columnOffsets, rowOffsets, columnOffsetsI32, rowOffsetsI32 } = this._layout
+    columnOffsets.forEach((offset, index) => (columnOffsetsI32[index] = offset + x))
+    rowOffsets.forEach((offset, index) => (rowOffsetsI32[index] = offset + y))
+    buffer.drawGrid({
+      borderChars: BorderCharArrays[this._borderStyle],
+      borderFg: this._borderColor,
+      borderBg: this._borderBackgroundColor,
+      columnOffsets: columnOffsetsI32,
+      rowOffsets: rowOffsetsI32,
+      drawInner: this._border,
+      drawOuter: this._outerBorder,
+    })
+  }
+
+  private drawCells(buffer: OptimizedBuffer, x: number, y: number): void {
+    const colOffsets = this._layout.columnOffsets
+    const rowOffsets = this._layout.rowOffsets
+    const cellX = x + 1 + this._cellPaddingX
+    const cellPaddingY = this._cellPaddingY
+
+    for (let rowIdx = 0; rowIdx < this._rowCount; rowIdx++) {
+      const cellY = y + (rowOffsets[rowIdx] ?? 0) + 1 + cellPaddingY
+
+      for (let colIdx = 0; colIdx < this._columnCount; colIdx++) {
+        const cell = this._cells[rowIdx]?.[colIdx]
+        if (!cell) continue
+        buffer.drawTextBuffer(cell.textBufferView, cellX + (colOffsets[colIdx] ?? 0), cellY)
+      }
+    }
+  }
+
+  private ensureLayoutReady(): void {
+    if (!this._layoutDirty) return
+    this.rebuildLayoutForCurrentWidth()
+  }
+
+  private getCellAtLocalPosition(localX: number, localY: number): CellPosition | null {
+    if (this._rowCount === 0 || this._columnCount === 0) return null
+    if (localX < 0 || localY < 0 || localX >= this._layout.tableWidth || localY >= this._layout.tableHeight) {
+      return null
+    }
+
+    let rowIdx = -1
+    for (let idx = 0; idx < this._rowCount; idx++) {
+      const top = (this._layout.rowOffsets[idx] ?? 0) + 1
+      const bottom = top + (this._layout.rowHeights[idx] ?? 1) - 1
+      if (localY >= top && localY <= bottom) {
+        rowIdx = idx
+        break
+      }
+    }
+
+    if (rowIdx < 0) return null
+
+    let colIdx = -1
+    for (let idx = 0; idx < this._columnCount; idx++) {
+      const left = (this._layout.columnOffsets[idx] ?? 0) + 1
+      const right = left + (this._layout.columnWidths[idx] ?? 1) - 1
+      if (localX >= left && localX <= right) {
+        colIdx = idx
+        break
+      }
+    }
+
+    if (colIdx < 0) return null
+
+    return { rowIdx, colIdx }
+  }
+
+  private applySelectionToCells(localSelection: LocalSelectionBounds, isStart: boolean): void {
+    // A press that a width change moved anchors the rest of its gesture where its character lies now, as a press
+    // made there would; only a new press starts again.
+    if (this._pressMoved && !isStart && this._pressedCell) localSelection = { ...localSelection, ...this.movedAnchor() }
+    if (localSelection.anchorX === localSelection.focusX && localSelection.anchorY === localSelection.focusY) {
+      this.resetCellSelections()
+      this._lastSelectionMode = null
+      if (isStart) {
+        this._pressAnchor = null
+        this._pressMoved = false
+      }
+      // The press selects nothing, but its cell pins it: a width change moves the pin with its text.
+      this._pressedCell = this.getCellAtLocalPosition(localSelection.anchorX, localSelection.anchorY)
+      this._pressPinned = this._pressedCell !== null
+      if (this._pressedCell) {
+        const { rowIdx, colIdx } = this._pressedCell
+        const x = localSelection.anchorX - ((this._layout.columnOffsets[colIdx] ?? 0) + 1 + this._cellPaddingX)
+        const y = localSelection.anchorY - ((this._layout.rowOffsets[rowIdx] ?? 0) + 1 + this._cellPaddingY)
+        this._cells[rowIdx][colIdx].textBufferView.setLocalSelection(x, y, x, y, this._selectionBg, this._selectionFg)
+      }
+      return
+    }
+
+    const minSelY = Math.min(localSelection.anchorY, localSelection.focusY)
+    const maxSelY = Math.max(localSelection.anchorY, localSelection.focusY)
+
+    const firstRow = this.findRowForLocalY(minSelY)
+    const lastRow = this.findRowForLocalY(maxSelY)
+    const selection = this.resolveSelectionResolution(localSelection)
+    const modeChanged = this._lastSelectionMode !== selection.mode
+    this._lastSelectionMode = selection.mode
+    const lockToAnchorColumn = selection.mode === "column-locked" && selection.anchorColumn !== null
+
+    for (let rowIdx = 0; rowIdx < this._rowCount; rowIdx++) {
+      if (rowIdx < firstRow || rowIdx > lastRow) {
+        this.resetRowSelection(rowIdx)
+        continue
+      }
+
+      const cellTop = (this._layout.rowOffsets[rowIdx] ?? 0) + 1 + this._cellPaddingY
+
+      for (let colIdx = 0; colIdx < this._columnCount; colIdx++) {
+        const cell = this._cells[rowIdx]?.[colIdx]
+        if (!cell) continue
+
+        if (lockToAnchorColumn && colIdx !== selection.anchorColumn) {
+          cell.textBufferView.resetLocalSelection()
+          continue
+        }
+
+        const cellLeft = (this._layout.columnOffsets[colIdx] ?? 0) + 1 + this._cellPaddingX
+        let coords: CellSelectionCoords = {
+          anchorX: localSelection.anchorX - cellLeft,
+          anchorY: localSelection.anchorY - cellTop,
+          focusX: localSelection.focusX - cellLeft,
+          focusY: localSelection.focusY - cellTop,
+        }
+
+        const isAnchorCell =
+          selection.anchorCell !== null &&
+          selection.anchorCell.rowIdx === rowIdx &&
+          selection.anchorCell.colIdx === colIdx
+
+        if (selection.mode === "single-cell" && !isAnchorCell) {
+          cell.textBufferView.resetLocalSelection()
+          continue
+        }
+
+        const forceSet = isAnchorCell && selection.mode !== "single-cell"
+
+        if (forceSet) {
+          coords = this.getFullCellSelectionCoords(rowIdx, colIdx)
+        }
+
+        // Leaving the pressed cell replaces its pin: keep the press's character for a later width change.
+        if (isAnchorCell && forceSet && this._pressPinned && this._pressAnchor === null) {
+          this._pressAnchor = this.pressOffset(cell.textBufferView)
+        }
+        const shouldUseSet = isStart || modeChanged || forceSet
+
+        if (shouldUseSet) {
+          cell.textBufferView.setLocalSelection(
+            coords.anchorX,
+            coords.anchorY,
+            coords.focusX,
+            coords.focusY,
+            this._selectionBg,
+            this._selectionFg,
+          )
+        } else {
+          cell.textBufferView.updateLocalSelection(
+            coords.anchorX,
+            coords.anchorY,
+            coords.focusX,
+            coords.focusY,
+            this._selectionBg,
+            this._selectionFg,
+          )
+        }
+      }
+    }
+  }
+
+  /** The table-local cell where the moved press's character lies now. */
+  private movedAnchor(): { anchorX: number; anchorY: number } {
+    const { rowIdx, colIdx } = this._pressedCell!
+    const view = this._cells[rowIdx][colIdx].textBufferView
+    const offset = this._pressAnchor ?? this.pressOffset(view)
+    this._pressAnchor = offset
+    const colors = [this._selectionBg, this._selectionFg] as const
+    // The last row that starts at or before the character, then the first cell whose character ends after it.
+    let y = 0
+    for (let row = 1; row < view.getVirtualLineCount(); row++) {
+      view.setLocalSelection(0, row, 0, 1 << 20, ...colors)
+      const start = view.getSelection()?.start
+      if (start === undefined || start > offset) break
+      y = row
+    }
+    let [low, high] = [0, Math.max(0, (this._layout.columnWidths[colIdx] ?? 0) - this._cellPaddingX * 2)]
+    while (low < high) {
+      const middle = (low + high) >> 1
+      view.setLocalSelection(0, y, middle, y, ...colors)
+      if ((view.getSelection()?.end ?? 0) > offset) high = middle
+      else low = middle + 1
+    }
+    // The probes replaced the cell's selection: this update sets every cell again.
+    this._lastSelectionMode = null
+    return {
+      anchorX: (this._layout.columnOffsets[colIdx] ?? 0) + 1 + this._cellPaddingX + low,
+      anchorY: (this._layout.rowOffsets[rowIdx] ?? 0) + 1 + this._cellPaddingY + y,
+    }
+  }
+
+  /** The character offset of the press `view` pins: a drag from it to below the text starts there. */
+  private pressOffset(view: TextBufferView): number {
+    view.updateLocalSelection(0, 0, 0, 1 << 20, this._selectionBg, this._selectionFg)
+    const below = view.getSelection()
+    if (below) return below.start
+    // A press after the text: up to it is the whole text.
+    view.updateLocalSelection(0, 0, 0, -1, this._selectionBg, this._selectionFg)
+    return view.getSelection()?.end ?? 0
+  }
+
+  private resolveSelectionResolution(localSelection: LocalSelectionBounds): SelectionResolution {
+    const anchorCell = this.getCellAtLocalPosition(localSelection.anchorX, localSelection.anchorY)
+    const focusCell = this.getCellAtLocalPosition(localSelection.focusX, localSelection.focusY)
+    const anchorColumn = anchorCell?.colIdx ?? this.getColumnAtLocalX(localSelection.anchorX)
+
+    if (
+      anchorCell !== null &&
+      focusCell !== null &&
+      anchorCell.rowIdx === focusCell.rowIdx &&
+      anchorCell.colIdx === focusCell.colIdx
+    ) {
+      return {
+        mode: "single-cell",
+        anchorCell,
+        anchorColumn,
+      }
+    }
+
+    const focusColumn = this.getColumnAtLocalX(localSelection.focusX)
+    if (anchorColumn !== null && focusColumn === anchorColumn) {
+      return {
+        mode: "column-locked",
+        anchorCell,
+        anchorColumn,
+      }
+    }
+
+    return {
+      mode: "grid",
+      anchorCell,
+      anchorColumn,
+    }
+  }
+
+  private getColumnAtLocalX(localX: number): number | null {
+    if (this._columnCount === 0) return null
+    if (localX < 0 || localX >= this._layout.tableWidth) return null
+
+    for (let colIdx = 0; colIdx < this._columnCount; colIdx++) {
+      const colStart = (this._layout.columnOffsets[colIdx] ?? 0) + 1
+      const colEnd = colStart + (this._layout.columnWidths[colIdx] ?? 1) - 1
+      if (localX >= colStart && localX <= colEnd) {
+        return colIdx
+      }
+    }
+
+    return null
+  }
+
+  private getFullCellSelectionCoords(rowIdx: number, colIdx: number): CellSelectionCoords {
+    const colWidth = this._layout.columnWidths[colIdx] ?? 1
+    const rowHeight = this._layout.rowHeights[rowIdx] ?? 1
+    const contentWidth = Math.max(1, colWidth - this.getHorizontalCellPadding())
+    const contentHeight = Math.max(1, rowHeight - this.getVerticalCellPadding())
+
+    return {
+      anchorX: -1,
+      anchorY: 0,
+      focusX: contentWidth,
+      focusY: contentHeight,
+    }
+  }
+
+  private findRowForLocalY(localY: number): number {
+    if (this._rowCount === 0) return 0
+    if (localY < 0) return 0
+
+    for (let rowIdx = 0; rowIdx < this._rowCount; rowIdx++) {
+      const rowStart = (this._layout.rowOffsets[rowIdx] ?? 0) + 1
+      const rowEnd = rowStart + (this._layout.rowHeights[rowIdx] ?? 1) - 1
+      if (localY <= rowEnd) return rowIdx
+    }
+
+    return this._rowCount - 1
+  }
+
+  private resetRowSelection(rowIdx: number): void {
+    const row = this._cells[rowIdx]
+    if (!row) return
+
+    for (const cell of row) {
+      cell.textBufferView.resetLocalSelection()
+    }
+  }
+
+  private resetCellSelections(): void {
+    for (let rowIdx = 0; rowIdx < this._rowCount; rowIdx++) {
+      this.resetRowSelection(rowIdx)
+    }
+  }
+
+  private createEmptyLayout(): TextTableLayout {
+    return {
+      columnWidths: [],
+      rowHeights: [],
+      columnOffsets: [0],
+      rowOffsets: [0],
+      columnOffsetsI32: new Int32Array([0]),
+      rowOffsetsI32: new Int32Array([0]),
+      tableWidth: 0,
+      tableHeight: 0,
+    }
+  }
+
+  private resolveLayoutWidthConstraint(width: number | undefined): number | undefined {
+    if (width === undefined || !Number.isFinite(width) || width <= 0) {
+      return undefined
+    }
+
+    if (this._wrapMode !== "none" || this.isFullWidthMode()) {
+      return Math.max(1, Math.floor(width))
+    }
+
+    return undefined
+  }
+
+  private getHorizontalCellPadding(): number {
+    return this._cellPaddingX * 2
+  }
+
+  private getVerticalCellPadding(): number {
+    return this._cellPaddingY * 2
+  }
+
+  private resolveColumnFitter(value: TextTableColumnFitter | undefined): TextTableColumnFitter {
+    if (value === undefined) {
+      return this._defaultOptions.columnFitter
+    }
+
+    return value === "balanced" ? "balanced" : "proportional"
+  }
+
+  private resolveCellPadding(value: number | undefined): number {
+    if (value === undefined || !Number.isFinite(value)) {
+      return this._defaultOptions.cellPadding
+    }
+
+    return Math.max(0, Math.floor(value))
+  }
+
+  private resolveColumnGap(value: number | undefined): number {
+    if (value === undefined || !Number.isFinite(value)) {
+      return this._defaultOptions.columnGap
+    }
+
+    return Math.max(0, Math.floor(value))
+  }
+
+  private invalidateLayout(markYogaDirty: boolean = true): void {
+    this._layoutDirty = true
+    this._cachedMeasureLayout = null
+    this._cachedMeasureWidth = undefined
+
+    if (markYogaDirty) {
+      this.invalidateIntrinsicSize()
+    }
+
+    this.requestRender()
+  }
+}

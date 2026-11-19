@@ -1,0 +1,6 @@
+preload = ["@opentui/solid/preload"]
+
+[test]
+# Core's timer that bounds a Bun poll stall.
+preload = ["@opentui/solid/preload", "../core/scripts/bun-test-preload.ts"]
+root = "tests"

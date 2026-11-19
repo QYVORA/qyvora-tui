@@ -1,0 +1,139 @@
+name: NPM Publish
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version being published"
+        required: true
+        type: string
+      isDryRun:
+        description: "Whether this is a dry run (npm publish --dry-run)"
+        required: false
+        type: boolean
+        default: false
+      prepareVersion:
+        description: "Optional package version to prepare before publishing"
+        required: false
+        type: string
+        default: ""
+      npmPackagesArtifact:
+        description: "Name of the npm packages artifact to publish. Defaults to npm-packages-<version>."
+        required: false
+        type: string
+        default: ""
+      smokeTest:
+        description: "Run the packed Node smoke tests before publishing. False when the caller ran them."
+        required: false
+        type: boolean
+        default: true
+      distTag:
+        description: "npm dist-tag to publish under. When empty, npm-publish.ts chooses it."
+        required: false
+        type: string
+        default: ""
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    # npm Trusted Publishing rejects third-party/self-hosted runners.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          registry-url: https://registry.npmjs.org
+
+      - name: Setup npm with Trusted Publishing support
+        run: npm install --global npm@^11.15.0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Prepare release versions
+        if: ${{ inputs.prepareVersion != '' }}
+        run: bun run prepare-release "${{ inputs.prepareVersion }}" --no-install
+
+      - name: Extract npm packages
+        uses: ./.github/actions/extract-npm-packages
+        with:
+          artifact: ${{ inputs.npmPackagesArtifact || format('npm-packages-{0}', inputs.version) }}
+          smoke-test: ${{ inputs.smokeTest }}
+
+      - name: Publish packages (dry-run)
+        if: ${{ inputs.isDryRun }}
+        run: |
+          echo "=========================================="
+          echo "DRY RUN MODE - Not publishing to npm"
+          echo "=========================================="
+          echo ""
+          echo "Skipping pre-publish validation (npm version check would fail for dry-runs)"
+          echo ""
+
+          # Show what would be published (just check if packages can be packed)
+          echo "Packages that would be published:"
+          echo ""
+
+          echo "📦 Checking @opentui/core..."
+          cd packages/core/dist && npm pack --dry-run
+
+          echo ""
+          echo "📦 Checking @opentui/three..."
+          cd ../../three/dist && npm pack --dry-run
+
+          echo ""
+          echo "📦 Checking @opentui/qrcode..."
+          cd ../../qrcode/dist && npm pack --dry-run
+
+          echo ""
+          echo "📦 Checking @opentui/react..."
+          cd ../../react/dist && npm pack --dry-run
+
+          echo ""
+          echo "📦 Checking @opentui/solid..."
+          cd ../../solid/dist && npm pack --dry-run
+
+          echo ""
+          echo "📦 Checking @opentui/keymap..."
+          cd ../../keymap/dist && npm pack --dry-run
+
+          echo ""
+          echo "📦 Checking @opentui/ssh..."
+          cd ../../ssh/dist && npm pack --dry-run
+
+          echo ""
+          echo "=========================================="
+          echo "DRY RUN COMPLETE - All packages validated"
+          echo "=========================================="
+        env:
+          CI: true
+
+      - name: Publish packages (production)
+        if: ${{ !inputs.isDryRun }}
+        run: |
+          echo "=========================================="
+          echo "PRODUCTION MODE - Publishing to npm"
+          echo "=========================================="
+
+          # Validates, publishes dependencies first, and skips versions an earlier attempt already
+          # published. The release workflow then waits in its own job until npm serves every package.
+          bun run publish
+
+          echo ""
+          echo "=========================================="
+          echo "PUBLISH COMPLETE"
+          echo "=========================================="
+        env:
+          CI: true
+          NPM_DIST_TAG: ${{ inputs.distTag }}

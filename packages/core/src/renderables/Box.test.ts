@@ -1,0 +1,342 @@
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test"
+import { BoxRenderable, type BoxOptions } from "./Box.js"
+import { createTestRenderer, type TestRenderer } from "../testing/test-renderer.js"
+import type { BorderStyle } from "../lib/border.js"
+import { RGBA } from "../lib/RGBA.js"
+
+let testRenderer: TestRenderer
+let renderOnce: () => Promise<void>
+let captureFrame: () => string
+let warnSpy: ReturnType<typeof spyOn>
+
+beforeEach(async () => {
+  ;({ renderer: testRenderer, renderOnce, captureCharFrame: captureFrame } = await createTestRenderer({}))
+  warnSpy = spyOn(console, "warn").mockImplementation(() => {})
+})
+
+afterEach(() => {
+  testRenderer.destroy()
+  warnSpy.mockRestore()
+})
+
+function getCellIndex(x: number, y: number): number {
+  return y * testRenderer.currentRenderBuffer.width + x
+}
+
+function getCellChar(x: number, y: number): string {
+  return testRenderer.currentRenderBuffer.withBuffers(({ char }) => String.fromCodePoint(char[getCellIndex(x, y)]))
+}
+
+function getCellForeground(x: number, y: number): [number, number, number, number] {
+  const index = getCellIndex(x, y) * 4
+  return testRenderer.currentRenderBuffer.withBuffers(({ fg }) => RGBA.fromArray(fg.slice(index, index + 4)).toInts())
+}
+
+describe("BoxRenderable - focusable option", () => {
+  test("is not focusable by default", async () => {
+    const box = new BoxRenderable(testRenderer, {
+      id: "test-box",
+      width: 10,
+      height: 5,
+    })
+
+    expect(box.focusable).toBe(false)
+    box.focus()
+    expect(box.focused).toBe(false)
+  })
+
+  test("can be made focusable via option", async () => {
+    const box = new BoxRenderable(testRenderer, {
+      id: "test-box",
+      focusable: true,
+      width: 10,
+      height: 5,
+    })
+
+    expect(box.focusable).toBe(true)
+    box.focus()
+    expect(box.focused).toBe(true)
+  })
+})
+
+describe("BoxRenderable - borderStyle validation", () => {
+  describe("regression: invalid borderStyle via constructor does not crash", () => {
+    test("handles invalid string borderStyle in constructor", async () => {
+      const box = new BoxRenderable(testRenderer, {
+        id: "test-box",
+        borderStyle: "invalid-style" as BorderStyle,
+        border: true,
+        width: 10,
+        height: 5,
+      })
+
+      testRenderer.root.add(box)
+      await renderOnce()
+
+      expect(box.borderStyle).toBe("single")
+      expect(box.isDestroyed).toBe(false)
+    })
+
+    test("handles undefined borderStyle in constructor", async () => {
+      const box = new BoxRenderable(testRenderer, {
+        id: "test-box",
+        borderStyle: undefined,
+        border: true,
+        width: 10,
+        height: 5,
+      })
+
+      testRenderer.root.add(box)
+      await renderOnce()
+
+      expect(box.borderStyle).toBe("single")
+      expect(box.isDestroyed).toBe(false)
+    })
+  })
+
+  describe("regression: invalid borderStyle via setter does not crash", () => {
+    test("handles invalid string borderStyle via setter", async () => {
+      const box = new BoxRenderable(testRenderer, {
+        id: "test-box",
+        borderStyle: "double",
+        border: true,
+        width: 10,
+        height: 5,
+      })
+
+      testRenderer.root.add(box)
+      await renderOnce()
+
+      expect(box.borderStyle).toBe("double")
+
+      box.borderStyle = "invalid-style" as BorderStyle
+      await renderOnce()
+
+      expect(box.borderStyle).toBe("single")
+      expect(box.isDestroyed).toBe(false)
+    })
+
+    test("renders correctly after fallback from invalid borderStyle", async () => {
+      const box = new BoxRenderable(testRenderer, {
+        id: "test-box",
+        borderStyle: "invalid" as BorderStyle,
+        border: true,
+        width: 10,
+        height: 5,
+      })
+
+      testRenderer.root.add(box)
+
+      // Should not throw during render
+      await expect(renderOnce()).resolves.toBeUndefined()
+      expect(box.isDestroyed).toBe(false)
+    })
+  })
+
+  describe("valid borderStyle values work correctly", () => {
+    test.each(["single", "double", "rounded", "heavy"] as BorderStyle[])(
+      "accepts valid borderStyle '%s' in constructor",
+      async (style) => {
+        const box = new BoxRenderable(testRenderer, {
+          id: "test-box",
+          borderStyle: style,
+          border: true,
+          width: 10,
+          height: 5,
+        })
+
+        testRenderer.root.add(box)
+        await renderOnce()
+
+        expect(box.borderStyle).toBe(style)
+      },
+    )
+
+    test.each(["single", "double", "rounded", "heavy"] as BorderStyle[])(
+      "accepts valid borderStyle '%s' via setter",
+      async (style) => {
+        const box = new BoxRenderable(testRenderer, {
+          id: "test-box",
+          border: true,
+          width: 10,
+          height: 5,
+        })
+
+        testRenderer.root.add(box)
+        await renderOnce()
+
+        box.borderStyle = style
+        await renderOnce()
+
+        expect(box.borderStyle).toBe(style)
+      },
+    )
+  })
+})
+
+describe("BoxRenderable - border titles (top and bottom)", () => {
+  test("renders top and bottom titles on their respective borders and rejects titles over the byte limit", async () => {
+    const box = new BoxRenderable(testRenderer, {
+      id: "border-title-box",
+      border: true,
+      width: 16,
+      height: 5,
+      title: "Top",
+      titleAlignment: "left",
+      bottomTitle: "Bot",
+      bottomTitleAlignment: "right",
+    })
+    const assign = (title: "title" | "bottomTitle", text: string) => {
+      try {
+        box[title] = text
+      } catch (error) {
+        return String(error)
+      }
+    }
+    const limit = "RangeError: Buffer text exceeds the native byte limit"
+    // A 3-byte character straddles the 65,536-byte limit.
+    expect([assign("title", "a".repeat(65_537)), assign("bottomTitle", "世".repeat(21_846))]).toEqual([limit, limit])
+    expect([box.title, box.bottomTitle]).toEqual(["Top", "Bot"])
+    for (const [title, text] of [
+      ["title", "a".repeat(65_536)],
+      ["bottomTitle", "世".repeat(21_845) + "a"],
+      ["title", "Top"],
+      ["bottomTitle", "Bot"],
+    ] as const)
+      expect(assign(title, text)).toBeUndefined()
+
+    testRenderer.root.add(box)
+    await renderOnce()
+
+    const lines = captureFrame().split("\n")
+
+    expect(lines[0].slice(0, 16)).toBe("┌─Top──────────┐")
+    expect(lines[4].slice(0, 16)).toBe("└──────────Bot─┘")
+  })
+
+  // A box left of the frame keeps its titles in place; the cells left of column 0 are not drawn.
+  test.each([
+    ["left", 0, "└─Bot────────────┘"],
+    ["center", 0, "└──────Bot───────┘"],
+    ["right", 0, "└────────────Bot─┘"],
+    ["left", -4, "t────────────┘    "],
+    ["center", -4, "───Bot───────┘    "],
+    ["right", -4, "─────────Bot─┘    "],
+  ] as const)("renders titles with %s alignment at left %d", async (alignment, left, expectedBorder) => {
+    const box = new BoxRenderable(testRenderer, {
+      id: `bottom-title-${alignment}`,
+      position: "absolute",
+      left,
+      border: true,
+      width: 18,
+      height: 5,
+      title: "Bot",
+      titleAlignment: alignment,
+      bottomTitle: "Bot",
+      bottomTitleAlignment: alignment,
+    })
+
+    testRenderer.root.add(box)
+    await renderOnce()
+
+    const lines = captureFrame().split("\n")
+    expect([lines[0].slice(0, 18), lines[4].slice(0, 18)]).toEqual([
+      expectedBorder.replace("└", "┌").replace("┘", "┐"),
+      expectedBorder,
+    ])
+  })
+
+  test("sets titleColor and triggers render on change", () => {
+    const box = new BoxRenderable(testRenderer, {
+      id: "title-color-test",
+      titleColor: "#ff0000",
+    })
+
+    expect(box.titleColor?.toInts()).toEqual([255, 0, 0, 255])
+
+    const renderSpy = spyOn(box as any, "requestRender")
+
+    box.titleColor = "#00ff00"
+
+    expect(box.titleColor?.toInts()).toEqual([0, 255, 0, 255])
+    expect(renderSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("BoxRenderable - transparent border blending", () => {
+  test("blends transparent border foreground against the box background", async () => {
+    const panel = RGBA.fromHex("#123456")
+    const box = new BoxRenderable(testRenderer, {
+      id: "transparent-border-box",
+      width: 6,
+      height: 3,
+      border: ["left"],
+      borderStyle: "heavy",
+      borderColor: RGBA.fromInts(0, 0, 0, 0),
+      backgroundColor: panel,
+    })
+
+    testRenderer.root.add(box)
+    await renderOnce()
+
+    const buffer = testRenderer.currentRenderBuffer
+    buffer.withBuffers(({ char, fg, bg }) => {
+      expect(char[0]).toBe("┃".codePointAt(0)!)
+      expect({
+        fg: RGBA.fromArray(fg.slice(0, 4)).toInts(),
+        bg: RGBA.fromArray(bg.slice(0, 4)).toInts(),
+      }).toEqual({
+        fg: panel.toInts(),
+        bg: panel.toInts(),
+      })
+    })
+  })
+})
+
+describe("BoxRenderable - no-op rendering", () => {
+  test("renders titles with titleColor even if border is transparent", async () => {
+    const box = new BoxRenderable(testRenderer, {
+      id: "title-color-transparent-border",
+      border: true,
+      width: 10,
+      height: 5,
+      title: "Test",
+      bottomTitle: "Bot",
+      bottomTitleAlignment: "right",
+      titleColor: "#ff0000",
+      borderColor: "transparent",
+      backgroundColor: "transparent",
+    })
+
+    testRenderer.root.add(box)
+    await renderOnce()
+
+    const lines = captureFrame().split("\n")
+    expect(lines[0].slice(0, 10)).toBe("  Test    ")
+    expect(lines[4].slice(0, 10)).toBe("     Bot  ")
+    expect(getCellChar(0, 0)).toBe(" ")
+    expect(getCellChar(2, 0)).toBe("T")
+    expect(getCellForeground(2, 0)).toEqual([255, 0, 0, 255])
+    expect(getCellChar(5, 4)).toBe("B")
+    expect(getCellForeground(5, 4)).toEqual([255, 0, 0, 255])
+  })
+
+  test("falls back to borderColor when titleColor is unset", async () => {
+    const box = new BoxRenderable(testRenderer, {
+      id: "title-color-border-fallback",
+      border: true,
+      width: 10,
+      height: 3,
+      title: "Test",
+      borderColor: "#0000ff",
+      backgroundColor: "transparent",
+    })
+
+    testRenderer.root.add(box)
+    await renderOnce()
+
+    expect(captureFrame().split("\n")[0].slice(0, 10)).toBe("┌─Test───┐")
+    expect(getCellForeground(0, 0)).toEqual([0, 0, 255, 255])
+    expect(getCellForeground(2, 0)).toEqual([0, 0, 255, 255])
+  })
+})

@@ -1,0 +1,867 @@
+import { describe, expect, it, beforeEach, afterEach, spyOn } from "bun:test"
+import { OptimizedBuffer, ResourceContext } from "./buffer.js"
+import { TextBuffer } from "./text-buffer.js"
+import { TextBufferView } from "./text-buffer-view.js"
+import { StyledText, stringToStyledText } from "./lib/styled-text.js"
+import { RGBA } from "./lib/RGBA.js"
+
+let resourceContext: ResourceContext
+beforeEach(() => {
+  resourceContext = new ResourceContext({ objectCapacity: 32, renderCellsMax: 4096 })
+})
+afterEach(() => resourceContext.destroy())
+
+it("cached word and CJK breaks retain streaming source order", () => {
+  const part = "AB \u65e5\u672c\u3002\u8a9e\u6587 "
+  const layouts = []
+  for (const fragmented of [false, true]) {
+    const buffer = TextBuffer.create("wcwidth", resourceContext)
+    const view = TextBufferView.create(buffer)
+    const screen = OptimizedBuffer.create(10, 256, "wcwidth", { owner: resourceContext })
+    try {
+      if (fragmented) {
+        for (let i = 0; i < 64; i++) buffer.append(part)
+      } else {
+        buffer.setText(part.repeat(64))
+      }
+      view.setWrapMode("word")
+      for (const width of [6, 8, 6]) {
+        view.setWrapWidth(width)
+        screen.clear()
+        screen.drawTextBuffer(view, 0, 0)
+        const lines = view.lineInfo
+        layouts.push({
+          rows: new TextDecoder().decode(screen.getRealCharBytes(true)),
+          starts: lines.lineStartCols,
+          widths: lines.lineWidthCols,
+        })
+      }
+    } finally {
+      screen.destroy()
+      view.destroy()
+      buffer.destroy()
+    }
+  }
+  expect(layouts.slice(0, 3)).toEqual(layouts.slice(3))
+})
+
+describe("TextBufferView", () => {
+  let buffer: TextBuffer
+  let view: TextBufferView
+
+  beforeEach(() => {
+    buffer = TextBuffer.create("wcwidth", resourceContext)
+    view = TextBufferView.create(buffer)
+  })
+
+  afterEach(() => {
+    view.destroy()
+    buffer.destroy()
+  })
+
+  describe("bounded source rows", () => {
+    it("copies only requested logical visual rows without changing the viewport or selection", () => {
+      buffer.setText(Array.from({ length: 10000 }, (_, i) => `row-${i}`).join("\n"))
+      view.setViewport(0, 3, 20, 4)
+      view.setSelection(18, 23)
+      const selected = view.getSelectedText()
+      const selection = view.getSelection()
+      const visible = view.lineInfo
+      const symbols = (resourceContext.renderLib as unknown as { opentui: { symbols: Record<string, () => number> } })
+        .opentui.symbols
+      const getLines = spyOn(symbols, "ot_text_buffer_view_get_lines")
+      const sources = view.getLineSources(9995, 3)
+      // Native copies at most the requested rows (argument 5 is the row capacity), not the whole table.
+      const capacities = getLines.mock.calls.map((args: unknown[]) => args[5])
+      getLines.mockRestore()
+      expect(Math.max(...(capacities as number[]))).toBe(3)
+      expect(sources).toEqual([9995, 9996, 9997])
+      expect(view.getLineSources(9999, 10)).toEqual([9999])
+      expect(view.getLineSources(10000, 1)).toEqual([])
+      expect(view.getLineSources(0, 0)).toEqual([])
+      expect(view.lineInfo).toEqual(visible)
+      expect(view.getSelection()).toEqual(selection)
+      expect(view.getSelectedText()).toBe(selected)
+      buffer.setText("replacement")
+      expect(sources).toEqual([9995, 9996, 9997])
+      expect(view.getLineSources(0, 10)).toEqual([0])
+    })
+
+    it("reads current native mappings after content and layout changes at the same visual-row count", () => {
+      buffer.setText("abcdefgh\nx")
+      view.setWrapMode("char")
+      view.setWrapWidth(4)
+      expect(view.getLineSources(0, 3)).toEqual([0, 0, 1])
+      buffer.setText("x\nabcdefgh")
+      expect(view.getVirtualLineCount()).toBe(3)
+      expect(view.getLineSources(0, 3)).toEqual([0, 1, 1])
+      buffer.setStyledText(stringToStyledText("abc\ndefg"))
+      view.setFirstLineOffset(2)
+      expect(view.getVirtualLineCount()).toBe(3)
+      expect(view.getLineSources(0, 3)).toEqual([0, 0, 1])
+      view.setFirstLineOffset(0)
+      view.setWrapWidth(3)
+      expect(view.getVirtualLineCount()).toBe(3)
+      expect(view.getLineSources(0, 3)).toEqual([0, 1, 1])
+      buffer.setText("\tx\ny")
+      buffer.setTabWidth(4)
+      view.setWrapWidth(4)
+      expect(view.getVirtualLineCount()).toBe(3)
+      expect(view.getLineSources(0, 3)).toEqual([0, 0, 1])
+      buffer.setTabWidth(2)
+      buffer.setText("x\n\tyz")
+      view.setWrapWidth(3)
+      expect(view.getVirtualLineCount()).toBe(3)
+      expect(view.getLineSources(0, 3)).toEqual([0, 1, 1])
+      view.setWrapMode("word")
+      expect(view.getLineSources(1, 2)).toEqual(view.logicalLineInfo.lineSources.slice(1, 3))
+      view.setViewportSize(4, 2)
+      view.setTruncate(true)
+      expect(view.getLineSources(0, 5)).toEqual(view.logicalLineInfo.lineSources)
+      buffer.clear()
+      expect(view.getLineSources(0, 5)).toEqual(view.logicalLineInfo.lineSources)
+      buffer.append("a\nb")
+      expect(view.getLineSources(0, 5)).toEqual([0, 1])
+      buffer.reset()
+      expect(view.getLineSources(0, 5)).toEqual(view.logicalLineInfo.lineSources)
+    })
+
+    it("rejects invalid row ranges and use after destruction", () => {
+      for (const value of [-1, 0.5, NaN, Infinity, 2 ** 32]) {
+        expect(() => view.getLineSources(value, 1)).toThrow(RangeError)
+        expect(() => view.getLineSources(0, value)).toThrow(RangeError)
+      }
+      view.destroy()
+      expect(() => view.getLineSources(0, 1)).toThrow("TextBufferView is destroyed")
+    })
+  })
+
+  describe("lineInfo getter with wrapping", () => {
+    it("should return line info for empty buffer", () => {
+      const emptyText = stringToStyledText("")
+      buffer.setStyledText(emptyText)
+
+      const lineInfo = view.lineInfo
+      expect(lineInfo.lineStartCols).toEqual([0])
+      expect(lineInfo.lineWidthCols).toEqual([0])
+    })
+
+    it("should return single line info for simple text without newlines", () => {
+      const styledText = stringToStyledText("Hello World")
+      buffer.setStyledText(styledText)
+
+      const lineInfo = view.lineInfo
+      expect(lineInfo.lineStartCols).toEqual([0])
+      expect(lineInfo.lineWidthCols.length).toBe(1)
+      expect(lineInfo.lineWidthCols[0]).toBeGreaterThan(0)
+    })
+
+    it("should handle single newline correctly", () => {
+      const styledText = stringToStyledText("Hello\nWorld")
+      buffer.setStyledText(styledText)
+
+      const lineInfo = view.lineInfo
+      // With newline-aware offsets: "Hello" (0-4) + newline (5) + "World" starts at 6
+      expect(lineInfo.lineStartCols).toEqual([0, 6])
+      expect(lineInfo.lineWidthCols.length).toBe(2)
+      expect(lineInfo.lineWidthCols[0]).toBeGreaterThan(0)
+      expect(lineInfo.lineWidthCols[1]).toBeGreaterThan(0)
+    })
+
+    it("should return virtual line info when text wrapping is enabled", () => {
+      const longText = "This is a very long text that should wrap when the text wrapping is enabled."
+      const styledText = stringToStyledText(longText)
+      buffer.setStyledText(styledText)
+
+      const unwrappedInfo = view.lineInfo
+      expect(unwrappedInfo.lineStartCols).toEqual([0])
+      expect(unwrappedInfo.lineWidthCols.length).toBe(1)
+      expect(unwrappedInfo.lineWidthCols[0]).toBe(76)
+
+      view.setWrapMode("char") // Enable wrapping
+      view.setWrapWidth(20)
+
+      const wrappedInfo = view.lineInfo
+
+      expect(wrappedInfo.lineStartCols.length).toBeGreaterThan(1)
+      expect(wrappedInfo.lineWidthCols.length).toBeGreaterThan(1)
+
+      for (const width of wrappedInfo.lineWidthCols) {
+        expect(width).toBeLessThanOrEqual(20)
+      }
+
+      for (let i = 1; i < wrappedInfo.lineStartCols.length; i++) {
+        expect(wrappedInfo.lineStartCols[i]).toBeGreaterThan(wrappedInfo.lineStartCols[i - 1])
+      }
+    })
+
+    it("should return correct lineInfo for word wrapping", () => {
+      const text = "Hello world this is a test"
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("word")
+      view.setWrapWidth(12)
+
+      const lineInfo = view.lineInfo
+
+      expect(lineInfo.lineStartCols.length).toBeGreaterThan(1)
+
+      for (const width of lineInfo.lineWidthCols) {
+        expect(width).toBeLessThanOrEqual(12)
+      }
+    })
+
+    it("should return correct lineInfo for char wrapping", () => {
+      const text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+      view.setWrapWidth(10)
+
+      const lineInfo = view.lineInfo
+
+      expect(lineInfo.lineStartCols).toEqual([0, 10, 20])
+      expect(lineInfo.lineWidthCols).toEqual([10, 10, 6])
+    })
+
+    it("should update lineInfo when wrap width changes", () => {
+      const text = "The quick brown fox jumps over the lazy dog"
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char") // Enable wrapping
+      view.setWrapWidth(15)
+
+      const lineInfo1 = view.lineInfo
+      const lineCount1 = lineInfo1.lineStartCols.length
+
+      view.setWrapWidth(30)
+
+      const lineInfo2 = view.lineInfo
+      const lineCount2 = lineInfo2.lineStartCols.length
+
+      expect(lineCount2).toBeLessThan(lineCount1)
+    })
+
+    it("should return original lineInfo when wrap is disabled", () => {
+      const text = "Line 1\nLine 2\nLine 3"
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      const originalInfo = view.lineInfo
+      // With newline-aware offsets: Line 0 (0-5) + newline (6) + Line 1 (7-12) + newline (13) + Line 2 (14-19)
+      expect(originalInfo.lineStartCols).toEqual([0, 7, 14])
+
+      view.setWrapMode("char") // Enable wrapping
+      view.setWrapWidth(5)
+
+      const wrappedInfo = view.lineInfo
+      expect(wrappedInfo.lineStartCols.length).toBeGreaterThan(3)
+
+      view.setWrapMode("none") // Disable wrapping
+      view.setWrapWidth(null)
+
+      const unwrappedInfo = view.lineInfo
+      expect(unwrappedInfo.lineStartCols).toEqual([0, 7, 14])
+    })
+
+    it("should return extended wrap info", () => {
+      const text = "Line 1 content\nLine 2"
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+      view.setWrapWidth(10)
+
+      // Line 1 content (14 chars) wraps into two lines:
+      // "Line 1 con" (10)
+      // "tent" (4)
+      // Line 2 (6 chars) fits on one line
+
+      const info = view.lineInfo
+
+      expect(info.lineSources.length).toBe(3)
+      expect(info.lineWraps.length).toBe(3)
+
+      // First visual line: source line 0, wrap 0
+      expect(info.lineSources[0]).toBe(0)
+      expect(info.lineWraps[0]).toBe(0)
+
+      // Second visual line: source line 0, wrap 1 (continuation)
+      expect(info.lineSources[1]).toBe(0)
+      expect(info.lineWraps[1]).toBe(1)
+
+      // Third visual line: source line 1, wrap 0
+      expect(info.lineSources[2]).toBe(1)
+      expect(info.lineWraps[2]).toBe(0)
+    })
+  })
+
+  describe("selection", () => {
+    // Each row: text, selection calls, then the selected text and the range in cell offsets (a newline counts one).
+    // Local selections are inclusive: the cell under the focus is selected too.
+    it.each<[string, string, ((view: TextBufferView) => unknown)[], string, { start: number; end: number } | null]>([
+      ["no selection", "Hello World", [], "", null],
+      ["offsets", "Hello World", [(v) => v.setSelection(6, 11)], "World", { start: 6, end: 11 }],
+      [
+        "offsets across a newline",
+        "Line 1\nLine 2\nLine 3",
+        [(v) => v.setSelection(0, 9)],
+        "Line 1\nLi",
+        { start: 0, end: 9 },
+      ],
+      [
+        "offsets over wide characters (the end snaps past the emoji)",
+        "Hello 世界 🌟",
+        [(v) => v.setSelection(6, 12)],
+        "世界 🌟",
+        { start: 6, end: 13 },
+      ],
+      ["reset", "Hello World", [(v) => v.setSelection(6, 11), (v) => v.resetSelection()], "", null],
+      [
+        "update grows",
+        "Hello World",
+        [(v) => v.setSelection(0, 5), (v) => v.updateSelection(11)],
+        "Hello World",
+        { start: 0, end: 11 },
+      ],
+      [
+        "update shrinks",
+        "Hello World",
+        [(v) => v.setSelection(0, 11), (v) => v.updateSelection(5)],
+        "Hello",
+        { start: 0, end: 5 },
+      ],
+      ["update without a selection", "Hello World", [(v) => v.updateSelection(5)], "", null],
+      ["local", "Hello World", [(v) => v.setLocalSelection(0, 0, 5, 0)], "Hello ", { start: 0, end: 6 }],
+      [
+        "local update keeps the anchor",
+        "Hello World",
+        [
+          (v) => v.setLocalSelection(0, 0, 5, 0),
+          (v) => v.updateLocalSelection(0, 0, 11, 0),
+          (v) => v.updateLocalSelection(0, 0, 3, 0),
+        ],
+        "Hell",
+        { start: 0, end: 4 },
+      ],
+      [
+        "local update across lines",
+        "Line 1\nLine 2\nLine 3",
+        [(v) => v.setLocalSelection(2, 0, 2, 0), (v) => v.updateLocalSelection(2, 0, 4, 1)],
+        "ne 1\nLine ",
+        { start: 2, end: 12 },
+      ],
+      [
+        "local update without an anchor",
+        "Hello World",
+        [(v) => v.updateLocalSelection(0, 0, 5, 0)],
+        "Hello ",
+        { start: 0, end: 6 },
+      ],
+      [
+        "local update backward",
+        "Hello World",
+        [(v) => v.setLocalSelection(11, 0, 11, 0), (v) => v.updateLocalSelection(11, 0, 6, 0)],
+        "World",
+        { start: 6, end: 11 },
+      ],
+      ["a cell press is empty", "alpha beta", [(v) => v.setLocalSelection(6, 0, 6, 0)], "", null],
+      [
+        "word press",
+        "alpha beta gamma",
+        [(v) => v.setLocalSelection(6, 0, 6, 0, undefined, undefined, "word")],
+        "beta",
+        { start: 6, end: 10 },
+      ],
+      [
+        "line press",
+        "alpha beta\ngamma",
+        [(v) => v.setLocalSelection(2, 1, 2, 1, undefined, undefined, "line")],
+        "gamma",
+        { start: 11, end: 16 },
+      ],
+    ])("%s", (_name, text, calls, selectedText, selection) => {
+      buffer.setStyledText(stringToStyledText(text))
+      // Every local call reports a change.
+      expect(calls.map((call) => call(view)).filter((result) => typeof result === "boolean")).not.toContain(false)
+      expect([view.getSelectedText(), view.getSelection(), view.hasSelection()]).toEqual([
+        selectedText,
+        selection,
+        selection !== null,
+      ])
+    })
+
+    // Resets skip native while a view is marked clear; that is sound only if a clear view has no native selection.
+    it.each([1, 2, 3])("never marks a view with a selection clear (seed %j)", (seed) => {
+      let state = seed
+      const random = (count: number) => {
+        state ^= state << 13
+        state ^= state >>> 17
+        state ^= state << 5
+        return (state >>> 0) % count
+      }
+      const texts = ["alpha beta\ngamma 世界\n\tdelta", "x", "", "one two three four"]
+      const behaviors = ["cell", "word", "line"] as const
+      const local = (): [number, number, number, number] => [random(12), random(4), random(12), random(4)]
+      const replacement = resourceContext.renderLib.encodeTextBufferStyledText(stringToStyledText("x y"))
+      const operations = [
+        () => view.setSelection(random(20), 20 + random(10)),
+        () => view.updateSelection(random(30)),
+        () => view.setLocalSelection(...local(), undefined, undefined, behaviors[random(3)]),
+        () => view.updateLocalSelection(...local(), undefined, undefined, behaviors[random(3)]),
+        () => view.resetSelection(),
+        () => view.resetLocalSelection(),
+        () => buffer.setText(texts[random(texts.length)]),
+        () => view.setSelectionOccupancy(random(2) === 0 ? "boundary" : "cell"),
+        () =>
+          TextBuffer._replaceStyledTextBatch(
+            [{ textBuffer: buffer, textBufferView: view, text: replacement }],
+            () => {},
+          ),
+      ]
+      buffer.setText(texts[0])
+      for (let step = 0; step < 300; step++) {
+        operations[random(operations.length)]()
+        if ((view as unknown as { selectionClear: boolean }).selectionClear) expect(view.hasSelection()).toBe(false)
+      }
+    })
+
+    it("resets a selection once and skips resets of a clear view", () => {
+      buffer.setStyledText(stringToStyledText("Hello World"))
+      const symbols = (resourceContext.renderLib as unknown as { opentui: { symbols: Record<string, () => number> } })
+        .opentui.symbols
+      const select = spyOn(symbols, "ot_text_buffer_view_select")
+      try {
+        view.resetLocalSelection()
+        view.resetSelection()
+        expect(select).toHaveBeenCalledTimes(0)
+
+        view.setLocalSelection(0, 0, 4, 0)
+        expect(view.getSelectedText()).toBe("Hello")
+        view.resetLocalSelection()
+        view.resetLocalSelection()
+        // One call selected, one reset.
+        expect(select).toHaveBeenCalledTimes(2)
+        expect(view.hasSelection()).toBe(false)
+
+        view.setSelection(0, 5)
+        view.resetSelection()
+        expect(select).toHaveBeenCalledTimes(4)
+        expect(view.hasSelection()).toBe(false)
+      } finally {
+        select.mockRestore()
+      }
+    })
+
+    it("rejects resets of a clear view during a Yoga callback", () => {
+      const host = resourceContext.renderLib.getYogaHost()
+      const failures: string[] = []
+      for (const reset of [() => view.resetLocalSelection(), () => view.resetSelection()]) {
+        host.invokeCallback(() => {
+          try {
+            reset()
+          } catch (error) {
+            failures.push((error as Error).message)
+          }
+        })
+      }
+      expect(failures).toEqual(["Cannot mutate Yoga during a callback", "Cannot mutate Yoga during a callback"])
+    })
+
+    it("rejects resets of a destroyed clear view", () => {
+      const other = TextBufferView.create(buffer)
+      other.destroy()
+      expect(() => other.resetSelection()).toThrow("TextBufferView is destroyed")
+      expect(() => other.resetLocalSelection()).toThrow("TextBufferView is destroyed")
+    })
+
+    it("rejects resets of a clear view whose native Context is gone", () => {
+      const owner = new ResourceContext({ objectCapacity: 4, renderCellsMax: 64 })
+      const text = TextBuffer.create("wcwidth", owner)
+      const clear = TextBufferView.create(text)
+      owner.renderLib.destroyContext(owner.context)
+      expect(() => clear.resetLocalSelection()).toThrow("WrongContext")
+      expect(() => clear.resetSelection()).toThrow("WrongContext")
+    })
+
+    it("does not carry selection colors into a later selection", () => {
+      buffer.setStyledText(stringToStyledText("Hello"))
+      const screen = OptimizedBuffer.create(8, 1, "wcwidth", { owner: resourceContext })
+      const selectedBackground = () => {
+        screen.clear()
+        screen.drawTextBuffer(view, 0, 0)
+        return screen.withBuffers(({ bg }) => Array.from(bg.subarray(0, 4)))
+      }
+      try {
+        view.setSelection(0, 5, RGBA.fromInts(255, 0, 0, 255))
+        const red = selectedBackground()
+        view.setSelection(0, 5)
+        const inverted = selectedBackground()
+        expect(inverted).not.toEqual(red)
+        view.resetLocalSelection()
+        view.setSelection(0, 5, RGBA.fromInts(255, 0, 0, 255))
+        expect(selectedBackground()).toEqual(red)
+      } finally {
+        screen.destroy()
+      }
+    })
+  })
+
+  describe("getPlainText", () => {
+    it("should return empty string for empty buffer", () => {
+      const emptyText = stringToStyledText("")
+      buffer.setStyledText(emptyText)
+
+      const plainText = view.getPlainText()
+      expect(plainText).toBe("")
+    })
+
+    it("should return plain text without styling", () => {
+      const styledText = stringToStyledText("Hello World")
+      buffer.setStyledText(styledText)
+
+      const plainText = view.getPlainText()
+      expect(plainText).toBe("Hello World")
+    })
+
+    it("should handle text with newlines", () => {
+      const styledText = stringToStyledText("Line 1\nLine 2\nLine 3")
+      buffer.setStyledText(styledText)
+
+      const plainText = view.getPlainText()
+      expect(plainText).toBe("Line 1\nLine 2\nLine 3")
+    })
+  })
+
+  describe("undo/redo with line info", () => {
+    it("should update lineInfo correctly after undo", () => {
+      // Line info follows the restored text after undo.
+      const styledText = stringToStyledText("Line 1 content\nLine 2")
+      buffer.setStyledText(styledText)
+
+      const lineInfoBefore = view.lineInfo
+      expect(lineInfoBefore.lineStartCols).toEqual([0, 15])
+      expect(lineInfoBefore.lineWidthCols[0]).toBe(14)
+      expect(lineInfoBefore.lineWidthCols[1]).toBe(6)
+
+      // Modify the buffer (this would normally go through EditBuffer with undo tracking)
+      // For this test, we'll just verify the view updates correctly
+      const modifiedText = stringToStyledText("Line 1 \nLine 2")
+      buffer.setStyledText(modifiedText)
+
+      const lineInfoAfterModify = view.lineInfo
+      expect(lineInfoAfterModify.lineStartCols).toEqual([0, 8])
+      expect(lineInfoAfterModify.lineWidthCols[0]).toBe(7)
+
+      // Restore original (simulating undo)
+      buffer.setStyledText(styledText)
+
+      const lineInfoAfterRestore = view.lineInfo
+      expect(lineInfoAfterRestore.lineStartCols).toEqual([0, 15])
+      expect(lineInfoAfterRestore.lineWidthCols[0]).toBe(14)
+    })
+
+    it("should handle line info correctly through multiple undo/redo cycles", () => {
+      const text1 = stringToStyledText("Short\nLine 2")
+      const text2 = stringToStyledText("This is a longer line\nLine 2")
+      const text3 = stringToStyledText("X\nLine 2")
+
+      buffer.setStyledText(text1)
+      const info1 = view.lineInfo
+      expect(info1.lineWidthCols[0]).toBe(5)
+
+      buffer.setStyledText(text2)
+      const info2 = view.lineInfo
+      expect(info2.lineWidthCols[0]).toBe(21)
+
+      buffer.setStyledText(text3)
+      const info3 = view.lineInfo
+      expect(info3.lineWidthCols[0]).toBe(1)
+
+      // Go back to text2 (simulating undo)
+      buffer.setStyledText(text2)
+      const info2Again = view.lineInfo
+      expect(info2Again.lineWidthCols[0]).toBe(21)
+
+      // Go back to text1 (simulating another undo)
+      buffer.setStyledText(text1)
+      const info1Again = view.lineInfo
+      expect(info1Again.lineWidthCols[0]).toBe(5)
+
+      // Forward to text2 (simulating redo)
+      buffer.setStyledText(text2)
+      const info2Redo = view.lineInfo
+      expect(info2Redo.lineWidthCols[0]).toBe(21)
+    })
+
+    it("should correctly track line starts after undo with multiline text", () => {
+      const original = stringToStyledText("Line 1 content\nLine 2 content\nLine 3")
+      const modified = stringToStyledText("Line 1 \nLine 2 content\nLine 3")
+
+      buffer.setStyledText(original)
+      const originalInfo = view.lineInfo
+      expect(originalInfo.lineStartCols).toEqual([0, 15, 30])
+
+      buffer.setStyledText(modified)
+      const modifiedInfo = view.lineInfo
+      expect(modifiedInfo.lineStartCols).toEqual([0, 8, 23])
+
+      // Restore (undo)
+      buffer.setStyledText(original)
+      const restoredInfo = view.lineInfo
+      expect(restoredInfo.lineStartCols).toEqual([0, 15, 30])
+    })
+  })
+
+  describe("wrapped view offset stability", () => {
+    it("should maintain stable char offsets with wide characters", () => {
+      const text = "A世B界C" // A(1) 世(2) B(1) 界(2) C(1) = 7 total width
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+      view.setWrapWidth(4)
+
+      const lineInfo = view.lineInfo
+      // Should wrap at display width boundaries
+      expect(lineInfo.lineStartCols[0]).toBe(0)
+      expect(lineInfo.lineStartCols.length).toBeGreaterThan(1)
+
+      // Each line should respect wrap width in display columns
+      for (const width of lineInfo.lineWidthCols) {
+        expect(width).toBeLessThanOrEqual(4)
+      }
+    })
+
+    it("should maintain stable selection with wrapped wide characters", () => {
+      const text = "世界世界世界" // 6 CJK characters = 12 display width
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+      view.setWrapWidth(6)
+
+      // Select first 3 CJK characters (6 display width)
+      view.setSelection(0, 6)
+      const selected = view.getSelectedText()
+      expect(selected).toBe("世界世")
+    })
+
+    it("should handle tabs correctly in wrapped view", () => {
+      const text = "A\tB\tC"
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+      view.setWrapWidth(10)
+
+      const lineInfo = view.lineInfo
+      // Tabs expand to display width, offsets should account for this
+      expect(lineInfo.lineStartCols.length).toBeGreaterThanOrEqual(1)
+    })
+
+    it("should handle emoji in wrapped view", () => {
+      const text = "🌟🌟🌟🌟🌟" // 5 emoji = 10 display width (assuming 2 each)
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+      view.setWrapWidth(6)
+
+      const lineInfo = view.lineInfo
+      expect(lineInfo.lineStartCols.length).toBeGreaterThan(1)
+
+      // Each wrapped line should respect display width limits
+      for (const width of lineInfo.lineWidthCols) {
+        expect(width).toBeLessThanOrEqual(6)
+      }
+    })
+
+    it("should maintain selection across wrapped lines", () => {
+      const text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      const styledText = stringToStyledText(text)
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+      view.setWrapWidth(10)
+
+      // Select across wrap boundary: chars 8-12 (IJK)
+      view.setSelection(8, 13)
+      const selected = view.getSelectedText()
+      expect(selected).toBe("IJKLM")
+    })
+  })
+
+  describe("measureForDimensions", () => {
+    it("preserves public result identity", () => {
+      buffer.setStyledText(stringToStyledText("abcdefghij"))
+      view.setWrapMode("char")
+      const first = view.measureForDimensions(10, 10)!
+      const second = view.measureForDimensions(5, 10)!
+      const repeated = view.measureForDimensions(10, 1)!
+
+      expect(first).not.toBe(second)
+      expect(repeated).not.toBe(first)
+      expect(repeated).toEqual(first)
+      expect(first).toEqual({ lineCount: 1, widthColsMax: 10 })
+      expect(second).toEqual({ lineCount: 2, widthColsMax: 5 })
+    })
+
+    it("should measure without modifying cache", () => {
+      const styledText = stringToStyledText("ABCDEFGHIJKLMNOPQRST")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+      view.setWrapWidth(100) // Large width
+
+      // Measure with different width
+      const measureResult = view.measureForDimensions(10, 10)
+      expect(measureResult).not.toBeNull()
+      expect(measureResult!.lineCount).toBe(2)
+      expect(measureResult!.widthColsMax).toBe(10)
+
+      // Verify cache wasn't modified (should be 1 line with wrap width 100)
+      const lineInfo = view.lineInfo
+      expect(lineInfo.lineStartCols.length).toBe(1)
+    })
+
+    it("should measure char wrap correctly", () => {
+      const styledText = stringToStyledText("ABCDEFGHIJKLMNOPQRST")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+
+      // Test different widths
+      const result1 = view.measureForDimensions(10, 10)
+      expect(result1).not.toBeNull()
+      expect(result1!.lineCount).toBe(2)
+      expect(result1!.widthColsMax).toBe(10)
+
+      const result2 = view.measureForDimensions(5, 10)
+      expect(result2).not.toBeNull()
+      expect(result2!.lineCount).toBe(4)
+      expect(result2!.widthColsMax).toBe(5)
+
+      const result3 = view.measureForDimensions(20, 10)
+      expect(result3).not.toBeNull()
+      expect(result3!.lineCount).toBe(1)
+      expect(result3!.widthColsMax).toBe(20)
+    })
+
+    it("should handle no wrap mode", () => {
+      const styledText = stringToStyledText("Hello\nWorld\nTest")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("none")
+
+      const result = view.measureForDimensions(3, 10)
+      expect(result).not.toBeNull()
+      expect(result!.lineCount).toBe(3)
+      expect(result!.widthColsMax).toBeGreaterThanOrEqual(4)
+    })
+
+    it("should handle word wrap", () => {
+      const styledText = stringToStyledText("Hello wonderful world")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("word")
+
+      const result = view.measureForDimensions(10, 10)
+      expect(result).not.toBeNull()
+      expect(result!.lineCount).toBeGreaterThanOrEqual(2)
+      expect(result!.widthColsMax).toBeLessThanOrEqual(10)
+    })
+
+    it("should handle empty buffer", () => {
+      const styledText = stringToStyledText("")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+
+      const result = view.measureForDimensions(10, 10)
+      expect(result).not.toBeNull()
+      expect(result!.lineCount).toBe(1)
+      expect(result!.widthColsMax).toBe(0)
+    })
+
+    it("should handle multiple lines with wrapping", () => {
+      const styledText = stringToStyledText("Short\nAVeryLongLineHere\nMedium")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+
+      const result = view.measureForDimensions(10, 10)
+      expect(result).not.toBeNull()
+      // "Short" (1), "AVeryLongLineHere" (2), "Medium" (1) = 4 lines
+      expect(result!.lineCount).toBe(4)
+      expect(result!.widthColsMax).toBe(10)
+    })
+
+    it("should cache measure results for same width", () => {
+      const styledText = stringToStyledText("ABCDEFGHIJKLMNOPQRST")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("char")
+
+      // First call - cache miss
+      const result1 = view.measureForDimensions(10, 10)
+      expect(result1).not.toBeNull()
+      expect(result1!.lineCount).toBe(2)
+
+      // Second call with same width - should return cached result
+      const result2 = view.measureForDimensions(10, 10)
+      expect(result2).not.toBeNull()
+      expect(result2!.lineCount).toBe(2)
+      expect(result2!.widthColsMax).toBe(result1!.widthColsMax)
+    })
+
+    it("should invalidate cache when content changes", () => {
+      const styledText1 = stringToStyledText("ABCDEFGHIJ")
+      buffer.setStyledText(styledText1)
+
+      view.setWrapMode("char")
+
+      // Measure with width 5 - should be 2 lines
+      const result1 = view.measureForDimensions(5, 10)
+      expect(result1!.lineCount).toBe(2)
+
+      // Change content to be longer
+      const styledText2 = stringToStyledText("ABCDEFGHIJKLMNOPQRST")
+      buffer.setStyledText(styledText2)
+
+      // Same width should now return different result
+      const result2 = view.measureForDimensions(5, 10)
+      expect(result2!.lineCount).toBe(4)
+    })
+
+    it("should invalidate cache when wrap mode changes", () => {
+      const styledText = stringToStyledText("Hello world test string here")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("word")
+      const resultWord = view.measureForDimensions(10, 10)
+
+      view.setWrapMode("char")
+      const resultChar = view.measureForDimensions(10, 10)
+
+      // Word and char wrap should produce different results
+      expect(resultWord!.lineCount).not.toBe(resultChar!.lineCount)
+    })
+
+    it("should handle width 0 for intrinsic measurement", () => {
+      const styledText = stringToStyledText("Hello World")
+      buffer.setStyledText(styledText)
+
+      view.setWrapMode("word")
+
+      // Width 0 means get intrinsic width (no wrapping)
+      const result = view.measureForDimensions(0, 10)
+      expect(result).not.toBeNull()
+      expect(result!.lineCount).toBe(1)
+      expect(result!.widthColsMax).toBe(11) // "Hello World" = 11 chars
+    })
+  })
+})

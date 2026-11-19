@@ -1,0 +1,286 @@
+import type { RenderContext } from "../types.js"
+import {
+  TextareaRenderable,
+  type TextareaOptions,
+  type TextareaAction,
+  type KeyBinding as TextareaKeyBinding,
+} from "./Textarea.js"
+
+export type InputAction = TextareaAction
+export type InputKeyBinding = TextareaKeyBinding
+
+/** Cuts `text` to at most `max` UTF-16 code units, leaving out a character that does not fit whole. */
+function fit(text: string, max: number): string {
+  const cut = text.substring(0, max)
+  return (text.codePointAt(cut.length - 1) ?? 0) > 0xffff ? cut.slice(0, -1) : cut
+}
+
+export interface InputRenderableOptions extends Omit<
+  TextareaOptions,
+  // onSubmit omitted: submit() emits the ENTER event and never calls the inherited listener
+  "height" | "minHeight" | "maxHeight" | "initialValue" | "onSubmit"
+> {
+  /** Initial text value (newlines are stripped) */
+  value?: string
+  /** Minimum length in UTF-16 code units required for submit */
+  minLength?: number
+  /** Maximum length in UTF-16 code units */
+  maxLength?: number
+  /** Placeholder text (Input only supports string, not StyledText) */
+  placeholder?: string
+}
+
+// TODO: make this just plain strings instead of an enum (same for other events)
+export enum InputRenderableEvents {
+  INPUT = "input",
+  CHANGE = "change",
+  ENTER = "enter",
+}
+
+/**
+ * InputRenderable - A single-line text input component.
+ *
+ * Extends TextareaRenderable with single-line constraints:
+ * - Height is always 1
+ * - No text wrapping
+ * - Newlines are stripped from input
+ * - Enter key submits instead of inserting newline
+ *
+ * Inherits all keybindings from TextareaRenderable.
+ */
+export class InputRenderable extends TextareaRenderable {
+  private _maxLength: number
+  private _minLength: number
+  private _lastCommittedValue: string = ""
+
+  // Only specify defaults that differ from TextareaRenderable/EditBufferRenderable
+  private static readonly defaultOptions = {
+    // Different from Textarea's null
+    placeholder: "",
+    // Input-specific
+    maxLength: 1000,
+    minLength: 0,
+    value: "",
+  } satisfies Partial<InputRenderableOptions>
+
+  constructor(ctx: RenderContext, options: InputRenderableOptions) {
+    const defaults = InputRenderable.defaultOptions
+    const maxLength = options.maxLength ?? defaults.maxLength
+    const minLength = options.minLength ?? defaults.minLength
+    // Sanitize initial value: strip newlines and enforce maxLength
+    const rawValue = options.value ?? defaults.value
+    const initialValue = fit(rawValue.replace(/[\n\r]/g, ""), maxLength)
+
+    if (minLength > maxLength) {
+      throw new Error(`InputRenderable: minLength (${minLength}) cannot be greater than maxLength (${maxLength})`)
+    }
+
+    super(ctx, {
+      ...options,
+      placeholder: options.placeholder ?? defaults.placeholder,
+      initialValue,
+      // Single-line constraints
+      height: 1,
+      wrapMode: "none",
+      // Override return/linefeed to submit instead of newline
+      keyBindings: [
+        { name: "return", action: "submit" },
+        { name: "kpenter", action: "submit" },
+        { name: "linefeed", action: "submit" },
+        ...(options.keyBindings || []),
+      ],
+    })
+
+    try {
+      this._maxLength = maxLength
+      this._minLength = minLength
+      this._lastCommittedValue = this.plainText
+
+      // Set cursor to end of initial value
+      if (initialValue) {
+        this.cursorOffset = this.editBuffer.getEOL().offset
+      }
+    } catch (error) {
+      this.rollbackConstruction(error)
+    }
+  }
+
+  /**
+   * Prevent newlines in single-line input
+   */
+  public override newLine(): boolean {
+    return false
+  }
+
+  /**
+   * Insert text - strip newlines and enforce maxLength
+   */
+  public override insertText(text: string): void {
+    const sanitized = text.replace(/[\n\r]/g, "")
+    if (!sanitized) return
+
+    // The insert replaces the selection, so the selected text frees its length.
+    const toInsert = fit(sanitized, this._maxLength - this.plainText.length + this.getSelectedText().length)
+    if (!toInsert) return
+
+    this.runMutation(() => {
+      super.insertText(toInsert)
+      this.emit(InputRenderableEvents.INPUT, this.plainText)
+    })
+  }
+
+  protected override defaultDimension(kind: "width" | "height"): number | "auto" | `${number}%` {
+    return kind === "height" ? 1 : super.defaultDimension(kind)
+  }
+
+  /** The single-line text, indexed in UTF-16 code units, not cursor cells. */
+  public get value(): string {
+    return this.plainText
+  }
+
+  public set value(value: string) {
+    const newValue = fit(value.replace(/[\n\r]/g, ""), this._maxLength)
+    const currentValue = this.plainText
+    if (currentValue !== newValue) {
+      this.runMutation(() => {
+        this.setText(newValue)
+        this.cursorOffset = this.editBuffer.getEOL().offset
+        this.emit(InputRenderableEvents.INPUT, newValue)
+      })
+    }
+  }
+
+  public override focus(): void {
+    super.focus()
+    this._lastCommittedValue = this.plainText
+  }
+
+  public override blur(): void {
+    if (!this.isDestroyed) {
+      const currentValue = this.plainText
+      if (currentValue !== this._lastCommittedValue) {
+        this._lastCommittedValue = currentValue
+        this.emit(InputRenderableEvents.CHANGE, currentValue)
+      }
+    }
+    super.blur()
+  }
+
+  public override submit(): boolean {
+    const currentValue = this.plainText
+    if (currentValue.length < this._minLength) {
+      return false
+    }
+
+    if (currentValue !== this._lastCommittedValue) {
+      this._lastCommittedValue = currentValue
+      this.emit(InputRenderableEvents.CHANGE, currentValue)
+    }
+    this.emit(InputRenderableEvents.ENTER, currentValue)
+    return true
+  }
+
+  public override deleteCharBackward(): boolean {
+    const result = super.deleteCharBackward()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public override deleteChar(): boolean {
+    const result = super.deleteChar()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public override deleteLine(): boolean {
+    const result = super.deleteLine()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public override deleteWordBackward(): boolean {
+    const result = super.deleteWordBackward()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public override deleteWordForward(): boolean {
+    const result = super.deleteWordForward()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public override deleteToLineStart(): boolean {
+    const result = super.deleteToLineStart()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public override deleteToLineEnd(): boolean {
+    const result = super.deleteToLineEnd()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public override undo(): boolean {
+    const result = super.undo()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public override redo(): boolean {
+    const result = super.redo()
+    this.emit(InputRenderableEvents.INPUT, this.plainText)
+    return result
+  }
+
+  public deleteCharacter(direction: "backward" | "forward"): void {
+    if (direction === "backward") {
+      this.deleteCharBackward()
+    } else {
+      this.deleteChar()
+    }
+  }
+
+  public set maxLength(maxLength: number) {
+    const currentValue = this.plainText
+    if (currentValue.length > maxLength) {
+      this.runMutation(() => {
+        this.setText(fit(currentValue, maxLength))
+        this._maxLength = maxLength
+      })
+    } else {
+      this._maxLength = maxLength
+    }
+  }
+
+  /** Maximum input length in UTF-16 code units. */
+  public get maxLength(): number {
+    return this._maxLength
+  }
+
+  public set minLength(minLength: number) {
+    if (minLength > this._maxLength) {
+      throw new Error(`InputRenderable: minLength (${minLength}) cannot be greater than maxLength (${this._maxLength})`)
+    }
+    this._minLength = minLength
+  }
+
+  /** Minimum length for submission in UTF-16 code units. */
+  public get minLength(): number {
+    return this._minLength
+  }
+
+  public override set placeholder(placeholder: string) {
+    super.placeholder = placeholder
+  }
+
+  public override get placeholder(): string {
+    const p = super.placeholder
+    return typeof p === "string" ? p : ""
+  }
+
+  public override set initialValue(value: string) {
+    void 0
+  }
+}

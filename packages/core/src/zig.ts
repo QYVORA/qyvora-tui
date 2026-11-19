@@ -1,0 +1,10466 @@
+import {
+  dlopen,
+  ffiBool,
+  toArrayBuffer,
+  toPointer,
+  type FFICallbackInstance,
+  type Pointer,
+  type PointerInput,
+} from "./platform/ffi.js"
+import { writeFile } from "./platform/runtime.js"
+import { isWorkerRuntime } from "./platform/worker.js"
+import { existsSync, writeFileSync } from "fs"
+import {
+  ATTRIBUTE_BASE_MASK,
+  type CursorStyle,
+  type CursorStyleOptions,
+  type SelectionOccupancy,
+  type SelectionBehavior,
+  type DebugOverlayCorner,
+  type WidthMethod,
+  type TerminalCapabilities,
+  type Highlight,
+  type LineInfo,
+  type MousePointerStyle,
+  type ImageRenderProtocol,
+  type ProgramStatus,
+} from "./types.js"
+export type {
+  LineInfo,
+  AllocatorStats,
+  AudioStreamCreateOptions,
+  BuildOptions,
+  NativeAudioCaptureStats,
+  NativeAudioStreamStats,
+  NativeFrameWork,
+  NativeRenderStats,
+}
+
+import type { ExtractOptions } from "./image.js"
+import { RGBA } from "./lib/RGBA.js"
+import { isStyledText, type StyledText } from "./lib/styled-text.js"
+import type { TextChunk } from "./text-buffer.js"
+import { YogaError, YogaStatus, type MeasureFunction } from "./yoga.js"
+import { YogaHost, rejectAsyncCallback } from "./yoga.internal.js"
+import { env, registerEnvVar } from "./lib/env.js"
+import {
+  NativeSpanFeedOptionsStruct,
+  NativeSpanFeedStatsStruct,
+  SpanInfoStruct,
+  ReserveInfoStruct,
+  AudioCreateOptionsStruct,
+  AudioStartOptionsStruct,
+  AudioVoiceOptionsStruct,
+  AudioStreamCreateOptionsStruct,
+  AudioStreamStatsStruct,
+  AudioCaptureStatsStruct,
+  NativeAudioStreamCloseReason as NativeAudioStreamCloseReasonValue,
+  NativeAudioStreamFormat as NativeAudioStreamFormatValue,
+  NativeAudioStreamState as NativeAudioStreamStateValue,
+  AudioStatsStruct,
+  BuildOptionsStruct,
+  AllocatorStatsStruct,
+} from "./zig-structs.js"
+import type {
+  NativeSpanFeedOptions,
+  NativeSpanFeedStats,
+  ReserveInfo,
+  AudioCreateOptions,
+  AudioStartOptions,
+  AudioVoiceOptions,
+  AudioStreamCreateOptions,
+  NativeAudioStreamCloseReason as NativeAudioStreamCloseReasonType,
+  NativeAudioStreamFormat as NativeAudioStreamFormatType,
+  NativeAudioStreamState as NativeAudioStreamStateType,
+  NativeAudioStreamStats,
+  NativeAudioCaptureStats,
+  AudioStats,
+  BuildOptions,
+  AllocatorStats,
+  NativeFrameWork,
+  NativeRenderStats,
+  NativeImageInfo,
+} from "./zig-structs.js"
+export const NativeAudioStreamState = NativeAudioStreamStateValue
+export type NativeAudioStreamState = NativeAudioStreamStateType
+export const NativeAudioStreamCloseReason = NativeAudioStreamCloseReasonValue
+export type NativeAudioStreamCloseReason = NativeAudioStreamCloseReasonType
+export const NativeAudioStreamFormat = NativeAudioStreamFormatValue
+export type NativeAudioStreamFormat = NativeAudioStreamFormatType
+import { isBunfsPath } from "./lib/bunfs.js"
+import { resolveNativeLibraryPath } from "#opentui/runtime-assets"
+import { allocStruct } from "bun-ffi-structs"
+import { nativeSymbols, nativeCallbacks, nativeLayouts, nativeConstants } from "./native-abi.generated.js"
+
+registerEnvVar({
+  name: "OPENTUI_LIBC",
+  description: "Select Linux native libc package. Supported values: glibc, musl.",
+  type: "string",
+  default: "",
+})
+
+registerEnvVar({
+  name: "OPENTUI_LIB_PATH",
+  description: "Load the native library from this file instead of the platform package.",
+  type: "string",
+  default: "",
+})
+
+export type NativeHandle<T extends string> = Pointer & { readonly __nativeHandle: T }
+
+// Public numeric handles never identify a later resource or a different library instance.
+let lastStandaloneHandle = 0
+function nextStandaloneHandle(): number {
+  if (lastStandaloneHandle === Number.MAX_SAFE_INTEGER) throw new RangeError("Native handle limit reached")
+  return ++lastStandaloneHandle
+}
+declare const nativeContextBrand: unique symbol
+export type NativeContextHandle = { readonly [nativeContextBrand]: true }
+
+/** Native hyperlink URL slot bound. Longer URLs fail allocation. */
+export const MAX_LINK_URL_BYTES = 512
+
+// Struct outputs use `buffer` instead of `ptr`: the call is cheaper, and `buffer` rejects a non-view with a TypeError
+// where `ptr` would accept a number as a raw address. Bun 1.3 rejects ArrayBuffer and DataView for `buffer`, so keep one
+// Uint8Array view per reusable struct.
+function allocFFIStruct(structDefinition: Parameters<typeof allocStruct>[0]) {
+  const storage = allocStruct(structDefinition)
+  return { ...storage, ffiView: new Uint8Array(storage.buffer) }
+}
+
+export interface NativeContextOptions {
+  objectCapacity: number
+  renderCellsMax: number
+}
+
+export interface ContextObjectHandle {
+  readonly context: NativeContextHandle
+  readonly contextId: bigint
+  readonly slot: number
+  readonly generation: number
+}
+
+declare const contextResourceBrand: unique symbol
+export type SessionHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "session" }
+export type ContextBufferHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "buffer" }
+export type SceneNodeHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "scene_node" }
+export type ContextEditBufferHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "edit_buffer" }
+export type ContextEditorViewHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "editor_view" }
+export type ContextSyntaxStyleHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "syntax_style" }
+export type ContextTextBufferHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "text_buffer" }
+export type ContextTextBufferViewHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "text_buffer_view" }
+export type ContextImageHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "image" }
+export type ContextImagePixelsHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "image_pixels" }
+export type ContextUnicodeHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "unicode" }
+export type ContextMarkdownHandle = ContextObjectHandle & { readonly [contextResourceBrand]: "markdown" }
+
+/** `ot_markdown_options`: OT_MD_* flags, the style bound nodes draw with, and the hook filter's substrings. */
+export interface NativeMarkdownOptions {
+  flags: number
+  syntaxStyle: ContextSyntaxStyleHandle | null
+  hookFilter?: readonly string[]
+  /** Lowers the 64 MiB source limit; 0 or absent keeps it. */
+  sourceByteLimit?: number
+}
+
+/** `ot_markdown_result`; `removedFrom` is undefined when nothing was removed. */
+export interface NativeMarkdownResult {
+  changed: number
+  committed: number
+  removedFrom: number | undefined
+}
+
+/** `ot_markdown_block`; `parent` is undefined at top level. */
+export interface NativeMarkdownBlock {
+  index: number
+  parent: number | undefined
+  kind: number
+  flags: number
+  sourceStart: number
+  sourceEnd: number
+  infoStart: number
+  infoEnd: number
+  number: number
+}
+
+/** A leaf's parser output: its display text as chunks, and OT_MD_SPAN_* flags per chunk. */
+export interface NativeMarkdownLeaf {
+  chunks: TextChunk[]
+  spans: Uint32Array
+}
+export type ContextEmbeddedTerminalHandle = ContextObjectHandle & {
+  readonly [contextResourceBrand]: "embedded_terminal"
+}
+export type SessionBuffer = "current" | "next"
+
+export interface NativeContextEditBufferOptions {
+  widthMethod?: WidthMethod | "no-zwj"
+  /** Measure with the width method of the session whose scene shows the buffer. */
+  followSessionWidth?: boolean
+}
+
+function editBufferOptions(options: NativeContextEditBufferOptions, kind: "text" | "editor"): Uint32Array {
+  const layout = nativeLayouts.ot_edit_buffer_options
+  const record = createContextRecord(layout)
+  record[layout.fields.width_method.offset / 4] = widthMethodId(options.widthMethod ?? "unicode", kind)
+  if (options.followSessionWidth)
+    record[layout.fields.flags.offset / 4] = nativeConstants.OT_EDIT_BUFFER_FOLLOW_SESSION_WIDTH
+  return record
+}
+
+export interface NativeEditBufferInfo {
+  contentEpoch: bigint
+  byteLength: number
+  lineCount: number
+  cursor: LogicalCursor
+  canUndo: boolean
+  canRedo: boolean
+  tabWidth: number
+}
+
+export interface NativeTextBufferInfo {
+  contentEpoch: bigint
+  byteLength: number
+  textLength: number
+  lineCount: number
+  highlightCount: number
+  tabWidth: number
+}
+
+export interface NativeEncodedStyledText {
+  bytes: Uint8Array
+  records: Uint32Array
+  count: number
+  urlBytes: Uint8Array
+}
+
+export enum NativeTextViewCommand {
+  WrapWidth = 0,
+  WrapMode = 1,
+  FirstLineOffset = 2,
+  TabIndicator = 3,
+  Truncate = 4,
+  TextAlign = 5,
+}
+
+export enum NativeEditCommand {
+  DeleteForward = 0,
+  Backspace = 1,
+  NewLine = 2,
+  DeleteLine = 3,
+  MoveLeft = 4,
+  MoveRight = 5,
+  MoveUp = 6,
+  MoveDown = 7,
+  GotoLine = 8,
+  CursorOffset = 9,
+  Clear = 10,
+  ClearHistory = 11,
+  DebugRope = 12,
+  CursorOffsetAtomic = 13,
+  KeepOutside = 14,
+}
+
+/** The argument that applies the cursor rules around atomic marks to Left, Right, Backspace, Delete, Up and Down. */
+export const NativeEditAtomic = 1
+
+export enum NativeEditPositionQuery {
+  Cursor = 0,
+  NextWord = 1,
+  PrevWord = 2,
+  Eol = 3,
+  Offset = 4,
+  Coords = 5,
+  LineStart = 6,
+  End = 7,
+  PrevChar = 8,
+}
+
+export enum NativeEditorStyleMask {
+  Foreground = 1,
+  Background = 2,
+  Attributes = 4,
+  All = 7,
+}
+
+export interface NativeEditorStyle {
+  fg?: RGBA | null
+  bg?: RGBA | null
+  attributes?: number | null
+  /** Syntax styles only: the attribute bits the style sets or clears when a group set composes it. */
+  suppliedAttributes?: number | null
+}
+
+export enum NativeEditHighlightOperation {
+  AddLine = 0,
+  AddRange = 1,
+  RemoveRef = 2,
+  ClearLine = 3,
+  ClearAll = 4,
+}
+
+export enum NativeEditMarkOperation {
+  Add = 0,
+  Remove = 1,
+  Clear = 2,
+}
+
+/** An edit mark in cursor offsets; `style` is a SyntaxStyle id, 0 for none. */
+export interface NativeEditMark {
+  id: number
+  kind: number
+  atomic: boolean
+  style: number
+  priority: number
+  start: number
+  end: number
+}
+
+export interface NativeEditorViewport {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export enum NativeEditorCommand {
+  MoveUp = 0,
+  MoveDown = 1,
+  GotoLineEnd = 2,
+  DeleteSelection = 3,
+  CursorOffset = 4,
+  WrapMode = 5,
+  TabIndicator = 6,
+}
+
+export enum NativeEditorSelectionOperation {
+  Set = 0,
+  Update = 1,
+  Reset = 2,
+  Local = 3,
+  LocalUpdate = 4,
+  LocalReset = 5,
+  Cell = 6,
+  Occupancy = 7,
+  Inclusive = 8,
+  Colors = 9,
+}
+
+export interface NativeEditorSelection {
+  operation: NativeEditorSelectionOperation
+  behavior?: number
+  start?: number
+  end?: number
+  anchorX?: number
+  anchorY?: number
+  focusX?: number
+  focusY?: number
+  updateCursor?: boolean
+  followCursor?: boolean
+  fg?: RGBA | null
+  bg?: RGBA | null
+}
+
+export interface NativeEditorViewInfo {
+  virtualLineCount: number
+  totalVirtualLineCount: number
+  selection: { start: number; end: number } | null
+  selectionOccupancy: SelectionOccupancy
+}
+
+export enum NativeEditorPositionQuery {
+  Cursor = 0,
+  NextWord = 1,
+  PrevWord = 2,
+  Eol = 3,
+  VisualSol = 4,
+  VisualEol = 5,
+}
+
+export enum NativeEditEvent {
+  CursorChanged = 1,
+  ContentChanged = 2,
+  HistoryCursorChanged = 4,
+}
+
+export type NativeEditEventName = "cursor-changed" | "content-changed" | "cursorChanged"
+
+export interface NativeSceneEditorOptions {
+  showCursor: boolean
+  style: "block" | "line" | "underline" | "default"
+  blinking: boolean
+  color: RGBA
+  cursor?: MousePointerStyle
+}
+
+export interface NativeEditorReplacement {
+  deleted: boolean
+  inserted: boolean
+}
+
+export interface NativeSceneBoxDetails {
+  title?: string
+  bottomTitle?: string
+  titleAlignment: "left" | "center" | "right"
+  bottomTitleAlignment: "left" | "center" | "right"
+  titleColor?: RGBA
+  customBorderChars?: Uint32Array
+}
+
+export interface NativeScenePaint {
+  zIndex: number
+  opacity: number
+  translateX: number
+  translateY: number
+  border: number
+  shouldFill: boolean
+  backgroundColor: RGBA
+  borderColor: RGBA
+  borderStyle: "single" | "double" | "rounded" | "heavy"
+  focusable: boolean
+  focusedBorderColor: RGBA
+}
+
+export type NativeScenePaintUpdate = Partial<NativeScenePaint> & { resetBorderCharacters?: true }
+
+export const NATIVE_SCENE_MUTATIONS_MAX = nativeConstants.OT_SCENE_MUTATIONS_MAX
+
+export enum NativeStyleGroup {
+  Enum = nativeConstants.OT_STYLE_ENUM,
+  Float = nativeConstants.OT_STYLE_FLOAT,
+  Value = nativeConstants.OT_STYLE_VALUE,
+  Border = nativeConstants.OT_STYLE_BORDER,
+  Dimension = nativeConstants.OT_STYLE_DIMENSION,
+}
+
+export enum NativeStyleFlags {
+  None = nativeConstants.OT_STYLE_FLAGS_NONE,
+  DisableFlexShrink = nativeConstants.OT_STYLE_DISABLE_FLEX_SHRINK,
+  Content = nativeConstants.OT_STYLE_CONTENT,
+}
+
+/** ENUM/FLOAT/DIMENSION writes occupy this unused-edge slot. */
+export const NATIVE_EDGE_NONE = nativeConstants.OT_EDGE_NONE
+
+export enum NativeBorder {
+  None = nativeConstants.OT_BORDER_NONE,
+  Left = nativeConstants.OT_BORDER_LEFT,
+  Bottom = nativeConstants.OT_BORDER_BOTTOM,
+  Right = nativeConstants.OT_BORDER_RIGHT,
+  Top = nativeConstants.OT_BORDER_TOP,
+  All = nativeConstants.OT_BORDER_ALL,
+}
+
+export interface NativeSceneLayout {
+  left: number
+  top: number
+  right: number
+  bottom: number
+  width: number
+  height: number
+  screenX: number
+  screenY: number
+}
+
+export interface NativeSceneFrameOptions {
+  background: RGBA
+  useMouse: boolean
+  excludedHitNum: number
+  maxLayoutRounds: number
+  maxHostRequests: number
+  preserveUnwritten?: boolean
+}
+
+export enum NativeSceneHook {
+  Update = nativeConstants.OT_SCENE_HOOK_UPDATE,
+  Resize = nativeConstants.OT_SCENE_HOOK_RESIZE,
+  LayoutChanged = nativeConstants.OT_SCENE_HOOK_LAYOUT_CHANGED,
+  RenderBefore = nativeConstants.OT_SCENE_HOOK_RENDER_BEFORE,
+  RenderAfter = nativeConstants.OT_SCENE_HOOK_RENDER_AFTER,
+  RenderSelf = nativeConstants.OT_SCENE_HOOK_RENDER_SELF,
+  IdleUpdate = nativeConstants.OT_SCENE_HOOK_IDLE_UPDATE,
+  Scroll = nativeConstants.OT_SCENE_HOOK_SCROLL,
+}
+
+export enum NativeSceneFrame {
+  Done = nativeConstants.OT_SCENE_FRAME_DONE,
+  Update = nativeConstants.OT_SCENE_FRAME_UPDATE,
+  Resize = nativeConstants.OT_SCENE_FRAME_RESIZE,
+  LayoutChanged = nativeConstants.OT_SCENE_FRAME_LAYOUT_CHANGED,
+  Record = nativeConstants.OT_SCENE_FRAME_RECORD,
+  Scroll = nativeConstants.OT_SCENE_FRAME_SCROLL,
+}
+
+export enum NativeScenePaintPhase {
+  Before = nativeConstants.OT_SCENE_RECORD_PHASE_BEFORE,
+  Self = nativeConstants.OT_SCENE_RECORD_PHASE_SELF,
+  After = nativeConstants.OT_SCENE_RECORD_PHASE_AFTER,
+}
+
+/** One node whose paint hooks a RECORD request asks the host to record, in paint order. */
+export interface NativeScenePaintSlot {
+  readonly node: SceneNodeHandle
+  readonly num: number
+  /** RenderBefore, RenderSelf, and RenderAfter hook bits to record. */
+  readonly hooks: number
+  readonly opacity: number
+  readonly paintLayout: NativeSceneLayout
+  readonly publicLayout?: NativeSceneLayout
+}
+
+/** An issued request. Pass it back unchanged; geometry is observation, not acknowledgement authority. */
+export interface NativeSceneFrameRequest {
+  readonly session: SessionHandle
+  readonly root: SceneNodeHandle
+  readonly node: SceneNodeHandle
+  readonly frameId: bigint
+  readonly requestId: bigint
+  readonly layoutEpoch: bigint
+  readonly hookGeneration: bigint
+  readonly kind: NativeSceneFrame
+  readonly num: number
+  readonly width: number
+  readonly height: number
+  paintLayout?: NativeSceneLayout
+  publicLayout?: NativeSceneLayout
+}
+
+export interface NativeSplitSnapshot {
+  snapshot: ContextBufferHandle
+  rowColumns: number
+  startOnNewLine: boolean
+  trailingNewline: boolean
+}
+
+export type NativeSessionSplitControl =
+  | { kind: "reset"; seedRows: number; pinnedRenderOffset: number }
+  | { kind: "sync"; pinnedRenderOffset: number }
+  | { kind: "output-offset"; surfaceOffset: number }
+  | { kind: "render-offset"; renderOffset: number }
+  | {
+      kind: "transition"
+      mode: "viewport-scroll" | "clear-stale-rows"
+      sourceTopLine: number
+      sourceHeight: number
+      targetTopLine: number
+      targetHeight: number
+      scrollLines?: number
+    }
+  | { kind: "clear-transition" }
+
+export interface NativeSceneTextOptions {
+  fg: RGBA
+  bg: RGBA
+  attributes: number
+  wrapMode: "none" | "char" | "word"
+  textAlign: "left" | "center" | "right"
+  truncate: boolean
+  scrollX: number
+  scrollY: number
+  firstLineOffset: number
+  tabIndicator?: string | number
+  tabIndicatorColor?: RGBA
+}
+
+export interface NativeBufferGrid {
+  borderChars: Uint32Array
+  borderFg: RGBA
+  borderBg: RGBA
+  columnOffsets: Int32Array
+  rowOffsets: Int32Array
+  drawInner: boolean
+  drawOuter: boolean
+}
+
+export interface NativeBufferStack {
+  operation:
+    | "getOpacity"
+    | "pushScissor"
+    | "popScissor"
+    | "clearScissors"
+    | "pushOpacity"
+    | "popOpacity"
+    | "clearOpacity"
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  opacity?: number
+}
+
+export type NativeDrawingTarget =
+  | { readonly context: NativeContextHandle; readonly target: ContextBufferHandle; readonly frame: null }
+  | { readonly context: NativeContextHandle; readonly target: SessionHandle; readonly frame: NativeSceneFrameRequest }
+
+type BufferDrawPosition = { x?: number; y?: number }
+type BufferDrawColors = { foreground?: RGBA; background?: RGBA }
+
+export type NativeBufferDraw =
+  | { operation: "clear"; background?: RGBA }
+  | (BufferDrawPosition & { operation: "fill"; width?: number; height?: number; background?: RGBA })
+  | (BufferDrawPosition &
+      BufferDrawColors & {
+        operation: "text"
+        text?: string
+        attributes?: number
+        maxWidth?: number
+        ellipsis?: boolean
+      })
+  | (BufferDrawPosition &
+      BufferDrawColors & { operation: "cell" | "cellBlend" | "char"; char?: number; attributes?: number })
+  | (BufferDrawPosition &
+      BufferDrawColors & {
+        operation: "box"
+        width?: number
+        height?: number
+        titleColor?: RGBA
+        packedOptions?: number
+        borderChars?: Uint32Array
+        text?: string
+        bottomTitle?: string
+      })
+  | (BufferDrawPosition & {
+      operation: "compose"
+      source: ContextBufferHandle
+      sourceX?: number
+      sourceY?: number
+      sourceWidth?: number
+      sourceHeight?: number
+    })
+  | { operation: "respectAlpha"; enabled: boolean }
+
+export interface NativeContextImageDraw {
+  x?: number
+  y?: number
+  width: number
+  height: number
+  pixelWidth?: number
+  pixelHeight?: number
+  sourceX?: number
+  sourceY?: number
+  sourceWidth?: number
+  sourceHeight?: number
+  protocol?: ImageRenderProtocol
+}
+
+export interface NativeSceneTextSelectionOptions {
+  operation: "reset" | "set" | "update" | "colors"
+  anchorX: number
+  anchorY: number
+  focusX: number
+  focusY: number
+  behavior: SelectionBehavior
+  bg?: RGBA
+  fg?: RGBA
+}
+
+export interface NativeSceneTextMetrics {
+  byteLength: number
+  textLength: number
+  lineCount: number
+  virtualLineCount: number
+  widthColsMax: number
+}
+
+export interface NativeSceneSliderOptions {
+  orientation: "horizontal" | "vertical"
+  min: number
+  max: number
+  value: number
+  viewPortSize: number
+  foregroundColor: RGBA
+  backgroundColor: RGBA
+}
+
+export interface NativeSceneArrowOptions {
+  direction: "up" | "down" | "left" | "right"
+  attributes: number
+  foregroundColor: RGBA
+  backgroundColor: RGBA
+  text?: string
+}
+
+export interface NativeSceneScrollBarOptions {
+  policy: "auto" | "always" | "never"
+  overlay: boolean
+  thickness: number
+  gap: number
+  arrows: boolean
+  foregroundColor: RGBA
+  backgroundColor: RGBA
+}
+
+/** Viewport padding is left, top, right, bottom; bars are horizontal, vertical. */
+export interface NativeSceneScrollOptions {
+  scrollX: boolean
+  scrollY: boolean
+  follow: "none" | "top" | "bottom" | "left" | "right"
+  culling: boolean
+  padding: readonly number[]
+  fills: readonly (RGBA | undefined)[]
+  bars: readonly NativeSceneScrollBarOptions[]
+}
+
+export interface NativeSceneRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface NativeSceneScrollBarState {
+  visible: boolean
+  track: NativeSceneRect
+  startArrow: NativeSceneRect
+  endArrow: NativeSceneRect
+  thumbStart: number
+  thumbSize: number
+}
+
+/** Axis 0 is x, axis 1 is y. `content` is local to the box; the other rects are screen cells. `changes` holds the
+ * OT_SCENE_SCROLL_CHANGED_* bits of the last SCROLL request. */
+export interface NativeSceneScrollState {
+  changes: number
+  offset: [number, number]
+  max: [number, number]
+  content: NativeSceneRect
+  viewport: NativeSceneRect
+  bars: [NativeSceneScrollBarState, NativeSceneScrollBarState]
+}
+
+const SCENE_SCROLL_FOLLOW = ["none", "top", "bottom", "left", "right"] as const
+const SCENE_SCROLL_BAR_POLICY = ["auto", "always", "never"] as const
+const SCENE_SCROLL_REQUESTS = ["into-view", "anchor", "layout"] as const
+const SCENE_SCROLL_ALIGNS = ["nearest", "start", "end"] as const
+
+function readSceneRect(values: Float64Array, index: number): NativeSceneRect {
+  return { x: values[index], y: values[index + 1], width: values[index + 2], height: values[index + 3] }
+}
+
+/** The state of a scroll node before its first frame. */
+export function emptySceneScrollState(): NativeSceneScrollState {
+  return readSceneScrollState(new Uint32Array(nativeLayouts.ot_scene_scroll_state.size / 4))
+}
+
+function readSceneScrollState(record: Uint32Array): NativeSceneScrollState {
+  const { fields } = nativeLayouts.ot_scene_scroll_state
+  const bar = nativeLayouts.ot_scene_scroll_bar_state
+  const values = new Float64Array(record.buffer)
+  const readBar = (axis: number): NativeSceneScrollBarState => {
+    const base = fields.bars.offset + axis * bar.size
+    return {
+      visible: record[(base + bar.fields.visible.offset) / 4] !== 0,
+      track: readSceneRect(values, (base + bar.fields.track.offset) / 8),
+      startArrow: readSceneRect(values, (base + bar.fields.start_arrow.offset) / 8),
+      endArrow: readSceneRect(values, (base + bar.fields.end_arrow.offset) / 8),
+      thumbStart: values[(base + bar.fields.thumb_start.offset) / 8],
+      thumbSize: values[(base + bar.fields.thumb_size.offset) / 8],
+    }
+  }
+  const offset = fields.offset.offset / 8
+  const max = fields.max.offset / 8
+  return {
+    changes: record[fields.changes.offset / 4],
+    offset: [values[offset], values[offset + 1]],
+    max: [values[max], values[max + 1]],
+    content: readSceneRect(values, fields.content.offset / 8),
+    viewport: readSceneRect(values, fields.viewport.offset / 8),
+    bars: [readBar(0), readBar(1)],
+  }
+}
+
+export interface NativeSessionBufferLease {
+  handle: ContextObjectHandle
+  width: number
+  height: number
+  generation: bigint
+  char: Pointer
+  fg: Pointer
+  bg: Pointer
+  attributes: Pointer
+}
+
+export type NativeContextBufferLease = NativeSessionBufferLease
+
+export interface NativeContextBufferOptions {
+  width: number
+  height: number
+  widthMethod?: WidthMethod | "no-zwj"
+  respectAlpha?: boolean
+}
+
+export const NATIVE_BUFFER_TEXT_BYTES_MAX = nativeConstants.OT_BUFFER_TEXT_BYTES_MAX
+
+export interface NativeSessionOptions {
+  chunkSize: number
+  spanCapacity: number
+  maxBytes: bigint
+  controlCapacity?: number
+}
+
+export interface NativeOutputTicket {
+  session: SessionHandle
+  requestId: bigint
+  byteCount: number
+}
+
+export enum NativeSessionState {
+  Open = 0,
+  Closing = 1,
+  Closed = 2,
+  Failed = 3,
+  Cancelled = 4,
+}
+
+export interface NativeSessionRendererOptions {
+  width: number
+  height: number
+  /** Omitted selects native auto detection, which ignores host hints when remote. */
+  remote?: boolean
+  /** Initialization-only copied host hints: at most 256 entries and 65536 encoded bytes. */
+  environment?: Readonly<Record<string, string>>
+}
+
+export enum NativeSessionRenderStatus {
+  Presented = 0,
+  Pending = 1,
+  Skipped = 2,
+  Failed = 3,
+}
+
+export interface NativeSessionRendererState {
+  width: number
+  height: number
+  frameCount: bigint
+  framePending: boolean
+  /** Presented Kitty and Sixel placements whose image a later frame still sends. */
+  imageUploadsPending: number
+  /** Distinct frame contents dropped because their output is larger than the write limit. */
+  droppedFrames: number
+  /** The size of the last attempt's frame when it was dropped for size, else 0. */
+  droppedFrameBytes: number
+}
+
+export interface NativeSessionKittyImageTransportStatus {
+  requested: number
+  effective: number
+  fileState: number
+  fallback: number
+  pendingFiles: number
+  pendingBytes: number
+}
+
+export const NATIVE_SESSION_CONTROL_PACKET_BYTES = nativeConstants.OT_SESSION_CONTROL_PACKET_BYTES
+
+export interface NativeSessionTerminalOptions {
+  useAlternateScreen?: boolean
+  mouse?: boolean
+  mouseMovement?: boolean
+  kittyKeyboardFlags?: number
+  clearOnClose?: boolean
+  /** End the startup query batch with DA1 (the reply sentinel). Defaults to false. */
+  replySentinel?: boolean
+  /** Wrap frames in synchronized output (DEC mode 2026). Defaults to "auto". */
+  synchronizedOutput?: SynchronizedOutput
+  /** The output passes through tmux, screen or Zellij on this host. Defaults to false. */
+  hostMultiplexer?: boolean
+}
+
+/** "auto" leaves synchronized output out for a remote terminal without mode 2026 or under a multiplexer on the app's host. */
+export type SynchronizedOutput = "auto" | "always" | "never"
+
+export enum NativeSessionTerminalPhase {
+  Uninitialized = 0,
+  SettingUp = 1,
+  Active = 2,
+  Suspending = 3,
+  Suspended = 4,
+  Resuming = 5,
+  Closing = 6,
+  Restored = 7,
+  Failed = 8,
+  Cancelled = 9,
+}
+
+export enum NativeSessionPumpStatus {
+  Idle = 0,
+  Again = 1,
+  OutputPending = 2,
+  WaitUntil = 3,
+  Closed = 4,
+}
+
+export interface NativeSessionPumpResult {
+  status: NativeSessionPumpStatus
+  deadlineNs: bigint | null
+}
+
+/** One `ot_session_input_feed` call: input consumed, records written, and when to call again. */
+export interface NativeInputDrain {
+  consumed: number
+  count: number
+  deadlineNs: bigint | null
+}
+
+export type NativeSessionControl =
+  | { kind: "capability-response"; bytes: Uint8Array }
+  | { kind: "palette-query"; bytes: Uint8Array; sentinel?: boolean }
+  | { kind: "title"; title: string }
+  | { kind: "mouse"; mode: "disabled" | "drag" | "motion" }
+  | { kind: "kitty-keyboard-flags"; flags: number }
+  | { kind: "program-status"; status: ProgramStatus }
+  | { kind: "query-pixel-resolution" | "query-theme-colors"; sentinel?: boolean }
+  | { kind: "restore-modes" | "reset-background" | "end-reply-sentinel" }
+
+export interface NativeSessionCursorOptions extends CursorStyleOptions {
+  position?: { x: number; y: number; visible: boolean }
+}
+
+export interface NativeSessionCapabilities extends TerminalCapabilities {
+  kittyKeyboardFlags: number
+}
+
+export enum NativeStatus {
+  Ok = 0,
+  InvalidArgument = -1,
+  UnsupportedVersion = -2,
+  OutOfMemory = -3,
+  WrongThread = -4,
+  InternalError = -5,
+  ContextBusy = -6,
+  WrongContext = -7,
+  WrongKind = -8,
+  StaleHandle = -9,
+  WrongSession = -10,
+  OutputBackpressure = -11,
+  SessionClosed = -12,
+  OutputBusy = -13,
+  StaleOutput = -14,
+  OutputFailed = -15,
+  ObjectLimit = -16,
+  RendererAttached = -17,
+  RendererNotAttached = -18,
+  InvalidPhase = -19,
+  ControlPacketLimit = -20,
+  LeaseLimit = -21,
+  LeaseBytesLimit = -22,
+  StaleLease = -23,
+  UnsupportedResource = -24,
+  StaleFrame = -25,
+  LayoutLimit = -26,
+  FrameBusy = -27,
+  FrameRequestLimit = -28,
+  VideoFailed = -60,
+}
+
+export interface NativeVideoInfo {
+  durationUs: bigint
+  width: number
+  height: number
+  fpsNum: number
+  fpsDen: number
+  hasAudio: boolean
+}
+
+export interface NativeVideoState {
+  currentTimeUs: bigint
+  framePtsUs: bigint
+  playing: boolean
+  ended: boolean
+  buffering: boolean
+  audio: boolean
+  hasFrame: boolean
+  failed: boolean
+  qualityTier: number
+}
+
+export class NativeError extends Error {
+  constructor(
+    public readonly operation: string,
+    public readonly status: NativeStatus,
+    reason = NativeStatus[status] ?? `status ${status}`,
+  ) {
+    super(`${operation} failed: ${reason}`)
+    this.name = "NativeError"
+  }
+}
+export type AudioEngineHandle = NativeHandle<"audio_engine">
+export type ImageHandle = ContextImageHandle
+
+const imageStatusCodes = new Map<number, number>([
+  [nativeConstants.OT_OK, 0],
+  [nativeConstants.OT_STALE_HANDLE, 1],
+  [nativeConstants.OT_IMAGE_UNSUPPORTED_FORMAT, 2],
+  [nativeConstants.OT_IMAGE_UNSUPPORTED_COLOR_SPACE, 3],
+  [nativeConstants.OT_IMAGE_MALFORMED_DATA, 4],
+  [nativeConstants.OT_IMAGE_DIMENSION_LIMIT, 5],
+  [nativeConstants.OT_IMAGE_MEMORY_LIMIT, 6],
+  [nativeConstants.OT_INVALID_ARGUMENT, 7],
+  [nativeConstants.OT_OUT_OF_MEMORY, 8],
+  [nativeConstants.OT_IMAGE_OUTPUT_TOO_SMALL, 9],
+  [nativeConstants.OT_INTERNAL_ERROR, 10],
+  [nativeConstants.OT_IMAGE_UNSUPPORTED_FEATURE, 11],
+  [nativeConstants.OT_IMAGE_BUSY, 12],
+])
+export type ClipboardServiceHandle = number & { readonly __nativeHandle: "clipboard_service" }
+export type ClipboardOperationHandle = number & { readonly __nativeHandle: "clipboard_operation" }
+
+export enum NativeClipboardOperationStatus {
+  Pending = nativeConstants.OT_CLIPBOARD_OPERATION_PENDING,
+  Read = nativeConstants.OT_CLIPBOARD_OPERATION_READ,
+  Empty = nativeConstants.OT_CLIPBOARD_OPERATION_EMPTY,
+  Written = nativeConstants.OT_CLIPBOARD_OPERATION_WRITTEN,
+  Cleared = nativeConstants.OT_CLIPBOARD_OPERATION_CLEARED,
+  Unsupported = nativeConstants.OT_CLIPBOARD_OPERATION_UNSUPPORTED,
+  Cancelled = nativeConstants.OT_CLIPBOARD_OPERATION_CANCELLED,
+  TimedOut = nativeConstants.OT_CLIPBOARD_OPERATION_TIMED_OUT,
+  LimitExceeded = nativeConstants.OT_CLIPBOARD_OPERATION_LIMIT_EXCEEDED,
+  Failed = nativeConstants.OT_CLIPBOARD_OPERATION_FAILED,
+  InvalidHandle = nativeConstants.OT_CLIPBOARD_OPERATION_INVALID_HANDLE,
+}
+
+export enum NativeClipboardStartStatus {
+  Ok = nativeConstants.OT_CLIPBOARD_START_OK,
+  InvalidService = nativeConstants.OT_CLIPBOARD_START_INVALID_SERVICE,
+  ShuttingDown = nativeConstants.OT_CLIPBOARD_START_SHUTTING_DOWN,
+  LimitExceeded = nativeConstants.OT_CLIPBOARD_START_LIMIT_EXCEEDED,
+  InvalidArgument = nativeConstants.OT_CLIPBOARD_START_INVALID_ARGUMENT,
+  OutOfMemory = nativeConstants.OT_CLIPBOARD_START_OUT_OF_MEMORY,
+}
+
+export enum NativeClipboardCancelStatus {
+  Requested = nativeConstants.OT_CLIPBOARD_CANCEL_REQUESTED,
+  AlreadyTerminal = nativeConstants.OT_CLIPBOARD_CANCEL_ALREADY_TERMINAL,
+  InvalidHandle = nativeConstants.OT_CLIPBOARD_CANCEL_INVALID_HANDLE,
+}
+
+export enum NativeClipboardCopyStatus {
+  Ok = nativeConstants.OT_CLIPBOARD_COPY_OK,
+  BufferTooSmall = nativeConstants.OT_CLIPBOARD_COPY_BUFFER_TOO_SMALL,
+  InvalidHandle = nativeConstants.OT_CLIPBOARD_COPY_INVALID_HANDLE,
+  InvalidState = nativeConstants.OT_CLIPBOARD_COPY_INVALID_STATE,
+  InvalidArgument = nativeConstants.OT_CLIPBOARD_COPY_INVALID_ARGUMENT,
+}
+
+export enum NativeClipboardDestroyStatus {
+  Destroyed = nativeConstants.OT_CLIPBOARD_DESTROY_DESTROYED,
+  NotReady = nativeConstants.OT_CLIPBOARD_DESTROY_NOT_READY,
+  InvalidHandle = nativeConstants.OT_CLIPBOARD_DESTROY_INVALID_HANDLE,
+}
+
+export enum NativeClipboardShutdownStatus {
+  Pending = nativeConstants.OT_CLIPBOARD_SHUTDOWN_PENDING,
+  Ready = nativeConstants.OT_CLIPBOARD_SHUTDOWN_READY,
+  InvalidHandle = nativeConstants.OT_CLIPBOARD_SHUTDOWN_INVALID_HANDLE,
+}
+
+export type EmbeddedTerminalCursor = {
+  x: number
+  y: number
+  hasValue: boolean
+  visible: boolean
+  blinking: boolean
+  wideTail: boolean
+  style: "bar" | "block" | "underline" | "block-hollow"
+  color?: { r: number; g: number; b: number }
+}
+
+export type EmbeddedTerminalKey = {
+  action?: "release" | "press" | "repeat"
+  key?: string
+  mods?: number
+  consumedMods?: number
+  composing?: boolean
+  text?: string
+  unshiftedCodepoint?: number
+}
+
+export type EmbeddedTerminalMouse = {
+  action: "press" | "release" | "motion"
+  button?: "unknown" | "left" | "right" | "middle" | "four" | "five" | "six" | "seven"
+  mods?: number
+  x: number
+  y: number
+  anyButtonPressed?: boolean
+}
+let targetLibPath: string | undefined
+let targetLibError: Error | undefined
+const targetLibSource = process.env.OPENTUI_LIB_PATH ? " (set by OPENTUI_LIB_PATH)" : ""
+
+try {
+  targetLibPath = await resolveNativeLibraryPath()
+  if (isBunfsPath(targetLibPath)) {
+    targetLibPath = targetLibPath.replace("../", "")
+  }
+  if (!existsSync(targetLibPath)) {
+    throw new Error(`OpenTUI native library does not exist at ${JSON.stringify(targetLibPath)}`)
+  }
+} catch (error) {
+  targetLibPath = undefined
+  targetLibError = error instanceof Error ? error : new Error(String(error))
+}
+
+registerEnvVar({
+  name: "OTUI_DEBUG_FFI",
+  description: "Enable debug logging for the FFI bindings.",
+  type: "boolean",
+  default: false,
+})
+
+registerEnvVar({
+  name: "OTUI_TRACE_FFI",
+  description: "Enable tracing for the FFI bindings.",
+  type: "boolean",
+  default: false,
+})
+
+// Env vars used in terminal.zig
+registerEnvVar({
+  name: "OPENTUI_FORCE_WCWIDTH",
+  description: "Use wcwidth for character width calculations when the variable is present",
+  type: "string",
+  required: false,
+})
+registerEnvVar({
+  name: "OPENTUI_FORCE_UNICODE",
+  description: "Use the Unicode width method (mode 2027) when the variable is present",
+  type: "string",
+  required: false,
+})
+registerEnvVar({
+  name: "OPENTUI_GRAPHICS",
+  description: "Control Kitty and Sixel graphics detection with the exact value true, 1, false, or 0",
+  type: "string",
+  required: false,
+})
+registerEnvVar({
+  name: "OPENTUI_IMAGE_PROTOCOL",
+  description: "Override image rendering protocol: auto, kitty, sixel, or blocks",
+  type: "string",
+  default: "auto",
+})
+registerEnvVar({
+  name: "OPENTUI_FORCE_NOZWJ",
+  description: "Use no_zwj width mode when the variable is present",
+  type: "string",
+  required: false,
+})
+// Read by video-shim.c when a video opens
+registerEnvVar({
+  name: "OPENTUI_EXPERIMENTAL_VIDEO_HWACCEL",
+  description:
+    "Experimental: decode video with VideoToolbox on macOS when set to exactly 1 or true; otherwise or on failure, decode in software",
+  type: "string",
+  required: false,
+})
+
+// Cursor & mouse pointer style mappings (avoid recreation on each call)
+const CURSOR_STYLE_TO_ID = {
+  block: nativeConstants.OT_CURSOR_STYLE_BLOCK,
+  line: nativeConstants.OT_CURSOR_STYLE_LINE,
+  underline: nativeConstants.OT_CURSOR_STYLE_UNDERLINE,
+  default: nativeConstants.OT_CURSOR_STYLE_DEFAULT,
+} as const
+const CURSOR_ID_TO_STYLE: CursorStyle[] = []
+for (const [style, id] of Object.entries(CURSOR_STYLE_TO_ID)) CURSOR_ID_TO_STYLE[id] = style as CursorStyle
+const PROGRAM_STATE_TO_ID: Record<string, number | undefined> = {
+  idle: nativeConstants.OT_PROGRAM_STATE_IDLE,
+  working: nativeConstants.OT_PROGRAM_STATE_WORKING,
+  done: nativeConstants.OT_PROGRAM_STATE_DONE,
+  blocked: nativeConstants.OT_PROGRAM_STATE_BLOCKED,
+  error: nativeConstants.OT_PROGRAM_STATE_ERROR,
+  clear: nativeConstants.OT_PROGRAM_STATE_CLEAR,
+}
+const PROGRAM_KIND_TO_ID: Record<string, number | undefined> = {
+  permission: nativeConstants.OT_PROGRAM_KIND_PERMISSION,
+  question: nativeConstants.OT_PROGRAM_KIND_QUESTION,
+  auth: nativeConstants.OT_PROGRAM_KIND_AUTH,
+}
+const MOUSE_STYLE_TO_ID = {
+  auto: nativeConstants.OT_MOUSE_POINTER_AUTO,
+  default: nativeConstants.OT_MOUSE_POINTER_DEFAULT,
+  none: nativeConstants.OT_MOUSE_POINTER_NONE,
+  "context-menu": nativeConstants.OT_MOUSE_POINTER_CONTEXT_MENU,
+  help: nativeConstants.OT_MOUSE_POINTER_HELP,
+  pointer: nativeConstants.OT_MOUSE_POINTER_POINTER,
+  progress: nativeConstants.OT_MOUSE_POINTER_PROGRESS,
+  wait: nativeConstants.OT_MOUSE_POINTER_WAIT,
+  cell: nativeConstants.OT_MOUSE_POINTER_CELL,
+  crosshair: nativeConstants.OT_MOUSE_POINTER_CROSSHAIR,
+  text: nativeConstants.OT_MOUSE_POINTER_TEXT,
+  "vertical-text": nativeConstants.OT_MOUSE_POINTER_VERTICAL_TEXT,
+  alias: nativeConstants.OT_MOUSE_POINTER_ALIAS,
+  copy: nativeConstants.OT_MOUSE_POINTER_COPY,
+  move: nativeConstants.OT_MOUSE_POINTER_MOVE,
+  "no-drop": nativeConstants.OT_MOUSE_POINTER_NO_DROP,
+  "not-allowed": nativeConstants.OT_MOUSE_POINTER_NOT_ALLOWED,
+  grab: nativeConstants.OT_MOUSE_POINTER_GRAB,
+  grabbing: nativeConstants.OT_MOUSE_POINTER_GRABBING,
+  "all-scroll": nativeConstants.OT_MOUSE_POINTER_ALL_SCROLL,
+  "col-resize": nativeConstants.OT_MOUSE_POINTER_COL_RESIZE,
+  "row-resize": nativeConstants.OT_MOUSE_POINTER_ROW_RESIZE,
+  "n-resize": nativeConstants.OT_MOUSE_POINTER_N_RESIZE,
+  "e-resize": nativeConstants.OT_MOUSE_POINTER_E_RESIZE,
+  "s-resize": nativeConstants.OT_MOUSE_POINTER_S_RESIZE,
+  "w-resize": nativeConstants.OT_MOUSE_POINTER_W_RESIZE,
+  "ne-resize": nativeConstants.OT_MOUSE_POINTER_NE_RESIZE,
+  "nw-resize": nativeConstants.OT_MOUSE_POINTER_NW_RESIZE,
+  "se-resize": nativeConstants.OT_MOUSE_POINTER_SE_RESIZE,
+  "sw-resize": nativeConstants.OT_MOUSE_POINTER_SW_RESIZE,
+  "ew-resize": nativeConstants.OT_MOUSE_POINTER_EW_RESIZE,
+  "ns-resize": nativeConstants.OT_MOUSE_POINTER_NS_RESIZE,
+  "nesw-resize": nativeConstants.OT_MOUSE_POINTER_NESW_RESIZE,
+  "nwse-resize": nativeConstants.OT_MOUSE_POINTER_NWSE_RESIZE,
+  "zoom-in": nativeConstants.OT_MOUSE_POINTER_ZOOM_IN,
+  "zoom-out": nativeConstants.OT_MOUSE_POINTER_ZOOM_OUT,
+} as const
+const SCENE_BORDER_STYLES = ["single", "double", "rounded", "heavy"] as const
+const SCENE_TEXT_WRAP_MODES = ["none", "char", "word"] as const
+const SCENE_TEXT_ALIGNS = ["left", "center", "right"] as const
+const SCENE_NODE_KINDS = [
+  "root",
+  "box",
+  "text",
+  "slider",
+  "arrow",
+  "editor",
+  "custom",
+  "text_view",
+  "image",
+  "video",
+] as const
+const IMAGE_PROTOCOL_TO_ID = { auto: 0, kitty: 1, sixel: 2, blocks: 3 } as const
+const IMAGE_FITS = ["fit", "cover", "fill"] as const
+const BUFFER_DRAW_OPERATIONS = new Map<string, { id: number; size: number }>([
+  ["clear", { id: nativeConstants.OT_BUFFER_DRAW_CLEAR, size: nativeLayouts.ot_buffer_draw_clear.size }],
+  ["fill", { id: nativeConstants.OT_BUFFER_DRAW_FILL, size: nativeLayouts.ot_buffer_draw_fill.size }],
+  ["text", { id: nativeConstants.OT_BUFFER_DRAW_TEXT, size: nativeLayouts.ot_buffer_draw_text_record.size }],
+  ["cell", { id: nativeConstants.OT_BUFFER_DRAW_CELL, size: nativeLayouts.ot_buffer_draw_cell.size }],
+  ["cellBlend", { id: nativeConstants.OT_BUFFER_DRAW_CELL_BLEND, size: nativeLayouts.ot_buffer_draw_cell.size }],
+  ["char", { id: nativeConstants.OT_BUFFER_DRAW_CHAR, size: nativeLayouts.ot_buffer_draw_cell.size }],
+  ["box", { id: nativeConstants.OT_BUFFER_DRAW_BOX, size: nativeLayouts.ot_buffer_draw_box.size }],
+  ["compose", { id: nativeConstants.OT_BUFFER_DRAW_COMPOSE, size: nativeLayouts.ot_buffer_draw_compose.size }],
+  ["respectAlpha", { id: nativeConstants.OT_BUFFER_DRAW_RESPECT_ALPHA, size: nativeLayouts.ot_buffer_draw_alpha.size }],
+])
+const BUFFER_STACK_OPERATIONS = [
+  "getOpacity",
+  "pushScissor",
+  "popScissor",
+  "clearScissors",
+  "pushOpacity",
+  "popOpacity",
+  "clearOpacity",
+] as const
+const SCENE_ARROW_DIRECTIONS = ["up", "down", "left", "right"] as const
+const MAX_FFI_U32 = 0xffff_ffff
+// Main-thread libraries, oldest first. The newest owns the process-global native log callback. Worker libraries never
+// install one: native code would keep calling it after the Worker exits.
+const processLogLibraries: FFIRenderLib[] = []
+// Global singleton state for FFI tracing to prevent duplicate exit handlers
+let globalTraceSymbols: Record<string, number[]> | null = null
+let globalFFILogPath: string | null = null
+let exitHandlerRegistered = false
+
+/** Reads the `ot_scene_stats` fields from `work_frame_id` up to `reserved`, camel-casing their names. */
+function readFrameWork(
+  layout: (typeof nativeLayouts)["ot_scene_stats"],
+  output: BigUint64Array,
+  words: Uint32Array,
+): NativeFrameWork {
+  const result: Record<string, number> = {}
+  let counting = false
+  for (const [field, { offset, type }] of Object.entries(layout.fields)) {
+    counting ||= field === "work_frame_id"
+    if (!counting) continue
+    const name = field.replace(/_(.)/g, (_, letter: string) => letter.toUpperCase())
+    result[name] = type === "u64" ? toNumber(output[offset / 8]) : words[offset / 4]
+  }
+  return result as NativeFrameWork
+}
+
+function toNumber(value: number | bigint): number {
+  return typeof value === "bigint" ? Number(value) : value
+}
+
+function toSafeByteCount(value: number | bigint, label: string): number {
+  if (typeof value !== "bigint") {
+    return value
+  }
+
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(`${label} exceeds JavaScript safe integer range`)
+  }
+
+  return Number(value)
+}
+
+function toSafeFFIU32Length(value: number, label: string): number {
+  if (!Number.isInteger(value) || value < 0) throw new RangeError(`${label} must be a non-negative integer`)
+  if (value > MAX_FFI_U32) throw new RangeError(`${label} exceeds native u32 length limit`)
+  return value
+}
+
+function isFFIU32(value: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value <= MAX_FFI_U32
+}
+
+function toFFII32(value: number, label: string): number {
+  if (!Number.isInteger(value) || value < -0x8000_0000 || value > 0x7fff_ffff) {
+    throw new RangeError(`${label} must be a signed 32-bit integer`)
+  }
+  return value
+}
+
+function toFFIU64(value: bigint, label: string): bigint {
+  if (typeof value !== "bigint" || value < 0n || value > 0xffff_ffff_ffff_ffffn) {
+    throw new RangeError(`${label} must be an unsigned 64-bit bigint`)
+  }
+  return value
+}
+
+function toFFIBool(value: boolean, label: string): 0 | 1 {
+  if (typeof value !== "boolean") throw new TypeError(`${label} must be a boolean`)
+  return ffiBool(value)
+}
+
+const SYNCHRONIZED_OUTPUT_FLAGS: Record<SynchronizedOutput, number> = {
+  auto: 0,
+  always: nativeConstants.OT_TERMINAL_SYNC_ALWAYS,
+  never: nativeConstants.OT_TERMINAL_SYNC_NEVER,
+}
+
+function toFFIF32(value: number, label: string, allowNaN = false): number {
+  if (allowNaN && Number.isNaN(value)) return value
+  if (!Number.isFinite(value) || Math.abs(value) > 3.4028234663852886e38) {
+    throw new RangeError(`${label} must be a finite 32-bit float${allowNaN ? " or NaN" : ""}`)
+  }
+  return value
+}
+
+function nativeResult(operation: string, status: NativeStatus): void {
+  if (status !== NativeStatus.Ok) throw new NativeError(operation, status)
+}
+
+function createContextRecord(layout: {
+  size: number
+  fields: Record<"struct_size" | "abi_version", { offset: number }>
+}): Uint32Array {
+  const record = new Uint32Array(layout.size / 4)
+  record[layout.fields.struct_size.offset / 4] = layout.size
+  record[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+  return record
+}
+
+const typedArrayAccessors = Object.getOwnPropertyDescriptors(Object.getPrototypeOf(Uint8Array.prototype))
+
+function sessionBytes(bytes: Uint8Array, label: string): Uint8Array {
+  const length = toSafeFFIU32Length(bytes.byteLength, label)
+  if (typedArrayAccessors.byteLength.get!.call(bytes) !== length) {
+    throw new RangeError(`${label} does not match the supplied typed-array view`)
+  }
+  // The FFI adapter must not invoke caller metadata getters after the context lookup.
+  return new Uint8Array(
+    typedArrayAccessors.buffer.get!.call(bytes),
+    typedArrayAccessors.byteOffset.get!.call(bytes),
+    length,
+  )
+}
+
+/** Packs one ot_session_program_status record and its text. Native code validates every value. */
+function programStatusPayload(status: ProgramStatus, encoder: TextEncoder): Uint8Array {
+  const layout = nativeLayouts.ot_session_program_status
+  const { state, kind, progress, id, app, title, message } = status as Partial<Record<string, unknown>>
+  const stateId = typeof state === "string" ? PROGRAM_STATE_TO_ID[state] : undefined
+  if (typeof stateId !== "number") throw new TypeError("Unknown program status state")
+  const header = new Uint32Array(layout.size / 4)
+  header[layout.fields.state.offset / 4] = stateId
+  if (kind != null) {
+    const kindId = typeof kind === "string" ? PROGRAM_KIND_TO_ID[kind] : undefined
+    if (typeof kindId !== "number") throw new TypeError("Unknown program status kind")
+    header[layout.fields.kind.offset / 4] = kindId
+  }
+  if (progress != null) {
+    if (typeof progress !== "number") throw new TypeError("Program status progress must be a number")
+    if (!isFFIU32(progress)) throw new RangeError("Program status progress must be an integer percentage")
+    header[layout.fields.fields.offset / 4] = nativeConstants.OT_PROGRAM_STATUS_PROGRESS
+    header[layout.fields.progress.offset / 4] = progress
+  }
+  // The record encodes an absent id as zero bytes. An empty id is not the root record.
+  if (id === "") throw new RangeError("Program status id must not be empty; omit it for the root record")
+  const text = { id, app, title, message }
+  const parts = (["id", "app", "title", "message"] as const).map((name) => {
+    const value = text[name]
+    if (value == null) return new Uint8Array(0)
+    if (typeof value !== "string") throw new TypeError(`Program status ${name} must be a string`)
+    // One extra UTF-16 unit preserves native over-limit rejection without an unbounded encoding allocation.
+    const bytes = encoder.encode(value.slice(0, NATIVE_SESSION_CONTROL_PACKET_BYTES + 1))
+    header[layout.fields[`${name}_len`].offset / 4] = bytes.byteLength
+    return bytes
+  })
+  const payload = new Uint8Array(layout.size + parts.reduce((total, part) => total + part.byteLength, 0))
+  payload.set(new Uint8Array(header.buffer))
+  let offset = layout.size
+  for (const part of parts) {
+    payload.set(part, offset)
+    offset += part.byteLength
+  }
+  return payload
+}
+
+function pixelInput(data: Uint8Array | PointerInput, length: number): Uint8Array | Pointer {
+  if (typeof data === "number" || typeof data === "bigint") return toPointer(data)
+  const input = sessionBytes(data, "Pixel buffer byte length")
+  if (length > input.byteLength) throw new RangeError("Pixel byte count exceeds the supplied view")
+  return input
+}
+
+const handleWords = nativeLayouts.ot_handle.size / 4
+const handleSlotWord = nativeLayouts.ot_handle.fields.slot.offset / 4
+const handleGenerationWord = nativeLayouts.ot_handle.fields.generation.offset / 4
+// A u64 splits into two native-order words; the low word comes first on little-endian hosts.
+const handleContextLowWord =
+  nativeLayouts.ot_handle.fields.context_id.offset / 4 + (new Uint8Array(new Uint32Array([1]).buffer)[0] === 1 ? 0 : 1)
+const handleContextHighWord = handleContextLowWord ^ 1
+
+/** Handles that native code issues. Each keeps its encoded record: handles never change, and native
+ * code only reads handle inputs. The record is private, so object copies re-encode their own fields. */
+class IssuedContextHandle implements ContextObjectHandle {
+  // Plain word arrays keep inline storage; creating an ArrayBuffer per handle costs far more.
+  readonly #words: Uint32Array
+
+  constructor(
+    readonly context: NativeContextHandle,
+    readonly contextId: bigint,
+    readonly slot: number,
+    readonly generation: number,
+    words: Uint32Array,
+  ) {
+    this.#words = words
+  }
+
+  static wordsOf(handle: ContextObjectHandle): Uint32Array | undefined {
+    return #words in handle ? (handle as IssuedContextHandle).#words : undefined
+  }
+}
+
+function encodedContextHandle(context: NativeContextHandle, handle: ContextObjectHandle): Uint32Array {
+  // Independent native images can issue the same numeric IDs.
+  if (handle.context !== context) throw new NativeError("Context handle", NativeStatus.WrongContext)
+  const issued = IssuedContextHandle.wordsOf(handle)
+  if (issued !== undefined) return issued
+  const contextId = toFFIU64(handle.contextId, "Handle contextId")
+  const words = new Uint32Array(handleWords)
+  words[handleContextLowWord] = Number(contextId & 0xffff_ffffn)
+  words[handleContextHighWord] = Number(contextId >> 32n)
+  words[handleSlotWord] = toSafeFFIU32Length(handle.slot, "Handle slot")
+  words[handleGenerationWord] = toSafeFFIU32Length(handle.generation, "Handle generation")
+  return words
+}
+
+// Typed arrays preserve native byte order; layout metadata comes from the C header.
+function encodeContextHandle(context: NativeContextHandle, handle: ContextObjectHandle): Uint32Array
+function encodeContextHandle(
+  context: NativeContextHandle,
+  handle: ContextObjectHandle,
+  record: BigUint64Array,
+  words?: Uint32Array,
+): BigUint64Array
+function encodeContextHandle(
+  context: NativeContextHandle,
+  handle: ContextObjectHandle,
+  record?: BigUint64Array,
+  words?: Uint32Array,
+): Uint32Array | BigUint64Array {
+  const encoded = encodedContextHandle(context, handle)
+  if (record === undefined) return encoded
+  words ??= new Uint32Array(record.buffer, record.byteOffset, handleWords)
+  for (let index = 0; index < handleWords; index++) words[index] = encoded[index]
+  return record
+}
+
+function createContextHandleRecord(record = new BigUint64Array(nativeLayouts.ot_handle.size / 8)) {
+  return { record, words: new Uint32Array(record.buffer, record.byteOffset, nativeLayouts.ot_handle.size / 4) }
+}
+
+function createSceneNodeRecord() {
+  return { handle: createContextHandleRecord(), target: createContextHandleRecord() }
+}
+
+function createSceneHooksRecord() {
+  const record = new BigUint64Array(nativeLayouts.ot_scene_hooks.size / 8)
+  return {
+    record,
+    words: new Uint32Array(record.buffer),
+    dimensions: new Float64Array(record.buffer),
+    handle: createContextHandleRecord(),
+  }
+}
+
+/** Reads an ot_handle from native-order words, or from a u64 record and its word view. */
+function decodeContextHandle(
+  context: NativeContextHandle,
+  record: BigUint64Array | Uint32Array,
+  words?: Uint32Array,
+): ContextObjectHandle {
+  const source =
+    record instanceof Uint32Array ? record : (words ?? new Uint32Array(record.buffer, record.byteOffset, handleWords))
+  const encoded = new Uint32Array(handleWords)
+  for (let index = 0; index < handleWords; index++) encoded[index] = source[index]
+  return new IssuedContextHandle(
+    context,
+    BigInt(encoded[handleContextLowWord]) | (BigInt(encoded[handleContextHighWord]) << 32n),
+    encoded[handleSlotWord],
+    encoded[handleGenerationWord],
+    encoded,
+  )
+}
+
+function createSceneFrameRecord() {
+  const layout = nativeLayouts.ot_scene_frame_request
+  const output = new BigUint64Array(layout.size / 8)
+  const config = createContextRecord(nativeLayouts.ot_scene_frame_options)
+  const geometry = createContextRecord(nativeLayouts.ot_scene_frame_geometry)
+  return {
+    output,
+    words: new Uint32Array(output.buffer),
+    config,
+    colors: new Uint16Array(config.buffer),
+    geometry,
+    geometryValues: new Float32Array(geometry.buffer),
+    geometryCoordinates: new Float64Array(geometry.buffer),
+    handle: createContextHandleRecord(),
+    session: createContextHandleRecord(
+      new BigUint64Array(output.buffer, layout.fields.session.offset, nativeLayouts.ot_handle.size / 8),
+    ),
+    root: createContextHandleRecord(
+      new BigUint64Array(output.buffer, layout.fields.root.offset, nativeLayouts.ot_handle.size / 8),
+    ),
+    node: createContextHandleRecord(
+      new BigUint64Array(output.buffer, layout.fields.node.offset, nativeLayouts.ot_handle.size / 8),
+    ),
+  }
+}
+
+function createBufferDrawRecord() {
+  const buffer = new ArrayBuffer(nativeLayouts.ot_buffer_draw_box.size)
+  const records: Uint32Array[] = []
+  for (const { id, size } of BUFFER_DRAW_OPERATIONS.values()) records[id] = new Uint32Array(buffer, 0, size / 4)
+  return {
+    words: new Uint32Array(buffer),
+    records,
+    signed: new Int32Array(buffer),
+    colors: new Uint16Array(buffer),
+    source: createContextHandleRecord(),
+  }
+}
+
+function encodeDrawPosition(
+  signed: Int32Array,
+  fields: { x: { offset: number }; y: { offset: number } },
+  options: BufferDrawPosition,
+  base = 0,
+): void {
+  signed[(base + fields.x.offset) / 4] = toFFII32(options.x ?? 0, "Buffer x")
+  signed[(base + fields.y.offset) / 4] = toFFII32(options.y ?? 0, "Buffer y")
+}
+
+function encodeDrawColors(
+  colors: Uint16Array,
+  fields: { foreground: { offset: number }; background: { offset: number } },
+  options: BufferDrawColors,
+  base = 0,
+): boolean {
+  const { foreground, background } = options
+  if (foreground !== undefined) contextBufferColor(foreground, colors, (base + fields.foreground.offset) / 2)
+  if (background !== undefined) contextBufferColor(background, colors, (base + fields.background.offset) / 2)
+  return background !== undefined
+}
+
+const DIAGNOSTIC_QUEUE_MAX = nativeConstants.OT_DIAGNOSTIC_QUEUE_MAX
+const DIAGNOSTIC_BATCH = 8 // Eight 4 KiB records keep the cached drain storage near 33 KB.
+
+function createDiagnosticDrainRecord() {
+  const layout = nativeLayouts.ot_diagnostic_drain
+  const output = new BigUint64Array(layout.size / 8)
+  const words = new Uint32Array(output.buffer)
+  // Native code rewrites these on success and leaves them unchanged on failure, so the record stays reusable.
+  words[layout.fields.struct_size.offset / 4] = layout.size
+  words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+  return { records: new Uint32Array((DIAGNOSTIC_BATCH * nativeLayouts.ot_diagnostic.size) / 4), output, words }
+}
+
+function createSceneLayoutRecord() {
+  const output = createContextRecord(nativeLayouts.ot_scene_layout)
+  return {
+    output,
+    values: new Float32Array(output.buffer),
+    coordinates: new Float64Array(output.buffer),
+    handle: createContextHandleRecord(),
+  }
+}
+
+function decodeSceneLayout(values: Float32Array, coordinates: Float64Array, offset = 0): NativeSceneLayout {
+  const fields = nativeLayouts.ot_scene_layout.fields
+  return {
+    left: values[(offset + fields.left.offset) / 4],
+    top: values[(offset + fields.top.offset) / 4],
+    right: values[(offset + fields.right.offset) / 4],
+    bottom: values[(offset + fields.bottom.offset) / 4],
+    width: values[(offset + fields.width.offset) / 4],
+    height: values[(offset + fields.height.offset) / 4],
+    screenX: coordinates[(offset + fields.screen_x.offset) / 8],
+    screenY: coordinates[(offset + fields.screen_y.offset) / 8],
+  }
+}
+
+// Encoded tickets only use readonly request fields, and hooks draw many times under one ticket.
+const encodedSceneFrameRequests = new WeakMap<NativeSceneFrameRequest, BigUint64Array>()
+
+function encodeSceneFrameRequest(
+  context: NativeContextHandle,
+  frame: NativeSceneFrameRequest | null,
+  scratch?: ReturnType<typeof createSceneFrameRecord>,
+): BigUint64Array {
+  if (scratch === undefined && frame !== null) {
+    const cached = encodedSceneFrameRequests.get(frame)
+    if (
+      cached !== undefined &&
+      frame.session.context === context &&
+      frame.root.context === context &&
+      frame.node.context === context
+    ) {
+      return cached
+    }
+    const encoded = writeSceneFrameRequest(context, frame)
+    encodedSceneFrameRequests.set(frame, encoded)
+    return encoded
+  }
+  return writeSceneFrameRequest(context, frame, scratch)
+}
+
+function writeSceneFrameRequest(
+  context: NativeContextHandle,
+  frame: NativeSceneFrameRequest | null,
+  scratch?: ReturnType<typeof createSceneFrameRecord>,
+): BigUint64Array {
+  const layout = nativeLayouts.ot_scene_frame_request
+  const record = scratch?.output ?? new BigUint64Array(layout.size / 8)
+  const words = scratch?.words ?? new Uint32Array(record.buffer)
+  record.fill(0n)
+  words[layout.fields.struct_size.offset / 4] = layout.size
+  words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+  if (frame !== null) {
+    encodeContextHandle(
+      context,
+      frame.session,
+      scratch?.session.record ??
+        new BigUint64Array(record.buffer, layout.fields.session.offset, nativeLayouts.ot_handle.size / 8),
+      scratch?.session.words,
+    )
+    encodeContextHandle(
+      context,
+      frame.root,
+      scratch?.root.record ??
+        new BigUint64Array(record.buffer, layout.fields.root.offset, nativeLayouts.ot_handle.size / 8),
+      scratch?.root.words,
+    )
+    encodeContextHandle(
+      context,
+      frame.node,
+      scratch?.node.record ??
+        new BigUint64Array(record.buffer, layout.fields.node.offset, nativeLayouts.ot_handle.size / 8),
+      scratch?.node.words,
+    )
+    record[layout.fields.frame_id.offset / 8] = toFFIU64(frame.frameId, "Scene frame ID")
+    record[layout.fields.request_id.offset / 8] = toFFIU64(frame.requestId, "Scene request ID")
+    record[layout.fields.layout_epoch.offset / 8] = toFFIU64(frame.layoutEpoch, "Scene layout epoch")
+    record[layout.fields.hook_generation.offset / 8] = toFFIU64(frame.hookGeneration, "Scene hook generation")
+    words[layout.fields.kind.offset / 4] = toSafeFFIU32Length(frame.kind, "Scene request kind")
+    words[layout.fields.num.offset / 4] = toSafeFFIU32Length(frame.num, "Scene node number")
+    words[layout.fields.width.offset / 4] = toSafeFFIU32Length(frame.width, "Scene request width")
+    words[layout.fields.height.offset / 4] = toSafeFFIU32Length(frame.height, "Scene request height")
+  }
+  return record
+}
+
+type EncodedBufferDraw = {
+  operation: number
+  size: number
+  source: BigUint64Array | null
+}
+
+/** Encode one ot_buffer_draw_* record at byte offset base; the caller zeroes nothing. */
+function encodeBufferDrawRecord(
+  context: NativeContextHandle,
+  options: NativeBufferDraw,
+  words: Uint32Array,
+  signed: Int32Array,
+  colors: Uint16Array,
+  base: number,
+  sourceRecord: ReturnType<typeof createContextHandleRecord> = createContextHandleRecord(),
+): EncodedBufferDraw {
+  const { operation } = options
+  const encoding = BUFFER_DRAW_OPERATIONS.get(operation)
+  if (encoding === undefined) throw new TypeError("Invalid checked buffer drawing operation")
+  const { id: operationId, size } = encoding
+  const word = base / 4
+  const half = base / 2
+  const header = nativeLayouts.ot_buffer_draw_header.fields
+  words.fill(0, word, word + size / 4)
+  words[word + header.struct_size.offset / 4] = size
+  words[word + header.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+  words[word + header.operation.offset / 4] = operationId
+  let source: BigUint64Array | null = null
+  switch (operation) {
+    case "clear": {
+      const { background } = options
+      if (background !== undefined)
+        contextBufferColor(background, colors, half + nativeLayouts.ot_buffer_draw_clear.fields.background.offset / 2)
+      break
+    }
+    case "fill": {
+      const fields = nativeLayouts.ot_buffer_draw_fill.fields
+      encodeDrawPosition(signed, fields, options, base)
+      words[word + fields.width.offset / 4] = toSafeFFIU32Length(options.width ?? 0, "Buffer width")
+      words[word + fields.height.offset / 4] = toSafeFFIU32Length(options.height ?? 0, "Buffer height")
+      const { background } = options
+      if (background !== undefined) contextBufferColor(background, colors, half + fields.background.offset / 2)
+      break
+    }
+    case "text": {
+      const fields = nativeLayouts.ot_buffer_draw_text_record.fields
+      encodeDrawPosition(signed, fields, options, base)
+      words[word + fields.attributes.offset / 4] = toSafeFFIU32Length(options.attributes ?? 0, "Buffer attributes")
+      words[word + fields.max_width.offset / 4] = toSafeFFIU32Length(options.maxWidth ?? 0, "Buffer text width")
+      words[word + header.flags.offset / 4] =
+        (encodeDrawColors(colors, fields, options, base) ? nativeConstants.OT_BUFFER_DRAW_HAS_BACKGROUND : 0) |
+        (options.ellipsis ? nativeConstants.OT_BUFFER_DRAW_FIT_ELLIPSIS : 0)
+      break
+    }
+    case "cell":
+    case "cellBlend":
+    case "char": {
+      const fields = nativeLayouts.ot_buffer_draw_cell.fields
+      encodeDrawPosition(signed, fields, options, base)
+      words[word + fields.character.offset / 4] = toSafeFFIU32Length(options.char ?? 32, "Buffer character")
+      words[word + fields.attributes.offset / 4] = toSafeFFIU32Length(options.attributes ?? 0, "Buffer attributes")
+      encodeDrawColors(colors, fields, options, base)
+      break
+    }
+    case "box": {
+      const fields = nativeLayouts.ot_buffer_draw_box.fields
+      encodeDrawPosition(signed, fields, options, base)
+      words[word + fields.width.offset / 4] = toSafeFFIU32Length(options.width ?? 0, "Buffer width")
+      words[word + fields.height.offset / 4] = toSafeFFIU32Length(options.height ?? 0, "Buffer height")
+      words[word + fields.packed_options.offset / 4] = toSafeFFIU32Length(
+        options.packedOptions ?? 0,
+        "Buffer box options",
+      )
+      encodeDrawColors(colors, fields, options, base)
+      const { titleColor, borderChars } = options
+      if (titleColor !== undefined) contextBufferColor(titleColor, colors, half + fields.title_color.offset / 2)
+      if (borderChars !== undefined) {
+        if (borderChars.length !== 11) throw new RangeError("Border characters must contain 11 Unicode scalars")
+        words.set(borderChars, word + fields.border_chars.offset / 4)
+      }
+      break
+    }
+    case "compose": {
+      const fields = nativeLayouts.ot_buffer_draw_compose.fields
+      source = encodeContextHandle(context, options.source, sourceRecord.record, sourceRecord.words)
+      encodeDrawPosition(signed, fields, options, base)
+      const { sourceX, sourceY, sourceWidth, sourceHeight } = options
+      words[word + fields.source_x.offset / 4] = toSafeFFIU32Length(sourceX ?? 0, "Buffer source x")
+      words[word + fields.source_y.offset / 4] = toSafeFFIU32Length(sourceY ?? 0, "Buffer source y")
+      words[word + fields.source_width.offset / 4] = toSafeFFIU32Length(sourceWidth ?? 0, "Buffer source width")
+      words[word + fields.source_height.offset / 4] = toSafeFFIU32Length(sourceHeight ?? 0, "Buffer source height")
+      words[word + header.flags.offset / 4] =
+        (sourceWidth === undefined ? 0 : nativeConstants.OT_BUFFER_DRAW_HAS_SOURCE_WIDTH) |
+        (sourceHeight === undefined ? 0 : nativeConstants.OT_BUFFER_DRAW_HAS_SOURCE_HEIGHT)
+      break
+    }
+    case "respectAlpha":
+      words[word + nativeLayouts.ot_buffer_draw_alpha.fields.enabled.offset / 4] = toFFIBool(
+        options.enabled,
+        "Buffer respect alpha",
+      )
+      break
+  }
+  return { operation: operationId, size, source }
+}
+
+/** Encode ot_image_draw_options at byte offset base into zeroed storage. */
+function encodeImageDrawOptions(options: NativeContextImageDraw, words: Uint32Array, signed: Int32Array, base: number) {
+  const fields = nativeLayouts.ot_image_draw_options.fields
+  const word = base / 4
+  words[word + fields.struct_size.offset / 4] = nativeLayouts.ot_image_draw_options.size
+  words[word + fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+  const protocolId = IMAGE_PROTOCOL_TO_ID[options.protocol ?? "auto"]
+  if (!Number.isInteger(protocolId)) throw new TypeError("Unknown image protocol")
+  words[word + fields.protocol.offset / 4] = protocolId
+  signed[word + fields.x.offset / 4] = toFFII32(options.x ?? 0, "Image x")
+  signed[word + fields.y.offset / 4] = toFFII32(options.y ?? 0, "Image y")
+  const sourceWidth = options.sourceWidth
+  const sourceHeight = options.sourceHeight
+  words[word + fields.flags.offset / 4] = (sourceWidth === undefined ? 0 : 1) | (sourceHeight === undefined ? 0 : 2)
+  for (const [field, value] of [
+    ["width", options.width],
+    ["height", options.height],
+    ["pixel_width", options.pixelWidth ?? 0],
+    ["pixel_height", options.pixelHeight ?? 0],
+    ["source_x", options.sourceX ?? 0],
+    ["source_y", options.sourceY ?? 0],
+    ["source_width", sourceWidth ?? 0],
+    ["source_height", sourceHeight ?? 0],
+  ] as const) {
+    words[word + fields[field].offset / 4] = toSafeFFIU32Length(value, "Image drawing dimension")
+  }
+}
+
+function viewOrNull<T extends ArrayBufferView>(value: T): T | null {
+  return value.byteLength === 0 ? null : value
+}
+
+const EMBEDDED_TERMINAL_IO_BYTES_MAX = nativeConstants.OT_EMBEDDED_TERMINAL_INPUT_BYTES_MAX
+const EMBEDDED_TERMINAL_KEY_ACTIONS = new Map<string, number>([
+  ["release", nativeConstants.OT_EMBEDDED_TERMINAL_KEY_RELEASE],
+  ["press", nativeConstants.OT_EMBEDDED_TERMINAL_KEY_PRESS],
+  ["repeat", nativeConstants.OT_EMBEDDED_TERMINAL_KEY_REPEAT],
+])
+const EMBEDDED_TERMINAL_MOUSE_ACTIONS = new Map<string, number>([
+  ["press", nativeConstants.OT_EMBEDDED_TERMINAL_MOUSE_PRESS],
+  ["release", nativeConstants.OT_EMBEDDED_TERMINAL_MOUSE_RELEASE],
+  ["motion", nativeConstants.OT_EMBEDDED_TERMINAL_MOUSE_MOTION],
+])
+const EMBEDDED_TERMINAL_BUTTONS = new Map<string | undefined, number>([
+  [undefined, nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_NONE],
+  ["unknown", nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_UNKNOWN],
+  ["left", nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_LEFT],
+  ["right", nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_RIGHT],
+  ["middle", nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_MIDDLE],
+  ["four", nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_FOUR],
+  ["five", nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_FIVE],
+  ["six", nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_SIX],
+  ["seven", nativeConstants.OT_EMBEDDED_TERMINAL_BUTTON_SEVEN],
+])
+
+function embeddedTerminalDimension(value: number, name: string) {
+  if (!Number.isInteger(value) || value < 1 || value > 0xffff) {
+    throw new RangeError(`Embedded terminal ${name} must be an integer between 1 and 65535`)
+  }
+  return value
+}
+
+function rgbaBuffer(value: RGBA): Uint16Array {
+  return value.buffer
+}
+
+function contextBufferColor(value: RGBA, color: Uint16Array = new Uint16Array(4), offset = 0): Uint16Array {
+  const source = rgbaBuffer(value)
+  for (let index = 0; index < 4; index++) {
+    const channel = source[index]
+    if (!Number.isInteger(channel) || channel < 0 || channel > 0xffff) {
+      throw new RangeError("Context buffer colors require four integer RGBA channels in 0..65535")
+    }
+    color[offset + index] = channel
+  }
+  const intent = color[offset + 1] >>> 8
+  const indexed = intent === nativeConstants.OT_COLOR_INDEXED
+  const known = indexed || intent === nativeConstants.OT_COLOR_RGB || intent === nativeConstants.OT_COLOR_DEFAULT
+  if (color[offset + 2] > 255 || color[offset + 3] > 255 || !known || (!indexed && color[offset] > 255)) {
+    throw new RangeError("Invalid terminal color intent")
+  }
+  return color
+}
+
+function createScenePaintRecord() {
+  const { fields } = nativeLayouts.ot_scene_paint_options
+  const record = createContextRecord(nativeLayouts.ot_scene_paint_options)
+  return {
+    record,
+    // Property fields run from z_index up to the reserved tail word.
+    payload: new Uint32Array(
+      record.buffer,
+      fields.z_index.offset,
+      (fields.reserved.offset - fields.z_index.offset) / 4,
+    ),
+    background: new Uint16Array(record.buffer, fields.background.offset, 4),
+    floats: new Float32Array(record.buffer),
+    doubles: new Float64Array(record.buffer),
+    colors: new Uint16Array(record.buffer),
+  }
+}
+
+function encodeScenePaint(paint: NativeScenePaintUpdate, scratch: ReturnType<typeof createScenePaintRecord>): number {
+  const layout = nativeLayouts.ot_scene_paint_options
+  const { record, floats, doubles, colors } = scratch
+  const zIndex = paint.zIndex
+  let fields = 0
+  if (zIndex !== undefined) {
+    record[layout.fields.z_index.offset / 4] = toFFII32(zIndex, "Scene zIndex")
+    fields |= nativeConstants.OT_SCENE_PROPERTY_Z_INDEX
+  }
+  const opacity = paint.opacity
+  if (opacity !== undefined) {
+    floats[layout.fields.opacity.offset / 4] = toFFIF32(opacity, "Scene opacity")
+    fields |= nativeConstants.OT_SCENE_PROPERTY_OPACITY
+  }
+  const translateX = paint.translateX
+  const translateY = paint.translateY
+  if (translateX !== undefined) {
+    doubles[layout.fields.translate_x.offset / 8] = toFFIF32(translateX, "Scene translateX")
+    fields |= nativeConstants.OT_SCENE_PROPERTY_TRANSLATE_X
+  }
+  if (translateY !== undefined) {
+    doubles[layout.fields.translate_y.offset / 8] = toFFIF32(translateY, "Scene translateY")
+    fields |= nativeConstants.OT_SCENE_PROPERTY_TRANSLATE_Y
+  }
+  const border = paint.border
+  if (border !== undefined) {
+    record[layout.fields.border_sides.offset / 4] = toSafeFFIU32Length(border, "Scene border")
+    fields |= nativeConstants.OT_SCENE_PROPERTY_BORDER
+  }
+  const shouldFill = paint.shouldFill
+  if (shouldFill !== undefined) {
+    record[layout.fields.should_fill.offset / 4] = toFFIBool(shouldFill, "Scene shouldFill")
+    fields |= nativeConstants.OT_SCENE_PROPERTY_SHOULD_FILL
+  }
+  const background = paint.backgroundColor
+  if (background !== undefined) {
+    contextBufferColor(background, colors, layout.fields.background.offset / 2)
+    fields |= nativeConstants.OT_SCENE_PROPERTY_BACKGROUND
+  }
+  const borderColor = paint.borderColor
+  if (borderColor !== undefined) {
+    contextBufferColor(borderColor, colors, layout.fields.border_color.offset / 2)
+    fields |= nativeConstants.OT_SCENE_PROPERTY_BORDER_COLOR
+  }
+  const requestedStyle = paint.borderStyle
+  if (requestedStyle !== undefined) {
+    const borderStyle = SCENE_BORDER_STYLES.indexOf(requestedStyle)
+    if (borderStyle < 0) throw new TypeError("Unknown scene border style")
+    record[layout.fields.border_style.offset / 4] = borderStyle
+    fields |= nativeConstants.OT_SCENE_PROPERTY_BORDER_STYLE
+  }
+  const focusable = paint.focusable
+  if (focusable !== undefined) {
+    record[layout.fields.focusable.offset / 4] = toFFIBool(focusable, "Scene focusable")
+    fields |= nativeConstants.OT_SCENE_PROPERTY_FOCUSABLE
+  }
+  const focusedBorderColor = paint.focusedBorderColor
+  if (focusedBorderColor !== undefined) {
+    contextBufferColor(focusedBorderColor, colors, layout.fields.focused_border_color.offset / 2)
+    fields |= nativeConstants.OT_SCENE_PROPERTY_FOCUSED_BORDER_COLOR
+  }
+  const resetBorderCharacters = paint.resetBorderCharacters
+  if (resetBorderCharacters !== undefined) {
+    if (resetBorderCharacters !== true || requestedStyle === undefined)
+      throw new TypeError("Border character reset requires a border style")
+    fields |= nativeConstants.OT_SCENE_PROPERTY_RESET_BORDER_CHARACTERS
+  }
+  return fields
+}
+
+// Packed paint records hold fields in header bit order, and SceneStaging indexes these entries by bit position.
+const scenePropertyWords = (
+  [
+    ["z_index", nativeConstants.OT_SCENE_PROPERTY_Z_INDEX],
+    ["opacity", nativeConstants.OT_SCENE_PROPERTY_OPACITY],
+    ["translate_x", nativeConstants.OT_SCENE_PROPERTY_TRANSLATE_X],
+    ["translate_y", nativeConstants.OT_SCENE_PROPERTY_TRANSLATE_Y],
+    ["border_sides", nativeConstants.OT_SCENE_PROPERTY_BORDER],
+    ["should_fill", nativeConstants.OT_SCENE_PROPERTY_SHOULD_FILL],
+    ["background", nativeConstants.OT_SCENE_PROPERTY_BACKGROUND],
+    ["border_color", nativeConstants.OT_SCENE_PROPERTY_BORDER_COLOR],
+    ["border_style", nativeConstants.OT_SCENE_PROPERTY_BORDER_STYLE],
+    ["focusable", nativeConstants.OT_SCENE_PROPERTY_FOCUSABLE],
+    ["focused_border_color", nativeConstants.OT_SCENE_PROPERTY_FOCUSED_BORDER_COLOR],
+  ] as const
+).map(([name, bit], index) => {
+  if (bit !== 1 << index) throw new Error(`Scene property ${name} is out of header bit order`)
+  const field = nativeLayouts.ot_scene_paint_options.fields[name]
+  return { offset: field.offset / 4, length: field.size / 4 }
+})
+const propertyHeaderWords = nativeLayouts.ot_scene_property_update.size / 4
+const propertySlotWords = nativeConstants.OT_SCENE_PROPERTY_RECORD_MAX / 4
+const propertyStyle = nativeConstants.OT_SCENE_PROPERTY_STYLE
+const propertyStyleWords = propertyHeaderWords + nativeLayouts.ot_scene_style_property.size / 4
+
+function propertyWordLength(fields: number): number {
+  if (fields === propertyStyle) return propertyStyleWords
+  let words = propertyHeaderWords
+  for (let index = 0; index < scenePropertyWords.length; index++) {
+    if (fields & (1 << index)) words += scenePropertyWords[index].length
+  }
+  return (words + 1) & ~1
+}
+
+// SceneStaging sizes its buffer in records of OT_SCENE_PROPERTY_RECORD_MAX bytes.
+if (Math.max(propertyStyleWords, propertyWordLength((1 << scenePropertyWords.length) - 1)) > propertySlotWords) {
+  throw new Error("Scene property records exceed OT_SCENE_PROPERTY_RECORD_MAX")
+}
+
+/** One ordered property stream, stored in native wire layout. Visual writes coalesce
+ * at the node's latest visual record; last write wins per field. New or changed
+ * translations only merge into the last record so prepared coordinates observe
+ * preceding ancestor translations. Layout writes stay ordered because Yoga
+ * shorthand/edge and dimension/flex-shrink operations can overlap. There are no
+ * reads or callbacks between records. A successful flush ends coalescing.
+ *
+ * Records occupy their packed size, so a background-only or style batch is already
+ * the borrowed bytes. Merging extra visual fields grows that record and shifts later
+ * ones. Scratch snapshots caller getters before publication, including under reentry. */
+export class SceneStaging {
+  static readonly limit = nativeConstants.OT_SCENE_MUTATIONS_MAX
+  private words: Uint32Array
+  private readonly paintBySlot = new Map<number, number>()
+  private readonly packScratch = new Uint32Array(16)
+  private readonly styleValue = new Float32Array(1)
+  private readonly styleValueWords = new Uint32Array(this.styleValue.buffer)
+  private context?: NativeContextHandle
+  private readonly contextId = new BigUint64Array(1)
+  private readonly contextWords = new Uint32Array(this.contextId.buffer)
+  private borrowed = false
+  private entryCount = 0
+  private encodedWords = 0
+  private lastBase = 0
+  // Base of the record just before lastBase when both set the same node property, else -1.
+  private runBase = -1
+  private paintScratch: ReturnType<typeof createScenePaintRecord> | undefined = createScenePaintRecord()
+
+  constructor(initialCapacity = 64) {
+    if (!Number.isInteger(initialCapacity) || initialCapacity < 1 || initialCapacity > SceneStaging.limit) {
+      throw new RangeError("Scene staging capacity must be within the native mutation limit")
+    }
+    this.words = new Uint32Array(propertySlotWords * initialCapacity)
+  }
+
+  get pending(): boolean {
+    return this.entryCount !== 0
+  }
+  get count(): number {
+    return this.entryCount
+  }
+  get byteLength(): number {
+    return this.encodedWords * 4
+  }
+  get full(): boolean {
+    return this.entryCount === SceneStaging.limit
+  }
+
+  static checkStyleValue(group: number, value: number): number {
+    return group === nativeConstants.OT_STYLE_ENUM
+      ? toSafeFFIU32Length(value, "Scene enum value")
+      : toFFIF32(value, "Scene style value", true)
+  }
+
+  private assertWritable(): void {
+    if (this.borrowed) throw new Error("Cannot change staged scene inputs during a native flush")
+  }
+
+  /** Returns the node's staged visual record, if any. */
+  private checkHandle(context: NativeContextHandle, handle: Uint32Array): number | undefined {
+    this.assertWritable()
+    if (
+      this.context !== undefined &&
+      (this.context !== context || this.contextWords[0] !== handle[0] || this.contextWords[1] !== handle[1])
+    ) {
+      throw new NativeError("Context handle", NativeStatus.WrongContext)
+    }
+    const entry = this.paintBySlot.get(handle[2])
+    if (entry !== undefined && this.words[entry + 3] !== handle[3]) {
+      throw new NativeError("Context handle", NativeStatus.StaleHandle)
+    }
+    return entry
+  }
+
+  private bind(context: NativeContextHandle, handle: Uint32Array): boolean {
+    if (this.context !== undefined) return false
+    this.context = context
+    this.contextWords[0] = handle[0]
+    this.contextWords[1] = handle[1]
+    return true
+  }
+
+  private ensureWords(need: number): void {
+    if (need <= this.words.length) return
+    const next = new Uint32Array(
+      Math.min(SceneStaging.limit * propertySlotWords, Math.max(need, this.words.length * 2)),
+    )
+    next.set(this.words.subarray(0, this.encodedWords))
+    this.words = next
+  }
+
+  /** Callers write every field word; only the trailing alignment word needs clearing. */
+  private reserve(handle: Uint32Array, fields: number): number {
+    if (this.full) throw new NativeError("ot_scene_flush", NativeStatus.ObjectLimit)
+    const length = propertyWordLength(fields)
+    this.ensureWords(this.encodedWords + length)
+    const base = this.encodedWords
+    const words = this.words
+    words[base + length - 1] = 0
+    words[base] = handle[0]
+    words[base + 1] = handle[1]
+    words[base + 2] = handle[2]
+    words[base + 3] = handle[3]
+    words[base + 4] = fields
+    words[base + 5] = length * 4
+    this.encodedWords += length
+    this.entryCount++
+    this.lastBase = base
+    this.runBase = -1
+    return base
+  }
+
+  stageStyle(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    group: number,
+    kind: number,
+    edge: number,
+    unit: number,
+    value: number,
+    flags: number,
+  ): boolean {
+    this.assertWritable()
+    group = toSafeFFIU32Length(group, "Scene style group")
+    kind = toSafeFFIU32Length(kind, "Scene style kind")
+    edge = toSafeFFIU32Length(edge, "Scene style edge")
+    unit = toSafeFFIU32Length(unit, "Scene style unit")
+    value = SceneStaging.checkStyleValue(group, value)
+    flags = toSafeFFIU32Length(flags, "Scene style flags")
+    // Each field packs into one header byte; native cannot see wider bits, which would select another property.
+    if (Math.max(group, kind, edge, unit) > 0xff)
+      throw new NativeError("ot_scene_set_style", NativeStatus.InvalidArgument)
+    // Size kinds (width through flex basis) have no edge; keep unused bits out of the packed record.
+    if (group === nativeConstants.OT_STYLE_VALUE && kind < nativeConstants.OT_STYLE_VALUE_MARGIN) edge = 0
+    const handle = encodedContextHandle(context, node)
+    this.checkHandle(context, handle)
+    const target = group | (kind << 8) | (edge << 16)
+    const packed = target | (unit << 24)
+    this.styleValue[0] = value
+    const valueWord = this.styleValueWords[0]
+    const last = this.lastBase
+    if (
+      this.entryCount !== 0 &&
+      this.words[last + 4] === propertyStyle &&
+      this.words[last + 2] === handle[2] &&
+      this.words[last + 3] === handle[3] &&
+      (this.words[last + 6] & 0x00ff_ffff) === target &&
+      this.words[last + 7] === flags
+    ) {
+      const words = this.words
+      // Yoga ignores a write equal to the value it holds, so a bit-identical write does nothing.
+      if (words[last + 6] === packed && words[last + 8] === valueWord) return false
+      if (this.rewriteStyleRun(last, packed, valueWord)) return false
+      const previous = last
+      const base = this.reserve(handle, propertyStyle)
+      this.writeStyle(base, packed, flags, valueWord)
+      if (this.stylesDiffer(words[previous + 6], words[previous + 8], packed, valueWord)) this.runBase = previous
+      return false
+    }
+    const base = this.reserve(handle, propertyStyle)
+    this.writeStyle(base, packed, flags, valueWord)
+    return this.bind(context, handle)
+  }
+
+  private writeStyle(base: number, packed: number, flags: number, valueWord: number): void {
+    this.words[base + 6] = packed
+    this.words[base + 7] = flags
+    this.words[base + 8] = valueWord
+  }
+
+  /**
+   * Whether Yoga certainly treats two staged values of one property as different. Undefined, auto
+   * and NaN values, and signed zeros, can compare equal under Yoga's rules, so they never qualify.
+   */
+  private stylesDiffer(packedA: number, valueA: number, packedB: number, valueB: number): boolean {
+    // f32 bit patterns: NaN has an all-ones exponent and a nonzero mantissa; both zeros compare equal.
+    if ((valueA & 0x7f80_0000) === 0x7f80_0000 && (valueA & 0x007f_ffff) !== 0) return false
+    if ((valueB & 0x7f80_0000) === 0x7f80_0000 && (valueB & 0x007f_ffff) !== 0) return false
+    const group = packedA & 0xff
+    if (group === nativeConstants.OT_STYLE_VALUE || group === nativeConstants.OT_STYLE_DIMENSION) {
+      const unitA = packedA >>> 24
+      const unitB = packedB >>> 24
+      if (unitA === nativeConstants.OT_UNIT_UNDEFINED || unitB === nativeConstants.OT_UNIT_UNDEFINED) return false
+      if (unitA !== unitB) return true
+      if (unitA === nativeConstants.OT_UNIT_AUTO) return false
+    }
+    return valueA !== valueB && ((valueA | valueB) & 0x7fff_ffff) !== 0
+  }
+
+  /**
+   * Coalesces consecutive writes to one node property. The stream keeps a run of two records only
+   * while Yoga certainly sees their values as different, and the newest value stays last. Yoga then
+   * marks the node dirty, as some write in the original run would have, and ends with the same
+   * value. Any write that cannot keep that guarantee is appended instead. Returns false to append.
+   */
+  private rewriteStyleRun(last: number, packed: number, valueWord: number): boolean {
+    const run = this.runBase
+    if (run < 0) return false
+    const words = this.words
+    if (!this.stylesDiffer(words[last + 6], words[last + 8], packed, valueWord)) return false
+    if (words[run + 6] === packed && words[run + 8] === valueWord) {
+      // Restoring the older value: the replaced newest value becomes the differing one.
+      words[run + 6] = words[last + 6]
+      words[run + 8] = words[last + 8]
+    } else if (!this.stylesDiffer(words[run + 6], words[run + 8], packed, valueWord)) {
+      return false
+    }
+    words[last + 6] = packed
+    words[last + 8] = valueWord
+    return true
+  }
+
+  stageBackground(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    color: RGBA,
+    owner?: { assertMutable(): void },
+  ): boolean {
+    this.assertWritable()
+    const scratch = this.paintScratch ?? createScenePaintRecord()
+    this.paintScratch = undefined
+    try {
+      const handle = encodedContextHandle(context, node)
+      contextBufferColor(color, scratch.background)
+      owner?.assertMutable()
+      return this.publishPaint(context, handle, nativeConstants.OT_SCENE_PROPERTY_BACKGROUND, scratch)
+    } finally {
+      this.paintScratch ??= scratch
+    }
+  }
+
+  stagePaint(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    paint: NativeScenePaintUpdate,
+    owner?: { assertMutable(): void },
+  ): boolean {
+    this.assertWritable()
+    const scratch = this.paintScratch ?? createScenePaintRecord()
+    this.paintScratch = undefined
+    try {
+      const handle = encodedContextHandle(context, node)
+      const fields = encodeScenePaint(paint, scratch)
+      owner?.assertMutable()
+      return this.publishPaint(context, handle, fields, scratch)
+    } finally {
+      this.paintScratch ??= scratch
+    }
+  }
+
+  private publishPaint(
+    context: NativeContextHandle,
+    handle: Uint32Array,
+    fields: number,
+    scratch: ReturnType<typeof createScenePaintRecord>,
+  ): boolean {
+    let entry = this.checkHandle(context, handle)
+    if (fields === 0) return false
+    const slot = handle[2]
+    const translation =
+      fields & (nativeConstants.OT_SCENE_PROPERTY_TRANSLATE_X | nativeConstants.OT_SCENE_PROPERTY_TRANSLATE_Y)
+    if (entry !== undefined && translation !== 0 && entry !== this.lastBase) {
+      const existing = this.words[entry + 4]
+      // Identical staged doubles cause no second native coordinate update.
+      for (let index = 2; index < 4; index++) {
+        const bit = 1 << index
+        if (!(translation & bit)) continue
+        if (!(existing & bit) || !this.packedFieldEquals(entry, existing, index, scratch.record)) {
+          entry = undefined
+          break
+        }
+      }
+    }
+    let base: number
+    if (entry === undefined) {
+      base = this.reserve(handle, fields)
+      this.paintBySlot.set(slot, base)
+      this.writePackedFields(base, fields, fields, scratch, null, 0)
+    } else {
+      base = entry
+      this.mergePackedPaint(base, fields, scratch)
+    }
+    return this.bind(context, handle)
+  }
+
+  private packedFieldEquals(base: number, fields: number, bitIndex: number, record: Uint32Array): boolean {
+    let packed = 0
+    for (let index = 0; index < bitIndex; index++) {
+      if (fields & (1 << index)) packed += scenePropertyWords[index].length
+    }
+    const field = scenePropertyWords[bitIndex]
+    for (let word = 0; word < field.length; word++) {
+      if (this.words[base + propertyHeaderWords + packed + word] !== record[field.offset + word]) return false
+    }
+    return true
+  }
+
+  private writePackedFields(
+    base: number,
+    recordFields: number,
+    writeMask: number,
+    scratch: ReturnType<typeof createScenePaintRecord>,
+    oldPayload: Uint32Array | null,
+    oldFields: number,
+  ): void {
+    if ((writeMask & (propertyStyle - 1)) === propertyStyle - 1) {
+      this.words.set(scratch.payload, base + propertyHeaderWords)
+      return
+    }
+    const words = this.words
+    const record = scratch.record
+    let dest = base + propertyHeaderWords
+    let oldOff = 0
+    for (let index = 0; index < scenePropertyWords.length && recordFields >>> index !== 0; index++) {
+      const bit = 1 << index
+      if (!(recordFields & bit)) continue
+      const field = scenePropertyWords[index]
+      if (writeMask & bit) {
+        for (let word = 0; word < field.length; word++) words[dest + word] = record[field.offset + word]
+      } else if (oldPayload) {
+        for (let word = 0; word < field.length; word++) words[dest + word] = oldPayload[oldOff + word]
+      }
+      dest += field.length
+      if (oldFields & bit) oldOff += field.length
+    }
+  }
+
+  private mergePackedPaint(base: number, fields: number, scratch: ReturnType<typeof createScenePaintRecord>): void {
+    const oldFields = this.words[base + 4]
+    const merged = oldFields | fields
+    if (merged === oldFields) {
+      this.writePackedFields(base, merged, fields, scratch, null, 0)
+      return
+    }
+    const oldLen = this.words[base + 5] / 4
+    const newLen = propertyWordLength(merged)
+    this.packScratch.set(this.words.subarray(base + propertyHeaderWords, base + oldLen))
+    const delta = newLen - oldLen
+    this.ensureWords(this.encodedWords + delta)
+    if (base + oldLen < this.encodedWords) {
+      this.words.copyWithin(base + newLen, base + oldLen, this.encodedWords)
+      for (const [slot, offset] of this.paintBySlot) {
+        if (offset >= base + oldLen) this.paintBySlot.set(slot, offset + delta)
+      }
+    }
+    this.encodedWords += delta
+    if (this.lastBase >= base + oldLen) this.lastBase += delta
+    if (this.runBase >= base + oldLen) this.runBase += delta
+    this.words.fill(0, base + propertyHeaderWords, base + newLen)
+    this.words[base + 4] = merged
+    this.words[base + 5] = newLen * 4
+    this.writePackedFields(base, merged, fields, scratch, this.packScratch, oldFields)
+  }
+
+  /** @internal Borrow until consume() acknowledges the native prefix. */
+  _views(context: NativeContextHandle): Uint32Array {
+    this.assertWritable()
+    if (this.context !== context) throw new NativeError("ot_scene_flush", NativeStatus.WrongContext)
+    this.borrowed = true
+    return this.words
+  }
+
+  clear(): void {
+    this.assertWritable()
+    this.entryCount = 0
+    this.encodedWords = 0
+    this.lastBase = 0
+    this.runBase = -1
+    this.paintBySlot.clear()
+    this.context = undefined
+  }
+
+  /** Never replay the accepted prefix. Remaining records stay in wire layout. An invalid
+   * acknowledgement still ends the borrow, so staging stays writable. */
+  consume(applied: number): void {
+    if (!this.borrowed) throw new Error("Scene flush inputs were not borrowed")
+    this.borrowed = false
+    if (!Number.isInteger(applied) || applied < 0 || applied > this.entryCount)
+      throw new Error("Invalid scene flush prefix")
+    if (applied === this.entryCount) return this.clear()
+    // An unchanged stream keeps its indexes, including the open style run.
+    if (applied === 0) return
+    let source = 0
+    for (let index = 0; index < applied; index++) source += this.words[source + 5] / 4
+    this.words.copyWithin(0, source, this.encodedWords)
+    this.encodedWords -= source
+    this.entryCount -= applied
+    this.reindex()
+  }
+
+  discard(node: SceneNodeHandle): void {
+    this.assertWritable()
+    if (!this.pending || node.context !== this.context || node.contextId !== this.contextId[0]) return
+    let count = 0
+    let dest = 0
+    let offset = 0
+    for (let index = 0; index < this.entryCount; index++) {
+      const length = this.words[offset + 5] / 4
+      if (this.words[offset + 2] === node.slot && this.words[offset + 3] === node.generation) {
+        offset += length
+        continue
+      }
+      if (dest !== offset) this.words.copyWithin(dest, offset, offset + length)
+      dest += length
+      offset += length
+      count++
+    }
+    this.entryCount = count
+    this.encodedWords = dest
+    if (!this.pending) this.clear()
+    else this.reindex()
+  }
+
+  private reindex(): void {
+    this.paintBySlot.clear()
+    let offset = 0
+    let last = 0
+    for (let index = 0; index < this.entryCount; index++) {
+      last = offset
+      if (this.words[offset + 4] !== propertyStyle) this.paintBySlot.set(this.words[offset + 2], offset)
+      offset += this.words[offset + 5] / 4
+    }
+    this.lastBase = last
+    this.runBase = -1
+  }
+}
+
+// Flush statuses that describe the rejected record itself rather than the moment of the flush.
+const sceneRecordRejections = new Set([NativeStatus.InvalidArgument, NativeStatus.WrongKind, NativeStatus.StaleHandle])
+
+const recordHeader = nativeLayouts.ot_scene_record_header.fields
+const recordBytesMax = nativeConstants.OT_SCENE_RECORD_BYTES_MAX
+const stackDepthMax = nativeConstants.OT_BUFFER_STACK_DEPTH_MAX
+
+function viewOf<T extends Int32Array | Float32Array | Uint32Array>(value: T, Type: new (...args: any[]) => T): T {
+  return new Type(
+    typedArrayAccessors.buffer.get!.call(value),
+    typedArrayAccessors.byteOffset.get!.call(value),
+    typedArrayAccessors.length.get!.call(value),
+  )
+}
+
+// Releases that wait for the frame step painting each Context's open recording (FFIRenderLib.releaseAfterPaint).
+const releaseWindows = new WeakMap<NativeContextHandle, (() => void)[]>()
+
+/** Encodes paint hooks into the ot_scene_record stream that acknowledges one RECORD request.
+ * Recorded commands draw when native code paints the frame, not when a hook calls them. */
+export class NativePaintRecorder {
+  private buffer = new ArrayBuffer(16_384)
+  private bytes = new Uint8Array(this.buffer)
+  private words = new Uint32Array(this.buffer)
+  private signed = new Int32Array(this.buffer)
+  private floats = new Float32Array(this.buffer)
+  private colors = new Uint16Array(this.buffer)
+  private length = 0
+  // Set from begin() to end(): drawing records.
+  private context: NativeContextHandle | null = null
+  // Set from begin() to settle(): native releases in this Context wait for the frame step.
+  private window: NativeContextHandle | null = null
+  private readonly releases: (() => void)[] = []
+  private pendingSlot = -1
+  private pendingPhase = 0
+  private readonly opacity: number[] = [1]
+  private scissors = 0
+  private textBytes?: Uint8Array
+  private bottomBytes?: Uint8Array
+  private readonly handleRecord = createContextHandleRecord()
+
+  begin(context: NativeContextHandle): void {
+    this.settle()
+    this.context = context
+    // A recording nested inside another one on the same Context shares the outer window, which closes later.
+    if (!releaseWindows.has(context)) {
+      releaseWindows.set(context, this.releases)
+      this.window = context
+    }
+    this.length = 0
+    this.pendingSlot = -1
+  }
+
+  /** Stop recording. Deferred releases wait for settle(). */
+  end(): void {
+    this.context = null
+    this.pendingSlot = -1
+  }
+
+  /** Run deferred releases after the frame step that consumed the recording. */
+  settle(): void {
+    if (this.window === null) return
+    releaseWindows.delete(this.window)
+    this.window = null
+    for (const release of this.releases.splice(0)) {
+      try {
+        release()
+      } catch {
+        // Context teardown may have released the resource already.
+      }
+    }
+  }
+
+  /** The encoded stream, or null when nothing was recorded. Valid until the next begin(). */
+  get recording(): Uint8Array | null {
+    return this.length === 0 ? null : this.bytes.subarray(0, this.length)
+  }
+
+  /** Start one slot phase. Its SLOT record is written only if the phase draws. */
+  slot(slot: number, phase: NativeScenePaintPhase, opacity: number): void {
+    this.activeContext()
+    this.pendingSlot = slot
+    this.pendingPhase = phase
+    this.opacity.length = 1
+    this.opacity[0] = opacity
+    this.scissors = 0
+  }
+
+  get currentOpacity(): number {
+    return this.opacity[this.opacity.length - 1]
+  }
+
+  draw(options: NativeBufferDraw): void {
+    // Convert first: a caller's toString can draw, and its records must survive this draw's rollback.
+    const text = drawRecordText(options)
+    const bottom = drawRecordBottomTitle(options)
+    this.transaction(() => {
+      if (options.operation === "respectAlpha") throw new Error("Paint hooks cannot change the frame alpha mode")
+      // Encode before reserving so the record grows by the UTF-8 bytes, not by an upper bound.
+      const textBytes = (this.textBytes ??= new Uint8Array(NATIVE_BUFFER_TEXT_BYTES_MAX))
+      const bottomBytes = (this.bottomBytes ??= new Uint8Array(NATIVE_BUFFER_TEXT_BYTES_MAX))
+      const textLength = encodeDrawText(text, textBytes)
+      const bottomLength = encodeDrawText(bottom, bottomBytes)
+      const layout = nativeLayouts.ot_scene_record_draw
+      const record = layout.size + nativeLayouts.ot_buffer_draw_box.size
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_DRAW, record + textLength + bottomLength)
+      const encoded = encodeBufferDrawRecord(
+        this.activeContext(),
+        options,
+        this.words,
+        this.signed,
+        this.colors,
+        base + layout.size,
+        this.handleRecord,
+      )
+      if (encoded.source) {
+        this.bytes.set(
+          new Uint8Array(encoded.source.buffer, encoded.source.byteOffset, 16),
+          base + layout.fields.source.offset,
+        )
+      }
+      const end = base + layout.size + encoded.size
+      this.bytes.set(textBytes.subarray(0, textLength), end)
+      this.bytes.set(bottomBytes.subarray(0, bottomLength), end + textLength)
+      this.words[(base + layout.fields.text_length.offset) / 4] = textLength
+      this.words[(base + layout.fields.bottom_length.offset) / 4] = bottomLength
+      this.finish(base, end + textLength + bottomLength)
+    })
+  }
+
+  stack(options: NativeBufferStack): number {
+    const operation = BUFFER_STACK_OPERATIONS.indexOf(options.operation)
+    if (operation < 0) throw new TypeError("Invalid checked buffer stack operation")
+    const x = toFFII32(options.x ?? 0, "Buffer scissor x")
+    const y = toFFII32(options.y ?? 0, "Buffer scissor y")
+    const width = toSafeFFIU32Length(options.width ?? 0, "Buffer scissor width")
+    const height = toSafeFFIU32Length(options.height ?? 0, "Buffer scissor height")
+    const opacity = options.opacity ?? 1
+    if (!Number.isFinite(opacity)) throw new RangeError("Buffer opacity must be finite")
+    const clamped = Math.max(0, Math.min(1, opacity))
+    switch (options.operation) {
+      case "getOpacity":
+        this.activeContext()
+        return this.currentOpacity
+      case "pushScissor":
+        if (width > 0x7fffffff || height > 0x7fffffff || x + width > 0x7fffffff || y + height > 0x7fffffff) {
+          throw new NativeError("ot_buffer_stack", NativeStatus.InvalidArgument)
+        }
+        if (this.scissors >= stackDepthMax) throw new NativeError("ot_buffer_stack", NativeStatus.ObjectLimit)
+        break
+      case "pushOpacity":
+        if (this.opacity.length - 1 >= stackDepthMax) throw new NativeError("ot_buffer_stack", NativeStatus.ObjectLimit)
+        break
+    }
+    this.transaction(() => {
+      const layout = nativeLayouts.ot_scene_record_stack
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_STACK, layout.size)
+      const fields = layout.fields
+      this.words[(base + fields.operation.offset) / 4] = operation
+      this.signed[(base + fields.x.offset) / 4] = x
+      this.signed[(base + fields.y.offset) / 4] = y
+      this.words[(base + fields.width.offset) / 4] = width
+      this.words[(base + fields.height.offset) / 4] = height
+      this.floats[(base + fields.opacity.offset) / 4] = clamped
+    })
+    switch (options.operation) {
+      case "pushScissor":
+        this.scissors++
+        break
+      case "popScissor":
+        this.scissors = Math.max(0, this.scissors - 1)
+        break
+      case "clearScissors":
+        this.scissors = 0
+        break
+      case "pushOpacity":
+        this.opacity.push(Math.fround(this.currentOpacity * Math.fround(clamped)))
+        break
+      case "popOpacity":
+        if (this.opacity.length > 1) this.opacity.pop()
+        break
+      case "clearOpacity":
+        this.opacity.length = 1
+        break
+    }
+    return this.currentOpacity
+  }
+
+  grid(options: NativeBufferGrid): void {
+    this.transaction(() => {
+      const layout = nativeLayouts.ot_scene_record_grid
+      const optionsLayout = nativeLayouts.ot_buffer_grid_options
+      const { borderChars, borderFg, borderBg, columnOffsets, rowOffsets, drawInner, drawOuter } = options
+      if (borderChars.length !== 11) throw new RangeError("Border characters must contain 11 Unicode scalars")
+      const columns = viewOf(columnOffsets, Int32Array)
+      const rows = viewOf(rowOffsets, Int32Array)
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_GRID, layout.size + (columns.length + rows.length) * 4)
+      const record = base + layout.fields.options.offset
+      const fields = optionsLayout.fields
+      this.words[(record + fields.struct_size.offset) / 4] = optionsLayout.size
+      this.words[(record + fields.abi_version.offset) / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+      this.words[(record + fields.flags.offset) / 4] =
+        toFFIBool(drawInner, "Grid inner borders") | (toFFIBool(drawOuter, "Grid outer borders") << 1)
+      contextBufferColor(borderFg, this.colors, (record + fields.foreground.offset) / 2)
+      contextBufferColor(borderBg, this.colors, (record + fields.background.offset) / 2)
+      this.words.set(borderChars, (record + fields.border_chars.offset) / 4)
+      this.words[(base + layout.fields.column_count.offset) / 4] = columns.length
+      this.words[(base + layout.fields.row_count.offset) / 4] = rows.length
+      this.signed.set(columns, (base + layout.size) / 4)
+      this.signed.set(rows, (base + layout.size) / 4 + columns.length)
+    })
+  }
+
+  packed(data: Uint8Array | PointerInput, byteLength: number, x: number, y: number, width: number, height: number) {
+    this.transaction(() => {
+      const layout = nativeLayouts.ot_scene_record_packed
+      const input = recordedPixels(data, byteLength)
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_PACKED, layout.size + input.byteLength)
+      const fields = layout.fields
+      this.signed[(base + fields.x.offset) / 4] = toFFII32(x, "Packed buffer x")
+      this.signed[(base + fields.y.offset) / 4] = toFFII32(y, "Packed buffer y")
+      this.words[(base + fields.width.offset) / 4] = toSafeFFIU32Length(width, "Packed buffer dimension")
+      this.words[(base + fields.height.offset) / 4] = toSafeFFIU32Length(height, "Packed buffer dimension")
+      this.words[(base + fields.byte_count.offset) / 4] = input.byteLength
+      this.bytes.set(input, base + layout.size)
+    })
+  }
+
+  supersample(
+    data: Uint8Array | PointerInput,
+    byteLength: number,
+    x: number,
+    y: number,
+    format: "rgba8unorm" | "bgra8unorm",
+    stride: number,
+  ): void {
+    this.transaction(() => {
+      if (format !== "rgba8unorm" && format !== "bgra8unorm") throw new TypeError("Unknown pixel format")
+      const layout = nativeLayouts.ot_scene_record_supersample
+      const input = recordedPixels(data, byteLength)
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_SUPERSAMPLE, layout.size + input.byteLength)
+      const fields = layout.fields
+      this.signed[(base + fields.x.offset) / 4] = toFFII32(x, "Supersample buffer x")
+      this.signed[(base + fields.y.offset) / 4] = toFFII32(y, "Supersample buffer y")
+      this.words[(base + fields.format.offset) / 4] = format === "bgra8unorm" ? 0 : 1
+      this.words[(base + fields.stride.offset) / 4] = toSafeFFIU32Length(stride, "Supersample buffer dimension")
+      this.words[(base + fields.byte_count.offset) / 4] = input.byteLength
+      this.bytes.set(input, base + layout.size)
+    })
+  }
+
+  grayscale(
+    data: Float32Array,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    foreground: RGBA | null,
+    background: RGBA | null,
+    supersampled: boolean,
+  ): void {
+    this.transaction(() => {
+      if (!(data instanceof Float32Array)) throw new TypeError("Grayscale input must be a Float32Array")
+      const samples = viewOf(data, Float32Array)
+      const layout = nativeLayouts.ot_scene_record_grayscale
+      const fields = layout.fields
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_GRAYSCALE, layout.size + samples.length * 4)
+      this.signed[(base + fields.x.offset) / 4] = toFFII32(x, "Grayscale x")
+      this.signed[(base + fields.y.offset) / 4] = toFFII32(y, "Grayscale y")
+      this.words[(base + fields.width.offset) / 4] = toSafeFFIU32Length(width, "Grayscale source width")
+      this.words[(base + fields.height.offset) / 4] = toSafeFFIU32Length(height, "Grayscale source height")
+      this.words[(base + fields.flags.offset) / 4] =
+        (foreground === null ? 0 : nativeConstants.OT_SCENE_RECORD_GRAYSCALE_FOREGROUND) |
+        (background === null ? 0 : nativeConstants.OT_SCENE_RECORD_GRAYSCALE_BACKGROUND) |
+        (toFFIBool(supersampled, "Grayscale supersampling")
+          ? nativeConstants.OT_SCENE_RECORD_GRAYSCALE_SUPERSAMPLED
+          : 0)
+      this.words[(base + fields.sample_count.offset) / 4] = samples.length
+      if (foreground !== null) contextBufferColor(foreground, this.colors, (base + fields.foreground.offset) / 2)
+      if (background !== null) contextBufferColor(background, this.colors, (base + fields.background.offset) / 2)
+      this.floats.set(samples, (base + layout.size) / 4)
+    })
+  }
+
+  colorMatrix(matrix: Float32Array, mask: Float32Array | null, strength: number, channel: number): void {
+    this.transaction(() => {
+      for (const value of [matrix, mask]) {
+        if (value !== null && !(value instanceof Float32Array))
+          throw new TypeError("Color matrix input must be a Float32Array")
+      }
+      if (matrix.length !== 16) throw new RangeError("Color matrix must contain 16 floats")
+      if (!Number.isFinite(strength)) throw new RangeError("Color matrix strength must be finite")
+      const cells = mask === null ? null : viewOf(mask, Float32Array)
+      const layout = nativeLayouts.ot_scene_record_color_matrix
+      const fields = layout.fields
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_COLOR_MATRIX, layout.size + (cells?.length ?? 0) * 4)
+      this.floats.set(viewOf(matrix, Float32Array), (base + fields.matrix.offset) / 4)
+      this.floats[(base + fields.strength.offset) / 4] = strength
+      this.words[(base + fields.channel.offset) / 4] = toSafeFFIU32Length(channel, "Color matrix channel")
+      this.words[(base + fields.has_mask.offset) / 4] = cells === null ? 0 : 1
+      this.words[(base + fields.mask_count.offset) / 4] = cells?.length ?? 0
+      if (cells) this.floats.set(cells, (base + layout.size) / 4)
+    })
+  }
+
+  /** Draw a text-buffer view, editor view, or scene node body. */
+  view(operation: "text" | "editor" | "scene", source: ContextObjectHandle, x: number, y: number): void {
+    this.transaction(() => {
+      const layout = nativeLayouts.ot_scene_record_view
+      const base = this.reserve(
+        operation === "text"
+          ? nativeConstants.OT_SCENE_RECORD_TEXT_VIEW
+          : operation === "editor"
+            ? nativeConstants.OT_SCENE_RECORD_EDITOR_VIEW
+            : nativeConstants.OT_SCENE_RECORD_SCENE_BODY,
+        layout.size,
+      )
+      this.encodeHandle(source, base + layout.fields.source.offset)
+      this.signed[(base + layout.fields.x.offset) / 4] = toFFII32(x, "View x")
+      this.signed[(base + layout.fields.y.offset) / 4] = toFFII32(y, "View y")
+    })
+  }
+
+  image(source: ContextImageHandle, options: NativeContextImageDraw): void {
+    this.transaction(() => {
+      const layout = nativeLayouts.ot_scene_record_image
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_IMAGE, layout.size)
+      this.encodeHandle(source, base + layout.fields.image.offset)
+      encodeImageDrawOptions(options, this.words, this.signed, base + layout.fields.options.offset)
+    })
+  }
+
+  unicode(
+    source: ContextUnicodeHandle,
+    index: number,
+    x: number,
+    y: number,
+    foreground: RGBA,
+    background: RGBA,
+    attributes: number,
+  ): void {
+    this.transaction(() => {
+      const layout = nativeLayouts.ot_scene_record_unicode
+      const fields = layout.fields
+      const base = this.reserve(nativeConstants.OT_SCENE_RECORD_UNICODE, layout.size)
+      this.encodeHandle(source, base + fields.unicode.offset)
+      this.words[(base + fields.index.offset) / 4] = toSafeFFIU32Length(index, "Unicode character index")
+      this.signed[(base + fields.x.offset) / 4] = toFFII32(x, "Unicode x")
+      this.signed[(base + fields.y.offset) / 4] = toFFII32(y, "Unicode y")
+      this.words[(base + fields.attributes.offset) / 4] = toSafeFFIU32Length(attributes, "Unicode attributes")
+      contextBufferColor(foreground, this.colors, (base + fields.foreground.offset) / 2)
+      contextBufferColor(background, this.colors, (base + fields.background.offset) / 2)
+    })
+  }
+
+  /** Runs one encoder. A call that throws leaves no partial record or slot header, so the hook can recover. */
+  private transaction(encode: () => void): void {
+    const length = this.length
+    const slot = this.pendingSlot
+    try {
+      encode()
+    } catch (error) {
+      this.length = length
+      this.pendingSlot = slot
+      throw error
+    }
+  }
+
+  private activeContext(): NativeContextHandle {
+    if (this.context === null) throw new Error("Paint hooks record only while the frame requests them")
+    return this.context
+  }
+
+  private encodeHandle(handle: ContextObjectHandle, offset: number): void {
+    const record = encodeContextHandle(this.activeContext(), handle, this.handleRecord.record, this.handleRecord.words)
+    this.bytes.set(new Uint8Array(record.buffer, record.byteOffset, record.byteLength), offset)
+  }
+
+  /** Append one zeroed record of at most size bytes and return its offset. */
+  private reserve(operation: number, size: number): number {
+    this.activeContext()
+    if (this.pendingSlot >= 0) {
+      const slot = nativeLayouts.ot_scene_record_slot
+      const base = this.append(nativeConstants.OT_SCENE_RECORD_SLOT, slot.size)
+      this.words[(base + slot.fields.slot.offset) / 4] = this.pendingSlot
+      this.words[(base + slot.fields.phase.offset) / 4] = this.pendingPhase
+      this.pendingSlot = -1
+    }
+    return this.append(operation, size)
+  }
+
+  private append(operation: number, size: number): number {
+    const total = (size + 7) & ~7
+    const base = this.length
+    const end = base + total
+    if (end > this.bytes.length) this.grow(end)
+    this.bytes.fill(0, base, end)
+    this.words[(base + recordHeader.size.offset) / 4] = total
+    this.words[(base + recordHeader.operation.offset) / 4] = operation
+    this.length = end
+    return base
+  }
+
+  /** Shrink a record reserved with an upper bound to its encoded end. */
+  private finish(base: number, end: number): void {
+    // A call that reentered the recorder while this record was encoding would be truncated here.
+    if (this.length !== base + this.words[(base + recordHeader.size.offset) / 4] || end > this.length) {
+      throw new Error("Paint recording changed while a record was encoding")
+    }
+    const total = (end - base + 7) & ~7
+    this.bytes.fill(0, end, base + total)
+    this.words[(base + recordHeader.size.offset) / 4] = total
+    this.length = base + total
+  }
+
+  private grow(need: number): void {
+    if (need > recordBytesMax) throw new RangeError(`Paint recording exceeds ${recordBytesMax} bytes`)
+    const next = new ArrayBuffer(Math.min(recordBytesMax, Math.max(need, this.bytes.length * 2)))
+    const bytes = new Uint8Array(next)
+    bytes.set(this.bytes.subarray(0, this.length))
+    this.buffer = next
+    this.bytes = bytes
+    this.words = new Uint32Array(next)
+    this.signed = new Int32Array(next)
+    this.floats = new Float32Array(next)
+    this.colors = new Uint16Array(next)
+  }
+}
+
+function recordedPixels(data: Uint8Array | PointerInput, length: number): Uint8Array {
+  if (typeof data === "number" || typeof data === "bigint") {
+    throw new TypeError("Paint hooks record pixel data from a Uint8Array, not a native address")
+  }
+  const input = sessionBytes(data, "Pixel buffer byte length")
+  const count = toSafeFFIU32Length(length, "Pixel buffer byte count")
+  if (count > input.byteLength) throw new RangeError("Pixel byte count exceeds the supplied view")
+  return input.subarray(0, count)
+}
+
+function isAttributeByte(value: number | null | undefined): boolean {
+  return Number.isInteger(value) && value! >= 0 && value! <= 0xff
+}
+
+function encodeEditorStyle(style: NativeEditorStyle): Uint32Array {
+  const layout = nativeLayouts.ot_editor_style
+  const record = new Uint32Array(layout.size / 4)
+  const colors = new Uint16Array(record.buffer)
+  const { fg, bg, attributes, suppliedAttributes } = style
+  record[layout.fields.struct_size.offset / 4] = layout.size
+  record[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+  if (fg != null) {
+    record[layout.fields.flags.offset / 4] |= NativeEditorStyleMask.Foreground
+    contextBufferColor(fg, colors, layout.fields.foreground.offset / 2)
+  }
+  if (bg != null) {
+    record[layout.fields.flags.offset / 4] |= NativeEditorStyleMask.Background
+    contextBufferColor(bg, colors, layout.fields.background.offset / 2)
+  }
+  if (attributes != null) {
+    record[layout.fields.flags.offset / 4] |= NativeEditorStyleMask.Attributes
+    record[layout.fields.attributes.offset / 4] = toSafeFFIU32Length(attributes, "Editor style attributes")
+  }
+  if (suppliedAttributes != null) {
+    // Both share one word; a value past a byte would become mask bits.
+    if (!isAttributeByte(attributes) || !isAttributeByte(suppliedAttributes)) {
+      throw new RangeError("Masked editor style attributes must be integers from 0 to 255")
+    }
+    record[layout.fields.flags.offset / 4] |= nativeConstants.OT_EDITOR_STYLE_ATTRIBUTE_MASK
+    record[layout.fields.attributes.offset / 4] |= suppliedAttributes << 16
+  }
+  return record
+}
+
+/** Converts drawing text as TextEncoder.encode did: undefined draws nothing and other values use ToString. */
+function drawTextString(text: unknown): string {
+  return typeof text === "string" ? text : text === undefined ? "" : `${text}`
+}
+
+/** A box title draws only when it is truthy, as it did before drawing records. */
+function drawRecordText(options: NativeBufferDraw): string {
+  if (options.operation === "text") return drawTextString(options.text)
+  return options.operation === "box" && options.text ? drawTextString(options.text) : ""
+}
+
+function drawRecordBottomTitle(options: NativeBufferDraw): string {
+  return options.operation === "box" && options.bottomTitle ? drawTextString(options.bottomTitle) : ""
+}
+
+const drawTextEncoder = new TextEncoder()
+// Markdown text is the engine's bytes as given: a leading U+FEFF is text, not a byte order mark.
+const markdownDecoder = new TextDecoder("utf-8", { ignoreBOM: true })
+
+/** Encodes into a buffer sized to the native limit; text that does not fit exceeds that limit. */
+function encodeDrawText(text: string, output: Uint8Array): number {
+  if (text === "") return 0
+  const { read, written } = drawTextEncoder.encodeInto(text, output)
+  if (read !== text.length) throw new RangeError("Buffer text exceeds the native byte limit")
+  return written
+}
+
+function createEditorSelectionRecord() {
+  const record = createContextRecord(nativeLayouts.ot_editor_selection)
+  return {
+    record,
+    coordinates: new Int32Array(record.buffer),
+    colors: new Uint16Array(record.buffer),
+    changed: new Uint32Array(1),
+  }
+}
+
+function encodeEditorSelection(
+  selection: NativeEditorSelection,
+  scratch: ReturnType<typeof createEditorSelectionRecord> = createEditorSelectionRecord(),
+): Uint32Array {
+  const layout = nativeLayouts.ot_editor_selection
+  const { record, coordinates, colors } = scratch
+  record.fill(0, layout.fields.operation.offset / 4)
+  record[layout.fields.operation.offset / 4] = toSafeFFIU32Length(selection.operation, "Editor selection operation")
+  record[layout.fields.behavior.offset / 4] = toSafeFFIU32Length(selection.behavior ?? 0, "Editor selection behavior")
+  record[layout.fields.start.offset / 4] = toSafeFFIU32Length(selection.start ?? 0, "Editor selection start")
+  record[layout.fields.end.offset / 4] = toSafeFFIU32Length(selection.end ?? 0, "Editor selection end")
+  coordinates[layout.fields.anchor_x.offset / 4] = toFFII32(selection.anchorX ?? 0, "Editor selection anchorX")
+  coordinates[layout.fields.anchor_y.offset / 4] = toFFII32(selection.anchorY ?? 0, "Editor selection anchorY")
+  coordinates[layout.fields.focus_x.offset / 4] = toFFII32(selection.focusX ?? 0, "Editor selection focusX")
+  coordinates[layout.fields.focus_y.offset / 4] = toFFII32(selection.focusY ?? 0, "Editor selection focusY")
+  record[layout.fields.update_cursor.offset / 4] = toFFIBool(
+    selection.updateCursor ?? false,
+    "Editor selection updateCursor",
+  )
+  record[layout.fields.follow_cursor.offset / 4] = toFFIBool(
+    selection.followCursor ?? false,
+    "Editor selection followCursor",
+  )
+  const { fg, bg } = selection
+  if (fg != null) {
+    record[layout.fields.flags.offset / 4] |= NativeEditorStyleMask.Foreground
+    contextBufferColor(fg, colors, layout.fields.foreground.offset / 2)
+  }
+  if (bg != null) {
+    record[layout.fields.flags.offset / 4] |= NativeEditorStyleMask.Background
+    contextBufferColor(bg, colors, layout.fields.background.offset / 2)
+  }
+  return record
+}
+
+function encodeContextHighlight(highlight: Highlight | undefined): Uint32Array | null {
+  if (highlight === undefined) return null
+  const layout = nativeLayouts.ot_edit_highlight
+  const record = new Uint32Array(layout.size / 4)
+  record[layout.fields.start.offset / 4] = toSafeFFIU32Length(highlight.start, "Highlight start")
+  record[layout.fields.end.offset / 4] = toSafeFFIU32Length(highlight.end, "Highlight end")
+  record[layout.fields.style_id.offset / 4] = toSafeFFIU32Length(highlight.styleId, "Highlight style ID")
+  record[layout.fields.priority.offset / 4] = toSafeFFIU32Length(highlight.priority ?? 0, "Highlight priority")
+  record[layout.fields.ref.offset / 4] = toSafeFFIU32Length(highlight.hlRef ?? 0, "Highlight reference")
+  return record
+}
+
+function decodeContextHighlights(records: Uint32Array): Highlight[] {
+  const layout = nativeLayouts.ot_edit_highlight
+  const highlights: Highlight[] = []
+  for (let offset = 0; offset < records.length; offset += layout.size / 4) {
+    highlights.push({
+      start: records[offset + layout.fields.start.offset / 4],
+      end: records[offset + layout.fields.end.offset / 4],
+      styleId: records[offset + layout.fields.style_id.offset / 4],
+      priority: records[offset + layout.fields.priority.offset / 4],
+      hlRef: records[offset + layout.fields.ref.offset / 4],
+    })
+  }
+  return highlights
+}
+
+function decodeContextTextLines(lines: Uint32Array, widthColsMax: number): LineInfo {
+  const layout = nativeLayouts.ot_scene_text_line
+  const info: LineInfo = {
+    lineStartCols: [],
+    lineWidthCols: [],
+    lineWidthColsMax: widthColsMax,
+    lineSources: [],
+    lineWraps: [],
+  }
+  for (let index = 0; index < lines.length; index += layout.size / 4) {
+    info.lineStartCols.push(lines[index + layout.fields.start_cols.offset / 4])
+    info.lineWidthCols.push(lines[index + layout.fields.width_cols.offset / 4])
+    info.lineSources.push(lines[index + layout.fields.source_line.offset / 4])
+    info.lineWraps.push(lines[index + layout.fields.wrap_index.offset / 4])
+  }
+  return info
+}
+
+const WIDTH_METHOD_IDS = new Map<string, number>([
+  ["wcwidth", nativeConstants.OT_WIDTH_METHOD_WCWIDTH],
+  ["unicode", nativeConstants.OT_WIDTH_METHOD_UNICODE],
+  ["no-zwj", nativeConstants.OT_WIDTH_METHOD_NO_ZWJ],
+  ["unicode-wide", nativeConstants.OT_WIDTH_METHOD_UNICODE_WIDE],
+])
+
+function widthMethodId(widthMethod: WidthMethod | "no-zwj", label: string): number {
+  const id = WIDTH_METHOD_IDS.get(widthMethod)
+  if (id === undefined) throw new TypeError(`Unknown Context ${label} width method`)
+  return id
+}
+
+function widthMethodFromCode(code: number): WidthMethod {
+  if (code === nativeConstants.OT_WIDTH_METHOD_WCWIDTH) return "wcwidth"
+  return code === nativeConstants.OT_WIDTH_METHOD_UNICODE_WIDE ? "unicode-wide" : "unicode"
+}
+
+const yogaSymbols = {
+  yogaConfigCreateChecked: { args: ["buffer"], returns: "u32" },
+  yogaConfigFreeChecked: { args: ["ptr"], returns: "u32" },
+  yogaConfigSetCallbacks: { args: ["ptr", "ptr", "ptr"], returns: "bool" },
+  yogaConfigClearCallbacks: { args: ["ptr", "ptr"], returns: "bool" },
+  yogaConfigSetUseWebDefaultsChecked: { args: ["ptr", "u32"], returns: "u32" },
+  yogaConfigGetUseWebDefaults: { args: ["ptr"], returns: "bool" },
+  yogaConfigSetPointScaleFactorChecked: { args: ["ptr", "f32"], returns: "u32" },
+  yogaConfigGetPointScaleFactor: { args: ["ptr"], returns: "f32" },
+  yogaConfigSetErrataChecked: { args: ["ptr", "u32"], returns: "u32" },
+  yogaConfigGetErrata: { args: ["ptr"], returns: "u32" },
+  yogaConfigSetExperimentalFeatureEnabledChecked: { args: ["ptr", "u32", "u32"], returns: "u32" },
+  yogaConfigIsExperimentalFeatureEnabledChecked: { args: ["ptr", "u32", "buffer"], returns: "u32" },
+  yogaNodeCreateForOpenTUIChecked: { args: ["buffer"], returns: "u32" },
+  yogaNodeCreateWithConfigChecked: { args: ["ptr", "buffer"], returns: "u32" },
+  yogaNodeGetConfig: { args: ["ptr"], returns: "ptr" },
+  yogaNodeFreeChecked: { args: ["ptr"], returns: "u32" },
+  yogaNodeFreeRecursiveChecked: { args: ["ptr"], returns: "u32" },
+  yogaNodeResetChecked: { args: ["ptr"], returns: "u32" },
+  yogaNodeCopyStyleChecked: { args: ["ptr", "ptr"], returns: "u32" },
+  yogaNodeInsertChildChecked: { args: ["ptr", "ptr", "u32"], returns: "u32" },
+  yogaNodeRemoveChildChecked: { args: ["ptr", "ptr"], returns: "u32" },
+  yogaNodeRemoveAllChildrenChecked: { args: ["ptr"], returns: "u32" },
+  yogaNodeGetChildChecked: { args: ["ptr", "u32", "buffer"], returns: "u32" },
+  yogaNodeGetChildCount: { args: ["ptr"], returns: "u32" },
+  yogaNodeGetParent: { args: ["ptr"], returns: "ptr" },
+  yogaNodeCalculateLayoutChecked: { args: ["ptr", "f32", "f32", "u32"], returns: "u32" },
+  yogaNodeIsDirtyChecked: { args: ["ptr", "buffer"], returns: "u32" },
+  yogaNodeMarkDirtyChecked: { args: ["ptr"], returns: "u32" },
+  yogaNodeGetHasNewLayoutChecked: { args: ["ptr", "buffer"], returns: "u32" },
+  yogaNodeSetHasNewLayoutChecked: { args: ["ptr", "u32"], returns: "u32" },
+  yogaNodeSetIsReferenceBaselineChecked: { args: ["ptr", "u32"], returns: "u32" },
+  yogaNodeIsReferenceBaselineChecked: { args: ["ptr", "buffer"], returns: "u32" },
+  yogaNodeSetAlwaysFormsContainingBlockChecked: { args: ["ptr", "u32"], returns: "u32" },
+  yogaNodeGetAlwaysFormsContainingBlockChecked: { args: ["ptr", "buffer"], returns: "u32" },
+  yogaNodeGetComputedLayoutChecked: { args: ["ptr", "buffer"], returns: "u32" },
+  yogaNodeLayoutGetEdgeChecked: { args: ["ptr", "u32", "u32", "buffer"], returns: "u32" },
+  yogaNodeStyleSetEnumChecked: { args: ["ptr", "u32", "u32"], returns: "u32" },
+  yogaNodeStyleGetEnumChecked: { args: ["ptr", "u32", "buffer"], returns: "u32" },
+  yogaNodeStyleSetFloatChecked: { args: ["ptr", "u32", "f32"], returns: "u32" },
+  yogaNodeStyleGetFloatChecked: { args: ["ptr", "u32", "buffer"], returns: "u32" },
+  yogaNodeStyleSetBorderChecked: { args: ["ptr", "u32", "f32"], returns: "u32" },
+  yogaNodeStyleGetBorderChecked: { args: ["ptr", "u32", "buffer"], returns: "u32" },
+  yogaNodeStyleSetValueChecked: { args: ["ptr", "u32", "u32", "u32", "f32"], returns: "u32" },
+  yogaNodeStyleGetValueChecked: { args: ["ptr", "u32", "u32", "buffer"], returns: "u32" },
+  yogaNodeSetMeasureFuncChecked: { args: ["ptr", "u32"], returns: "u32" },
+  yogaNodeUnsetMeasureFuncChecked: { args: ["ptr"], returns: "u32" },
+  yogaNodeHasMeasureFunc: { args: ["ptr"], returns: "bool" },
+  yogaNodeSetDirtiedFuncChecked: { args: ["ptr", "u32"], returns: "u32" },
+  yogaNodeUnsetDirtiedFuncChecked: { args: ["ptr"], returns: "u32" },
+  yogaStoreMeasureResult: { args: ["ptr", "f32", "f32"], returns: "void" },
+} as const
+
+function getOpenTUILib(libPath?: string) {
+  const resolvedLibPath = libPath || targetLibPath
+  if (!resolvedLibPath) {
+    throw (
+      targetLibError ??
+      new Error(`OpenTUI is not supported on the current platform: ${process.platform}-${process.arch}`)
+    )
+  }
+
+  const rawSymbols = dlopen(resolvedLibPath, {
+    ...nativeSymbols,
+    // Logging
+    setLogCallback: {
+      args: ["ptr"],
+      returns: "void",
+    },
+
+    getArenaAllocatedBytes: {
+      args: [],
+      returns: "u64",
+    },
+    getBuildOptions: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    getAllocatorStats: {
+      args: ["ptr"],
+      returns: "void",
+    },
+
+    imageRetainIccCache: { args: [], returns: "void" },
+    imageReleaseIccCache: { args: [], returns: "void" },
+
+    ...yogaSymbols,
+
+    // Audio
+    createAudioEngine: {
+      args: ["ptr", "ptr"],
+      returns: "i32",
+    },
+    audioRefreshPlaybackDevices: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    audioGetPlaybackDeviceCount: {
+      args: ["ptr"],
+      returns: "u32",
+    },
+    audioGetPlaybackDeviceName: {
+      args: ["ptr", "u32", "buffer", "u32"],
+      returns: "u32",
+    },
+    audioIsPlaybackDeviceDefault: {
+      args: ["ptr", "u32"],
+      returns: "bool",
+    },
+    audioSelectPlaybackDevice: {
+      args: ["ptr", "u32"],
+      returns: "i32",
+    },
+    audioClearPlaybackDeviceSelection: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    audioRefreshCaptureDevices: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    audioGetCaptureDeviceCount: {
+      args: ["ptr"],
+      returns: "u32",
+    },
+    audioGetCaptureDeviceName: {
+      args: ["ptr", "u32", "buffer", "u32"],
+      returns: "u32",
+    },
+    audioIsCaptureDeviceDefault: {
+      args: ["ptr", "u32"],
+      returns: "bool",
+    },
+    audioSelectCaptureDevice: {
+      args: ["ptr", "u32"],
+      returns: "i32",
+    },
+    audioClearCaptureDeviceSelection: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    audioStartCapture: {
+      args: ["ptr", "ptr", "u32", "u32"],
+      returns: "i32",
+    },
+    audioStopCapture: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    audioIsCaptureRunning: {
+      args: ["ptr"],
+      returns: "bool",
+    },
+    audioReadCapture: {
+      args: ["ptr", "buffer", "u32", "u32", "ptr"],
+      returns: "i32",
+    },
+    audioGetCaptureStats: {
+      args: ["ptr", "ptr"],
+      returns: "i32",
+    },
+    audioStart: {
+      args: ["ptr", "ptr"],
+      returns: "i32",
+    },
+    audioStartMixer: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    audioStop: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    audioCreateStream: {
+      args: ["ptr", "buffer", "buffer"],
+      returns: "i32",
+    },
+    audioWriteStream: {
+      args: ["ptr", "u32", "buffer", "u32"],
+      returns: "i32",
+    },
+    audioEndStream: {
+      args: ["ptr", "u32"],
+      returns: "i32",
+    },
+    audioRestartStream: {
+      args: ["ptr", "u32"],
+      returns: "i32",
+    },
+    audioSetStreamVolume: {
+      args: ["ptr", "u32", "f32"],
+      returns: "i32",
+    },
+    audioSetStreamPan: {
+      args: ["ptr", "u32", "f32"],
+      returns: "i32",
+    },
+    audioSetStreamGroup: {
+      args: ["ptr", "u32", "u32"],
+      returns: "i32",
+    },
+    audioGetStreamStats: {
+      args: ["ptr", "u32", "buffer"],
+      returns: "i32",
+    },
+    audioCloseStream: {
+      args: ["ptr", "u32", "u32", "buffer"],
+      returns: "i32",
+    },
+    audioLoad: {
+      args: ["ptr", "buffer", "u32", "ptr"],
+      returns: "i32",
+    },
+    audioUnload: {
+      args: ["ptr", "u32"],
+      returns: "i32",
+    },
+    audioPlay: {
+      args: ["ptr", "u32", "ptr", "ptr"],
+      returns: "i32",
+    },
+    audioStopVoice: {
+      args: ["ptr", "u32"],
+      returns: "i32",
+    },
+    audioSetVoiceGroup: {
+      args: ["ptr", "u32", "u32"],
+      returns: "i32",
+    },
+    audioCreateGroup: {
+      args: ["ptr", "buffer", "u32", "ptr"],
+      returns: "i32",
+    },
+    audioSetGroupVolume: {
+      args: ["ptr", "u32", "f32"],
+      returns: "i32",
+    },
+    audioSetMasterVolume: {
+      args: ["ptr", "f32"],
+      returns: "i32",
+    },
+    audioMixToBuffer: {
+      args: ["ptr", "buffer", "u32", "u8"],
+      returns: "i32",
+    },
+    audioEnableTap: {
+      args: ["ptr", "u8", "u32"],
+      returns: "i32",
+    },
+    audioReadTap: {
+      args: ["ptr", "buffer", "u32", "u8", "ptr"],
+      returns: "i32",
+    },
+    audioGetStats: {
+      args: ["ptr", "ptr"],
+      returns: "i32",
+    },
+
+    // NativeSpanFeed
+    createNativeSpanFeed: {
+      args: ["ptr"],
+      returns: "ptr",
+    },
+    attachNativeSpanFeed: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    destroyNativeSpanFeed: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    streamWrite: {
+      args: ["ptr", "ptr", "u32"],
+      returns: "i32",
+    },
+    streamCommit: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    streamDrainSpans: {
+      args: ["ptr", "buffer", "u32"],
+      returns: "u32",
+    },
+    streamReleaseSpan: {
+      args: ["ptr", "u32", "u64"],
+      returns: "i32",
+    },
+    streamClose: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    streamReserve: {
+      args: ["ptr", "u32", "ptr"],
+      returns: "i32",
+    },
+    streamCommitReserved: {
+      args: ["ptr", "u32"],
+      returns: "i32",
+    },
+    streamGetStats: {
+      args: ["ptr", "ptr"],
+      returns: "i32",
+    },
+    streamSetCallback: {
+      args: ["ptr", "ptr"],
+      returns: "void",
+    },
+  })
+
+  const abiVersion = rawSymbols.symbols.ot_context_abi_version()
+  if (abiVersion !== nativeConstants.OT_CONTEXT_ABI_VERSION) {
+    rawSymbols.close()
+    throw new Error(
+      `OpenTUI native library at ${JSON.stringify(resolvedLibPath)} has context ABI version ${abiVersion}, expected ${nativeConstants.OT_CONTEXT_ABI_VERSION}`,
+    )
+  }
+
+  if (env.OTUI_DEBUG_FFI || env.OTUI_TRACE_FFI) {
+    return {
+      ...rawSymbols,
+      symbols: convertToDebugSymbols(rawSymbols.symbols),
+    }
+  }
+
+  return rawSymbols
+}
+
+function convertToDebugSymbols<T extends Record<string, any>>(symbols: T): T {
+  // Initialize global state on first call
+  if (!globalTraceSymbols) {
+    globalTraceSymbols = {}
+  }
+
+  // Initialize global debug log path on first call
+  if (env.OTUI_DEBUG_FFI && !globalFFILogPath) {
+    const now = new Date()
+    const timestamp = now.toISOString().replace(/[:.]/g, "-").replace(/T/, "_").split("Z")[0]
+    globalFFILogPath = `ffi_otui_debug_${timestamp}.log`
+  }
+
+  const debugSymbols: Record<string, any> = {}
+
+  Object.entries(symbols).forEach(([key, value]) => {
+    debugSymbols[key] = value
+  })
+
+  if (env.OTUI_DEBUG_FFI && globalFFILogPath) {
+    const logPath = globalFFILogPath
+    let loggingDisabled = false
+    const writeSync = (msg: string) => {
+      if (loggingDisabled) return
+      try {
+        writeFileSync(logPath, msg + "\n", { flag: "a" })
+      } catch {
+        // Logging must not hide a committed native result.
+        loggingDisabled = true
+      }
+    }
+
+    Object.entries(symbols).forEach(([key, value]) => {
+      if (typeof value === "function") {
+        debugSymbols[key] = (...args: any[]) => {
+          writeSync(`${key}(${args.map((arg) => String(arg)).join(", ")})`)
+          const result = value(...args)
+          writeSync(`${key} returned: ${String(result)}`)
+          return result
+        }
+      }
+    })
+  }
+
+  if (env.OTUI_TRACE_FFI) {
+    Object.entries(symbols).forEach(([key, value]) => {
+      if (typeof value === "function") {
+        // Initialize trace array for this symbol if not exists
+        if (!globalTraceSymbols![key]) {
+          globalTraceSymbols![key] = []
+        }
+
+        const originalFunc = debugSymbols[key]
+        debugSymbols[key] = (...args: any[]) => {
+          const start = performance.now()
+          const result = originalFunc(...args)
+          const end = performance.now()
+          globalTraceSymbols![key].push(end - start)
+          return result
+        }
+      }
+    })
+  }
+
+  // Register exit handler only once
+  if ((env.OTUI_DEBUG_FFI || env.OTUI_TRACE_FFI) && !exitHandlerRegistered) {
+    exitHandlerRegistered = true
+
+    process.on("exit", () => {
+      if (globalTraceSymbols) {
+        const allStats: Array<{
+          name: string
+          count: number
+          total: number
+          average: number
+          min: number
+          max: number
+          median: number
+          p90: number
+          p99: number
+        }> = []
+
+        for (const [key, timings] of Object.entries(globalTraceSymbols)) {
+          if (!Array.isArray(timings) || timings.length === 0) {
+            continue
+          }
+
+          const sortedTimings = [...timings].sort((a, b) => a - b)
+          const count = sortedTimings.length
+
+          const total = sortedTimings.reduce((acc, t) => acc + t, 0)
+          const average = total / count
+          const min = sortedTimings[0]
+          const max = sortedTimings[count - 1]
+
+          const medianIndex = Math.floor(count / 2)
+          const p90Index = Math.floor(count * 0.9)
+          const p99Index = Math.floor(count * 0.99)
+
+          const median = sortedTimings[medianIndex]
+          const p90 = sortedTimings[Math.min(p90Index, count - 1)]
+          const p99 = sortedTimings[Math.min(p99Index, count - 1)]
+
+          allStats.push({
+            name: key,
+            count,
+            total,
+            average,
+            min,
+            max,
+            median,
+            p90,
+            p99,
+          })
+        }
+
+        allStats.sort((a, b) => b.total - a.total)
+
+        const lines: string[] = []
+        lines.push("\n--- OpenTUI FFI Call Performance ---")
+        lines.push("Sorted by total time spent (descending)")
+        lines.push(
+          "-------------------------------------------------------------------------------------------------------------------------",
+        )
+
+        if (allStats.length === 0) {
+          lines.push("No trace data collected or all symbols had zero calls.")
+        } else {
+          const nameHeader = "Symbol"
+          const callsHeader = "Calls"
+          const totalHeader = "Total (ms)"
+          const avgHeader = "Avg (ms)"
+          const minHeader = "Min (ms)"
+          const maxHeader = "Max (ms)"
+          const medHeader = "Med (ms)"
+          const p90Header = "P90 (ms)"
+          const p99Header = "P99 (ms)"
+
+          const nameWidth = Math.max(nameHeader.length, ...allStats.map((s) => s.name.length))
+          const countWidth = Math.max(callsHeader.length, ...allStats.map((s) => String(s.count).length))
+          const totalWidth = Math.max(totalHeader.length, ...allStats.map((s) => s.total.toFixed(2).length))
+          const avgWidth = Math.max(avgHeader.length, ...allStats.map((s) => s.average.toFixed(2).length))
+          const statWidthMin = Math.max(minHeader.length, ...allStats.map((s) => s.min.toFixed(2).length))
+          const statWidthMax = Math.max(maxHeader.length, ...allStats.map((s) => s.max.toFixed(2).length))
+          const medianWidth = Math.max(medHeader.length, ...allStats.map((s) => s.median.toFixed(2).length))
+          const p90Width = Math.max(p90Header.length, ...allStats.map((s) => s.p90.toFixed(2).length))
+          const p99Width = Math.max(p99Header.length, ...allStats.map((s) => s.p99.toFixed(2).length))
+
+          lines.push(
+            `${nameHeader.padEnd(nameWidth)} | ` +
+              `${callsHeader.padStart(countWidth)} | ` +
+              `${totalHeader.padStart(totalWidth)} | ` +
+              `${avgHeader.padStart(avgWidth)} | ` +
+              `${minHeader.padStart(statWidthMin)} | ` +
+              `${maxHeader.padStart(statWidthMax)} | ` +
+              `${medHeader.padStart(medianWidth)} | ` +
+              `${p90Header.padStart(p90Width)} | ` +
+              `${p99Header.padStart(p99Width)}`,
+          )
+          lines.push(
+            `${"-".repeat(nameWidth)}-+-${"-".repeat(countWidth)}-+-${"-".repeat(totalWidth)}-+-${"-".repeat(avgWidth)}-+-${"-".repeat(statWidthMin)}-+-${"-".repeat(statWidthMax)}-+-${"-".repeat(medianWidth)}-+-${"-".repeat(p90Width)}-+-${"-".repeat(p99Width)}`,
+          )
+
+          allStats.forEach((stat) => {
+            lines.push(
+              `${stat.name.padEnd(nameWidth)} | ` +
+                `${String(stat.count).padStart(countWidth)} | ` +
+                `${stat.total.toFixed(2).padStart(totalWidth)} | ` +
+                `${stat.average.toFixed(2).padStart(avgWidth)} | ` +
+                `${stat.min.toFixed(2).padStart(statWidthMin)} | ` +
+                `${stat.max.toFixed(2).padStart(statWidthMax)} | ` +
+                `${stat.median.toFixed(2).padStart(medianWidth)} | ` +
+                `${stat.p90.toFixed(2).padStart(p90Width)} | ` +
+                `${stat.p99.toFixed(2).padStart(p99Width)}`,
+            )
+          })
+        }
+        lines.push(
+          "-------------------------------------------------------------------------------------------------------------------------",
+        )
+
+        const output = lines.join("\n")
+        console.log(output)
+
+        try {
+          const now = new Date()
+          const timestamp = now.toISOString().replace(/[:.]/g, "-").replace(/T/, "_").split("Z")[0]
+          const traceFilePath = `ffi_otui_trace_${timestamp}.log`
+          void writeFile(traceFilePath, output).catch((error) => {
+            console.error("Failed to write FFI trace file:", error)
+          })
+        } catch (e) {
+          console.error("Failed to write FFI trace file:", e)
+        }
+      }
+    })
+  }
+
+  return debugSymbols as T
+}
+
+// Log levels matching Zig's LogLevel enum
+export enum LogLevel {
+  Error = 0,
+  Warn = 1,
+  Info = 2,
+  Debug = 3,
+}
+
+// Indexed by LogLevel.
+const LOG_METHODS = ["error", "warn", "info", "debug"] as const
+
+/** Native destroy symbols that take a Context and one object handle. */
+type ContextObjectDestroySymbol =
+  | "ot_buffer_destroy"
+  | "ot_edit_buffer_destroy"
+  | "ot_editor_view_destroy"
+  | "ot_embedded_terminal_destroy"
+  | "ot_image_destroy"
+  | "ot_markdown_destroy"
+  | "ot_session_destroy"
+  | "ot_syntax_style_destroy"
+  | "ot_text_buffer_destroy"
+  | "ot_text_buffer_view_destroy"
+  | "ot_unicode_destroy"
+
+/**
+ * VisualCursor represents a cursor position with both visual and logical coordinates.
+ * Visual coordinates (visualRow, visualCol) are VIEWPORT-RELATIVE.
+ * This means visualRow=0 is the first visible line in the viewport, not the first line in the document.
+ * Logical coordinates (logicalRow, logicalCol) are document-absolute.
+ */
+export interface VisualCursor {
+  /** Wrapped row relative to the top of the viewport. */
+  visualRow: number
+  /** Display-cell column relative to the viewport. */
+  visualCol: number
+  /** Zero-based logical line in the document. */
+  logicalRow: number
+  /** Display-cell column relative to the logical line start. */
+  logicalCol: number
+  /** Display cells from the document start, counting each newline as one. */
+  offset: number
+}
+
+export interface LogicalCursor {
+  /** Zero-based logical line in the document. */
+  row: number
+  /** Display cells from the logical line start. */
+  col: number
+  /** Display cells from the document start, counting each newline as one. */
+  offset: number
+}
+
+export interface MeasureResult {
+  lineCount: number
+  widthColsMax: number
+}
+
+export interface CursorState {
+  x: number
+  y: number
+  visible: boolean
+  style: CursorStyle
+  blinking: boolean
+  color: RGBA
+}
+
+export type NativeSpanFeedEventHandler = (eventId: number, arg0: Pointer, arg1: number | bigint) => void
+
+export type NativeBufferedOutput = "stdout" | "memory"
+
+export interface NativeYogaLayout {
+  left: number
+  top: number
+  right: number
+  bottom: number
+  width: number
+  height: number
+}
+
+export type NativeYogaMeasureCallback = (
+  node: Pointer | null,
+  width: number,
+  widthMode: number,
+  height: number,
+  heightMode: number,
+) => void
+
+export type NativeYogaDirtiedCallback = (node: Pointer | null) => void
+
+export interface AudioEngineLib extends Pick<
+  FFIRenderLib,
+  Extract<keyof FFIRenderLib, `audio${string}` | "createAudioEngine" | "destroyAudioEngine">
+> {}
+
+export type RenderLib = Pick<FFIRenderLib, keyof FFIRenderLib>
+
+export class FFIRenderLib {
+  private bufferDrawRecord: ReturnType<typeof createBufferDrawRecord> | undefined
+  private sceneLayoutRecord: ReturnType<typeof createSceneLayoutRecord> | undefined
+  private sceneFrameRecord: ReturnType<typeof createSceneFrameRecord> | undefined = createSceneFrameRecord()
+  private scenePaintSlots = new BigUint64Array((nativeLayouts.ot_scene_paint_slot.size * 16) / 8)
+  private sceneCreateRecord: ReturnType<typeof createSceneNodeRecord> | undefined = createSceneNodeRecord()
+  private sceneDestroyHandle: ReturnType<typeof createContextHandleRecord> | undefined = createContextHandleRecord()
+  private sceneMoveRecord: ReturnType<typeof createSceneNodeRecord> | undefined = createSceneNodeRecord()
+  private sceneHooksRecord: ReturnType<typeof createSceneHooksRecord> | undefined = createSceneHooksRecord()
+  private sceneFlushApplied: Uint32Array | undefined = new Uint32Array(1)
+  private editorSelectionRecord: ReturnType<typeof createEditorSelectionRecord> | undefined =
+    createEditorSelectionRecord()
+  // Info reads never call back into JavaScript, so one output record serves every read.
+  private readonly editorViewInfoRecord = createContextRecord(nativeLayouts.ot_editor_view_info)
+  // Kept between mark queries, which decode it before the next call.
+  private markRecords = new Uint32Array((16 * nativeLayouts.ot_edit_mark.size) / 4)
+  private readonly videoStateRecord = new Uint8Array(nativeLayouts.ot_video_state.size)
+  private readonly videoStateView = new DataView(this.videoStateRecord.buffer)
+  private readonly selectionResetRecord = encodeEditorSelection({ operation: NativeEditorSelectionOperation.Reset })
+  private readonly localSelectionResetRecord = encodeEditorSelection({
+    operation: NativeEditorSelectionOperation.LocalReset,
+  })
+  private readonly selectionResetChanged = new Uint32Array(1)
+  private readonly hitTestOutput = new Uint32Array(1)
+  private readonly bufferStackInput = new Float32Array(1)
+  private readonly bufferStackOutput = new Float32Array(1)
+  private readonly drawTextBytes = new Uint8Array(NATIVE_BUFFER_TEXT_BYTES_MAX)
+  private readonly drawBottomBytes = new Uint8Array(NATIVE_BUFFER_TEXT_BYTES_MAX)
+  private opentui: ReturnType<typeof getOpenTUILib>
+  private iccCacheClient = false
+  // Layout reads are synchronous and non-reentrant. Retain one backing buffer so
+  // Node does not allocate and resolve a new output pointer for every node.
+  private readonly yogaLayout = new Float32Array(6)
+  private readonly yogaU32 = new Uint32Array(1)
+  private readonly yogaF32 = new Float32Array(1)
+  private readonly yogaU64 = new BigUint64Array(1)
+  private yogaHost?: YogaHost
+  private readonly ffiStructStorage = {
+    audioStreamStats: {
+      ...allocFFIStruct(AudioStreamStatsStruct),
+      result: {
+        bytesReceived: 0n,
+        framesDecoded: 0n,
+        framesPlayed: 0n,
+        state: 0,
+        sampleRate: 0,
+        channels: 0,
+        bufferedFrames: 0,
+        capacityFrames: 0,
+        underruns: 0,
+        errorCode: 0,
+        readyGeneration: 0,
+      } as NativeAudioStreamStats,
+    },
+  }
+  private disposed = false
+  private nativeContexts = new Map<NativeContextHandle, Pointer>()
+  private contextEditEvents = new Map<
+    NativeContextHandle,
+    {
+      callback: FFICallbackInstance
+      buffers: Map<
+        number,
+        { handle: ContextEditBufferHandle; listeners: Set<{ handler: (event: NativeEditEventName) => void }> }
+      >
+    }
+  >()
+  private sceneMeasures = new Map<
+    NativeContextHandle,
+    {
+      callback: FFICallbackInstance
+      nodes: Map<number, { handle: SceneNodeHandle; measure: MeasureFunction }>
+    }
+  >()
+  private clipboardServices = new Map<ClipboardServiceHandle, NativeContextHandle>()
+  private clipboardOperations = new Map<
+    ClipboardOperationHandle,
+    { service: ClipboardServiceHandle; handle: BigUint64Array }
+  >()
+  private audioEngines = new Map<AudioEngineHandle, NativeContextHandle>()
+  // Measures without an edit buffer share this Context. The library owns it, so dispose releases it.
+  private editMeasureContext?: NativeContextHandle
+  private readonly invalidStandaloneHandle = new BigUint64Array(nativeLayouts.ot_handle.size / 8)
+  public readonly encoder: TextEncoder = new TextEncoder()
+  private readonly emptyBytes = new Uint8Array(0)
+  public readonly decoder: TextDecoder = new TextDecoder()
+  private readonly textDecoder: TextDecoder = new TextDecoder("utf-8", { ignoreBOM: true })
+  private logCallbackWrapper: FFICallbackInstance | null = null
+  private diagnosticDrain?: ReturnType<typeof createDiagnosticDrainRecord>
+  private nativeSpanFeedCallbackWrapper: FFICallbackInstance | null = null
+  private nativeSpanFeedHandlers = new Map<Pointer, NativeSpanFeedEventHandler>()
+
+  public createContext(options: NativeContextOptions): NativeContextHandle {
+    const layout = nativeLayouts.ot_context_options
+    const record = createContextRecord(layout)
+    record[layout.fields.object_capacity.offset / 4] = toSafeFFIU32Length(
+      options.objectCapacity,
+      "Context objectCapacity",
+    )
+    record[layout.fields.render_cells_max.offset / 4] = toSafeFFIU32Length(
+      options.renderCellsMax,
+      "Context renderCellsMax",
+    )
+    const output = new BigUint64Array(1)
+    const context = Object.freeze({}) as NativeContextHandle
+    if (this.disposed) throw new Error("OpenTUI native library is disposed")
+    nativeResult("ot_context_create", this.opentui.symbols.ot_context_create(record, output))
+    this.nativeContexts.set(context, toPointer(output[0]))
+    return context
+  }
+
+  private nativeContextPointer(context: NativeContextHandle, operation: string): Pointer {
+    // Resolve after encoding caller records: their getters can destroy the context.
+    const pointer = this.nativeContexts.get(context)
+    if (pointer === undefined) throw new NativeError(operation, NativeStatus.WrongContext)
+    return pointer
+  }
+
+  public destroyContext(context: NativeContextHandle): void {
+    this.getYogaHost().assertMutable()
+    this.releaseContext(context)
+  }
+
+  private releaseContext(context: NativeContextHandle): void {
+    const pointer = this.nativeContextPointer(context, "ot_context_destroy")
+    nativeResult("ot_context_destroy", this.opentui.symbols.ot_context_destroy(pointer))
+    this.nativeContexts.delete(context)
+    this.sceneMeasures.get(context)?.callback.close()
+    this.sceneMeasures.delete(context)
+    const events = this.contextEditEvents.get(context)
+    if (events) {
+      events.callback.close()
+      for (const entry of events.buffers.values()) entry.listeners.clear()
+      events.buffers.clear()
+    }
+    this.contextEditEvents.delete(context)
+  }
+
+  /** Destroys one Context object through the native destroy symbol of its kind. */
+  private destroyContextObject(
+    context: NativeContextHandle,
+    object: ContextObjectHandle,
+    operation: ContextObjectDestroySymbol,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, object)
+    const pointer = this.nativeContextPointer(context, operation)
+    nativeResult(operation, this.opentui.symbols[operation](pointer, handle))
+  }
+
+  public contextGetLinkUrl(context: NativeContextHandle, linkId: number): string {
+    const id = toSafeFFIU32Length(linkId, "Link id")
+    const bytes = new Uint8Array(MAX_LINK_URL_BYTES)
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_context_get_link_url")
+    nativeResult(
+      "ot_context_get_link_url",
+      this.opentui.symbols.ot_context_get_link_url(pointer, id, bytes, bytes.length, count),
+    )
+    if (count[0] > bytes.length) throw new NativeError("ot_context_get_link_url", NativeStatus.InternalError)
+    return count[0] === 0 ? "" : this.decoder.decode(bytes.subarray(0, count[0]))
+  }
+
+  public createContextTextBuffer(
+    context: NativeContextHandle,
+    options: NativeContextEditBufferOptions = {},
+  ): ContextTextBufferHandle {
+    this.getYogaHost().assertMutable()
+    const record = editBufferOptions(options, "text")
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_create")
+    nativeResult("ot_text_buffer_create", this.opentui.symbols.ot_text_buffer_create(pointer, record, output))
+    try {
+      return decodeContextHandle(context, output) as ContextTextBufferHandle
+    } catch (error) {
+      this.opentui.symbols.ot_text_buffer_destroy(pointer, output)
+      throw error
+    }
+  }
+
+  public createContextUnicode(
+    context: NativeContextHandle,
+    text: string,
+    widthMethod: WidthMethod | "no-zwj",
+  ): ContextUnicodeHandle {
+    this.getYogaHost().assertMutable()
+    const method = widthMethodId(widthMethod, "Unicode")
+    const bytes = this.encoder.encode(text)
+    const count = toSafeFFIU32Length(bytes.byteLength, "Unicode input bytes")
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_unicode_create")
+    nativeResult(
+      "ot_unicode_create",
+      this.opentui.symbols.ot_unicode_create(pointer, viewOrNull(bytes), count, method, output),
+    )
+    return decodeContextHandle(context, output) as ContextUnicodeHandle
+  }
+
+  public sceneMeasureLayout(context: NativeContextHandle, session: SessionHandle, root: SceneNodeHandle): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const node = encodeContextHandle(context, root)
+    const measures = this.sceneMeasures.get(context)?.nodes.size
+    if (measures) this.getYogaHost().flushSceneMutations()
+    const pointer = this.nativeContextPointer(context, "ot_scene_measure_layout")
+    if (measures) {
+      this.getYogaHost().runMutation(() => {
+        nativeResult("ot_scene_measure_layout", this.opentui.symbols.ot_scene_measure_layout(pointer, handle, node))
+      })
+    } else {
+      nativeResult("ot_scene_measure_layout", this.opentui.symbols.ot_scene_measure_layout(pointer, handle, node))
+    }
+  }
+
+  public sceneFrameCopyBuffer(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    frame: NativeSceneFrameRequest,
+    target: ContextBufferHandle,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const ticket = encodeSceneFrameRequest(context, frame)
+    const buffer = encodeContextHandle(context, target)
+    const pointer = this.nativeContextPointer(context, "ot_scene_frame_copy_buffer")
+    nativeResult(
+      "ot_scene_frame_copy_buffer",
+      this.opentui.symbols.ot_scene_frame_copy_buffer(pointer, handle, ticket, buffer),
+    )
+  }
+
+  public sessionRenderSplit(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    frame: NativeSceneFrameRequest | null,
+    snapshots: readonly NativeSplitSnapshot[],
+    pinnedRenderOffset: number,
+    force: boolean,
+  ): { status: NativeSessionRenderStatus } {
+    const layout = nativeLayouts.ot_split_snapshot
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const ticket = frame ? encodeSceneFrameRequest(context, frame) : null
+    const count = toSafeFFIU32Length(snapshots.length, "Split snapshot count")
+    const max = nativeConstants.OT_SPLIT_SNAPSHOTS_MAX
+    if (count > max) throw new RangeError(`At most ${max} split snapshots can be submitted together`)
+    const records = new BigUint64Array(count * (layout.size / 8))
+    const fields = new Uint32Array(records.buffer)
+    for (let index = 0; index < count; index++) {
+      const snapshot = snapshots[index]
+      const offset = index * layout.size
+      encodeContextHandle(
+        context,
+        snapshot.snapshot,
+        new BigUint64Array(records.buffer, offset + layout.fields.buffer.offset, nativeLayouts.ot_handle.size / 8),
+      )
+      fields[(offset + layout.fields.row_columns.offset) / 4] = toSafeFFIU32Length(
+        snapshot.rowColumns,
+        "Split snapshot row columns",
+      )
+      fields[(offset + layout.fields.flags.offset) / 4] =
+        toFFIBool(snapshot.startOnNewLine, "Split start on new line") |
+        (toFFIBool(snapshot.trailingNewline, "Split trailing newline") << 1)
+    }
+    const offset = toSafeFFIU32Length(pinnedRenderOffset, "Split pinned render offset")
+    const forced = toFFIBool(force, "Split force render")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_render_split")
+    nativeResult(
+      "ot_session_render_split",
+      this.opentui.symbols.ot_session_render_split(
+        pointer,
+        handle,
+        ticket,
+        count ? records : null,
+        count,
+        offset,
+        forced,
+        output,
+      ),
+    )
+    return { status: output[0] }
+  }
+
+  public sessionSplitControl(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    command: NativeSessionSplitControl,
+  ): number {
+    const layout = nativeLayouts.ot_split_control
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const record = createContextRecord(layout)
+    switch (command.kind) {
+      case "reset":
+        record[layout.fields.command.offset / 4] = 0
+        record[layout.fields.arguments.offset / 4] = toSafeFFIU32Length(command.seedRows, "Split seed rows")
+        record[(layout.fields.arguments.offset + 4) / 4] = toSafeFFIU32Length(
+          command.pinnedRenderOffset,
+          "Split pinned render offset",
+        )
+        break
+      case "sync":
+        record[layout.fields.command.offset / 4] = 1
+        record[layout.fields.arguments.offset / 4] = toSafeFFIU32Length(
+          command.pinnedRenderOffset,
+          "Split pinned render offset",
+        )
+        break
+      case "output-offset":
+        record[layout.fields.command.offset / 4] = 2
+        record[layout.fields.arguments.offset / 4] = toSafeFFIU32Length(command.surfaceOffset, "Split surface offset")
+        break
+      case "render-offset":
+        record[layout.fields.command.offset / 4] = 3
+        record[layout.fields.arguments.offset / 4] = toSafeFFIU32Length(command.renderOffset, "Split render offset")
+        break
+      case "transition": {
+        const mode = command.mode
+        if (mode !== "viewport-scroll" && mode !== "clear-stale-rows")
+          throw new TypeError("Unknown split transition mode")
+        record[layout.fields.command.offset / 4] = 4
+        record[layout.fields.arguments.offset / 4] = mode === "viewport-scroll" ? 1 : 2
+        record[(layout.fields.arguments.offset + 4) / 4] = toSafeFFIU32Length(
+          command.sourceTopLine,
+          "Split source top line",
+        )
+        record[(layout.fields.arguments.offset + 8) / 4] = toSafeFFIU32Length(
+          command.sourceHeight,
+          "Split source height",
+        )
+        record[(layout.fields.arguments.offset + 12) / 4] = toSafeFFIU32Length(
+          command.targetTopLine,
+          "Split target top line",
+        )
+        record[(layout.fields.arguments.offset + 16) / 4] = toSafeFFIU32Length(
+          command.targetHeight,
+          "Split target height",
+        )
+        record[(layout.fields.arguments.offset + 20) / 4] = toSafeFFIU32Length(
+          command.scrollLines ?? 0,
+          "Split scroll lines",
+        )
+        break
+      }
+      case "clear-transition":
+        record[layout.fields.command.offset / 4] = 5
+        break
+      default:
+        throw new TypeError("Unknown split control")
+    }
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_split_control")
+    nativeResult(
+      "ot_session_split_control",
+      this.opentui.symbols.ot_session_split_control(pointer, handle, record, output),
+    )
+    return output[0]
+  }
+
+  public sessionSetScreen(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    alternate: boolean,
+    width: number,
+    height: number,
+    trailingOutput: Uint8Array = new Uint8Array(),
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const value = toFFIBool(alternate, "Session alternate screen")
+    const columns = toSafeFFIU32Length(width, "Session screen columns")
+    const rows = toSafeFFIU32Length(height, "Session screen rows")
+    const input = sessionBytes(trailingOutput, "Session screen output length")
+    const pointer = this.nativeContextPointer(context, "ot_session_set_screen")
+    nativeResult(
+      "ot_session_set_screen",
+      this.opentui.symbols.ot_session_set_screen(pointer, handle, value, columns, rows, input, input.byteLength),
+    )
+  }
+
+  public sessionSyncDetached(context: NativeContextHandle, session: SessionHandle, parent: SessionHandle): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const source = encodeContextHandle(context, parent)
+    const pointer = this.nativeContextPointer(context, "ot_session_sync_detached")
+    nativeResult("ot_session_sync_detached", this.opentui.symbols.ot_session_sync_detached(pointer, handle, source))
+  }
+
+  public getContextUnicode(
+    context: NativeContextHandle,
+    unicode: ContextUnicodeHandle,
+  ): Array<{ width: number; char: number }> {
+    const layout = nativeLayouts.ot_unicode_char
+    const handle = encodeContextHandle(context, unicode)
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_unicode_get")
+    nativeResult("ot_unicode_get", this.opentui.symbols.ot_unicode_get(pointer, handle, null, 0, count))
+    const records = new Uint32Array(count[0] * (layout.size / 4))
+    if (count[0])
+      nativeResult("ot_unicode_get", this.opentui.symbols.ot_unicode_get(pointer, handle, records, count[0], count))
+    return Array.from({ length: count[0] }, (_, index) => ({
+      width: records[(index * layout.size + layout.fields.width.offset) / 4],
+      char: records[(index * layout.size + layout.fields.character.offset) / 4],
+    }))
+  }
+
+  public destroyContextUnicode(context: NativeContextHandle, unicode: ContextUnicodeHandle): void {
+    this.destroyContextObject(context, unicode, "ot_unicode_destroy")
+  }
+
+  public contextBufferDrawUnicode(
+    { context, target, frame }: NativeDrawingTarget,
+    unicode: ContextUnicodeHandle,
+    index: number,
+    x: number,
+    y: number,
+    foreground: RGBA,
+    background: RGBA,
+    attributes: number,
+  ): void {
+    const handle = encodeContextHandle(context, target)
+    const source = encodeContextHandle(context, unicode)
+    const ticket = frame ? encodeSceneFrameRequest(context, frame) : null
+    const item = toSafeFFIU32Length(index, "Unicode character index")
+    const column = toFFII32(x, "Unicode x")
+    const row = toFFII32(y, "Unicode y")
+    const fg = contextBufferColor(foreground)
+    const bg = contextBufferColor(background)
+    const attrs = toSafeFFIU32Length(attributes, "Unicode attributes")
+    this.getYogaHost().assertMutable()
+    const pointer = this.nativeContextPointer(context, "ot_buffer_draw_unicode")
+    nativeResult(
+      "ot_buffer_draw_unicode",
+      this.opentui.symbols.ot_buffer_draw_unicode(pointer, handle, ticket, source, item, column, row, fg, bg, attrs),
+    )
+  }
+
+  public createContextEmbeddedTerminal(
+    context: NativeContextHandle,
+    options: { cols: number; rows: number; maxScrollback?: number },
+  ): ContextEmbeddedTerminalHandle {
+    const layout = nativeLayouts.ot_embedded_terminal_options
+    this.getYogaHost().assertMutable()
+    const record = createContextRecord(layout)
+    record[layout.fields.cols.offset / 4] = embeddedTerminalDimension(options.cols, "columns")
+    record[layout.fields.rows.offset / 4] = embeddedTerminalDimension(options.rows, "rows")
+    record[layout.fields.max_scrollback.offset / 4] = toSafeFFIU32Length(
+      options.maxScrollback ?? 10_000,
+      "Embedded terminal maxScrollback",
+    )
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_create")
+    nativeResult(
+      "ot_embedded_terminal_create",
+      this.opentui.symbols.ot_embedded_terminal_create(pointer, record, output),
+    )
+    return decodeContextHandle(context, output) as ContextEmbeddedTerminalHandle
+  }
+
+  public destroyContextEmbeddedTerminal(context: NativeContextHandle, terminal: ContextEmbeddedTerminalHandle): void {
+    this.destroyContextObject(context, terminal, "ot_embedded_terminal_destroy")
+  }
+
+  public contextEmbeddedTerminalWrite(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    data: string | Uint8Array,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const bytes = sessionBytes(
+      typeof data === "string" ? this.encoder.encode(data) : data,
+      "Embedded terminal write bytes",
+    )
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_write")
+    // The parser keeps partial sequences across writes, so input above the native limit can be split anywhere.
+    for (let offset = 0; offset === 0 || offset < bytes.byteLength; offset += EMBEDDED_TERMINAL_IO_BYTES_MAX) {
+      const chunk = bytes.subarray(offset, offset + EMBEDDED_TERMINAL_IO_BYTES_MAX)
+      nativeResult(
+        "ot_embedded_terminal_write",
+        this.opentui.symbols.ot_embedded_terminal_write(pointer, handle, viewOrNull(chunk), chunk.byteLength),
+      )
+    }
+  }
+
+  public contextEmbeddedTerminalResize(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    cols: number,
+    rows: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const width = embeddedTerminalDimension(cols, "columns")
+    const height = embeddedTerminalDimension(rows, "rows")
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_resize")
+    nativeResult(
+      "ot_embedded_terminal_resize",
+      this.opentui.symbols.ot_embedded_terminal_resize(pointer, handle, width, height),
+    )
+  }
+
+  private contextTerminalCommand(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    command: number,
+    argument = 0,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const value = toFFII32(argument, "Embedded terminal command argument")
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_command")
+    nativeResult(
+      "ot_embedded_terminal_command",
+      this.opentui.symbols.ot_embedded_terminal_command(pointer, handle, command, value),
+    )
+  }
+
+  public contextEmbeddedTerminalInvalidate(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+  ): void {
+    this.contextTerminalCommand(context, terminal, 0)
+  }
+
+  public contextEmbeddedTerminalScroll(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    delta: number,
+  ): void {
+    this.contextTerminalCommand(context, terminal, 1, delta)
+  }
+
+  public contextEmbeddedTerminalClearSelection(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+  ): void {
+    this.contextTerminalCommand(context, terminal, 2)
+  }
+
+  public contextEmbeddedTerminalSetTransparentBackground(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    transparent: boolean,
+  ): void {
+    this.contextTerminalCommand(
+      context,
+      terminal,
+      nativeConstants.OT_EMBEDDED_TERMINAL_SET_TRANSPARENT_BACKGROUND,
+      transparent ? 1 : 0,
+    )
+  }
+
+  public contextEmbeddedTerminalSetSelection(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const sx = toSafeFFIU32Length(start.x, "Selection start x")
+    const sy = toSafeFFIU32Length(start.y, "Selection start y")
+    const ex = toSafeFFIU32Length(end.x, "Selection end x")
+    const ey = toSafeFFIU32Length(end.y, "Selection end y")
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_set_selection")
+    nativeResult(
+      "ot_embedded_terminal_set_selection",
+      this.opentui.symbols.ot_embedded_terminal_set_selection(pointer, handle, sx, sy, ex, ey),
+    )
+  }
+
+  private contextTerminalBytes(
+    operation: string,
+    read: (output: Uint8Array | null, count: Uint32Array) => number,
+  ): Uint8Array {
+    const count = new Uint32Array(1)
+    nativeResult(operation, read(null, count))
+    const output = new Uint8Array(count[0])
+    if (output.length) nativeResult(operation, read(output, count))
+    return output.subarray(0, count[0])
+  }
+
+  public contextEmbeddedTerminalGetSelectedText(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+  ): Uint8Array {
+    const handle = encodeContextHandle(context, terminal)
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_get_selected_text")
+    return this.contextTerminalBytes("ot_embedded_terminal_get_selected_text", (output, count) =>
+      this.opentui.symbols.ot_embedded_terminal_get_selected_text(pointer, handle, output, output?.length ?? 0, count),
+    )
+  }
+
+  public contextEmbeddedTerminalCompose(
+    { context, target, frame }: NativeDrawingTarget,
+    terminal: ContextEmbeddedTerminalHandle,
+    x: number,
+    y: number,
+  ): void {
+    const handle = encodeContextHandle(context, terminal)
+    const destination = encodeContextHandle(context, target)
+    const ticket = frame ? encodeSceneFrameRequest(context, frame) : null
+    const column = toFFII32(x, "Terminal composition x")
+    const row = toFFII32(y, "Terminal composition y")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_compose")
+      nativeResult(
+        "ot_embedded_terminal_compose",
+        this.opentui.symbols.ot_embedded_terminal_compose(pointer, handle, destination, ticket, column, row),
+      )
+    })
+  }
+
+  public contextEmbeddedTerminalCursor(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+  ): EmbeddedTerminalCursor {
+    const layout = nativeLayouts.ot_embedded_terminal_cursor
+    const handle = encodeContextHandle(context, terminal)
+    const record = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_cursor_get")
+    nativeResult(
+      "ot_embedded_terminal_cursor_get",
+      this.opentui.symbols.ot_embedded_terminal_cursor_get(pointer, handle, record),
+    )
+    return {
+      x: record[layout.fields.x.offset / 4],
+      y: record[layout.fields.y.offset / 4],
+      hasValue: record[layout.fields.has_value.offset / 4] !== 0,
+      visible: record[layout.fields.visible.offset / 4] !== 0,
+      blinking: record[layout.fields.blinking.offset / 4] !== 0,
+      wideTail: record[layout.fields.wide_tail.offset / 4] !== 0,
+      style:
+        (["bar", "block", "underline", "block-hollow"] as const)[record[layout.fields.style.offset / 4]] ?? "block",
+      ...(record[layout.fields.color_has_value.offset / 4]
+        ? {
+            color: {
+              r: record[layout.fields.color_r.offset / 4],
+              g: record[layout.fields.color_g.offset / 4],
+              b: record[layout.fields.color_b.offset / 4],
+            },
+          }
+        : {}),
+    }
+  }
+
+  public contextEmbeddedTerminalScrollbar(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+  ): { offset: number; total: number; visible: number } {
+    const layout = nativeLayouts.ot_embedded_terminal_scrollbar
+    const handle = encodeContextHandle(context, terminal)
+    const record = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_scrollbar_get")
+    nativeResult(
+      "ot_embedded_terminal_scrollbar_get",
+      this.opentui.symbols.ot_embedded_terminal_scrollbar_get(pointer, handle, record),
+    )
+    return {
+      offset: record[layout.fields.offset.offset / 4],
+      total: record[layout.fields.total.offset / 4],
+      visible: record[layout.fields.visible.offset / 4],
+    }
+  }
+
+  public contextEmbeddedTerminalEncodeKey(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    key: EmbeddedTerminalKey,
+  ): Uint8Array {
+    const layout = nativeLayouts.ot_embedded_terminal_key
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const actionCode = EMBEDDED_TERMINAL_KEY_ACTIONS.get(key.action ?? "press")
+    if (actionCode === undefined) throw new TypeError("Unknown embedded terminal key action")
+    const record = createContextRecord(layout)
+    record[layout.fields.action.offset / 4] = actionCode
+    record[layout.fields.composing.offset / 4] = toFFIBool(key.composing ?? false, "Key composing")
+    record[layout.fields.mods.offset / 4] = toSafeFFIU32Length(key.mods ?? 0, "Key modifiers")
+    record[layout.fields.consumed_mods.offset / 4] = toSafeFFIU32Length(key.consumedMods ?? 0, "Key consumed modifiers")
+    record[layout.fields.unshifted_codepoint.offset / 4] = toSafeFFIU32Length(
+      key.unshiftedCodepoint ?? 0,
+      "Key codepoint",
+    )
+    const physical = this.encoder.encode(key.key ?? "")
+    const text = this.encoder.encode(key.text ?? "")
+    const physicalLength = toSafeFFIU32Length(physical.byteLength, "Key name bytes")
+    const textLength = toSafeFFIU32Length(text.byteLength, "Key text bytes")
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_encode_key")
+    return this.contextTerminalBytes("ot_embedded_terminal_encode_key", (output, count) =>
+      this.opentui.symbols.ot_embedded_terminal_encode_key(
+        pointer,
+        handle,
+        record,
+        viewOrNull(physical),
+        physicalLength,
+        viewOrNull(text),
+        textLength,
+        output,
+        output?.length ?? 0,
+        count,
+      ),
+    )
+  }
+
+  public contextEmbeddedTerminalEncodeMouse(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    mouse: EmbeddedTerminalMouse,
+  ): Uint8Array {
+    const layout = nativeLayouts.ot_embedded_terminal_mouse
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const action = EMBEDDED_TERMINAL_MOUSE_ACTIONS.get(mouse.action)
+    const button = EMBEDDED_TERMINAL_BUTTONS.get(mouse.button)
+    if (action === undefined || button === undefined)
+      throw new TypeError("Unknown embedded terminal mouse action or button")
+    const record = createContextRecord(layout)
+    record[layout.fields.action.offset / 4] = action
+    record[layout.fields.button.offset / 4] = button
+    record[layout.fields.mods.offset / 4] = toSafeFFIU32Length(mouse.mods ?? 0, "Mouse modifiers")
+    record[layout.fields.any_button_pressed.offset / 4] = toFFIBool(
+      mouse.anyButtonPressed ?? false,
+      "Mouse button pressed",
+    )
+    const coordinates = new Float32Array(record.buffer)
+    coordinates[layout.fields.x.offset / 4] = toFFIF32(mouse.x, "Mouse x")
+    coordinates[layout.fields.y.offset / 4] = toFFIF32(mouse.y, "Mouse y")
+    const output = new Uint8Array(128)
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_encode_mouse")
+    nativeResult(
+      "ot_embedded_terminal_encode_mouse",
+      this.opentui.symbols.ot_embedded_terminal_encode_mouse(pointer, handle, record, output, output.length, count),
+    )
+    return output.slice(0, count[0])
+  }
+
+  public contextEmbeddedTerminalEncodePaste(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    input: Uint8Array,
+  ): Uint8Array {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const bytes = sessionBytes(input, "Terminal paste bytes")
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_encode_paste")
+    return this.contextTerminalBytes("ot_embedded_terminal_encode_paste", (output, count) =>
+      this.opentui.symbols.ot_embedded_terminal_encode_paste(
+        pointer,
+        handle,
+        viewOrNull(bytes),
+        bytes.length,
+        output,
+        output?.length ?? 0,
+        count,
+      ),
+    )
+  }
+
+  public contextEmbeddedTerminalEncodeFocus(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+    focused: boolean,
+  ): Uint8Array {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const value = toFFIBool(focused, "Terminal focused")
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_encode_focus")
+    return this.contextTerminalBytes("ot_embedded_terminal_encode_focus", (output, count) =>
+      this.opentui.symbols.ot_embedded_terminal_encode_focus(
+        pointer,
+        handle,
+        value,
+        output,
+        output?.length ?? 0,
+        count,
+      ),
+    )
+  }
+
+  // The native drain never calls back into JavaScript, so every drain can reuse one buffer.
+  private embeddedTerminalResponses: Uint8Array | undefined
+
+  public contextEmbeddedTerminalDrainResponses(
+    context: NativeContextHandle,
+    terminal: ContextEmbeddedTerminalHandle,
+  ): Uint8Array {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, terminal)
+    const output = (this.embeddedTerminalResponses ??= new Uint8Array(
+      nativeConstants.OT_EMBEDDED_TERMINAL_RESPONSE_BYTES_MAX,
+    ))
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_embedded_terminal_drain_responses")
+    let status = this.opentui.symbols.ot_embedded_terminal_drain_responses(
+      pointer,
+      handle,
+      output,
+      output.length,
+      count,
+    )
+    if (status === NativeStatus.OutputBackpressure) {
+      status = this.opentui.symbols.ot_embedded_terminal_drain_responses(pointer, handle, output, output.length, count)
+    }
+    nativeResult("ot_embedded_terminal_drain_responses", status)
+    return output.slice(0, count[0])
+  }
+
+  public destroyContextTextBuffer(context: NativeContextHandle, text: ContextTextBufferHandle): void {
+    this.destroyContextObject(context, text, "ot_text_buffer_destroy")
+  }
+
+  public createContextTextBufferView(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+  ): ContextTextBufferViewHandle {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, text)
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_create")
+    nativeResult("ot_text_buffer_view_create", this.opentui.symbols.ot_text_buffer_view_create(pointer, handle, output))
+    try {
+      return decodeContextHandle(context, output) as ContextTextBufferViewHandle
+    } catch (error) {
+      this.opentui.symbols.ot_text_buffer_view_destroy(pointer, output)
+      throw error
+    }
+  }
+
+  public destroyContextTextBufferView(context: NativeContextHandle, view: ContextTextBufferViewHandle): void {
+    this.destroyContextObject(context, view, "ot_text_buffer_view_destroy")
+  }
+
+  public contextTextBufferSetText(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    bytes: Uint8Array,
+  ): void {
+    const handle = encodeContextHandle(context, text)
+    const input = sessionBytes(bytes, "Text buffer text length")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_set_text")
+      nativeResult(
+        "ot_text_buffer_set_text",
+        this.opentui.symbols.ot_text_buffer_set_text(pointer, handle, viewOrNull(input), input.length),
+      )
+    })
+  }
+
+  public contextTextBufferAppend(context: NativeContextHandle, text: ContextTextBufferHandle, bytes: Uint8Array): void {
+    const handle = encodeContextHandle(context, text)
+    const input = sessionBytes(bytes, "Text buffer append length")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_append")
+      nativeResult(
+        "ot_text_buffer_append",
+        this.opentui.symbols.ot_text_buffer_append(pointer, handle, viewOrNull(input), input.length),
+      )
+    })
+  }
+
+  public contextTextBufferClear(context: NativeContextHandle, text: ContextTextBufferHandle, reset = false): void {
+    const handle = encodeContextHandle(context, text)
+    const value = toFFIBool(reset, "Text buffer reset")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_clear")
+      nativeResult("ot_text_buffer_clear", this.opentui.symbols.ot_text_buffer_clear(pointer, handle, value))
+    })
+  }
+
+  public contextTextBufferSetStyledText(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    content: StyledText,
+  ): void {
+    this.contextTextBufferSetEncodedStyledText(context, text, this.encodeTextBufferStyledText(content))
+  }
+
+  public encodeTextBufferStyledText(content: StyledText): NativeEncodedStyledText {
+    return this.encodeStyledText(content, true, true)
+  }
+
+  public contextTextBufferSetEncodedStyledText(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    encoded: NativeEncodedStyledText,
+  ): void {
+    const handle = encodeContextHandle(context, text)
+    const { bytes, records, count, urlBytes } = encoded
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_set_styled_text")
+      nativeResult(
+        "ot_text_buffer_set_styled_text",
+        this.opentui.symbols.ot_text_buffer_set_styled_text(
+          pointer,
+          handle,
+          viewOrNull(bytes),
+          bytes.length,
+          count === 0 ? null : records,
+          count,
+          viewOrNull(urlBytes),
+          urlBytes.length,
+        ),
+      )
+    })
+  }
+
+  public contextTextBufferReplaceStyledBatch(
+    context: NativeContextHandle,
+    replacements: {
+      buffer: ContextTextBufferHandle
+      view: ContextTextBufferViewHandle
+      text: NativeEncodedStyledText
+    }[],
+    beforeNative: () => void,
+  ): Uint32Array | null {
+    const count = replacements.length
+    if (count > nativeConstants.OT_TEXT_REPLACEMENT_COUNT_MAX) return null
+    let byteCount = 0
+    let chunkCount = 0
+    let urlByteCount = 0
+    for (const { text } of replacements) {
+      byteCount += text.bytes.length
+      chunkCount += text.count
+      urlByteCount += text.urlBytes.length
+    }
+    if (
+      byteCount > nativeConstants.OT_TEXT_REPLACEMENT_BYTES_MAX ||
+      chunkCount > nativeConstants.OT_TEXT_REPLACEMENT_CHUNKS_MAX ||
+      urlByteCount > nativeConstants.OT_TEXT_REPLACEMENT_URL_BYTES_MAX
+    ) {
+      return null
+    }
+    const layout = nativeLayouts.ot_text_buffer_replacement
+    const chunkLayout = nativeLayouts.ot_styled_text_chunk
+    const records = new Uint32Array((count * layout.size) / 4)
+    const bytes = new Uint8Array(byteCount)
+    const chunks = new Uint32Array((chunkCount * chunkLayout.size) / 4)
+    const urls = new Uint8Array(urlByteCount)
+    const output = new Uint32Array((count * nativeLayouts.ot_text_buffer_replacement_info.size) / 4)
+    byteCount = 0
+    chunkCount = 0
+    urlByteCount = 0
+    for (let index = 0; index < count; index++) {
+      const { buffer, view, text } = replacements[index]
+      const offset = (index * layout.size) / 4
+      records[offset + layout.fields.struct_size.offset / 4] = layout.size
+      records[offset + layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+      records.set(encodeContextHandle(context, buffer), offset + layout.fields.buffer.offset / 4)
+      records.set(encodeContextHandle(context, view), offset + layout.fields.view.offset / 4)
+      records[offset + layout.fields.byte_offset.offset / 4] = byteCount
+      records[offset + layout.fields.byte_count.offset / 4] = text.bytes.length
+      records[offset + layout.fields.chunk_offset.offset / 4] = chunkCount
+      records[offset + layout.fields.chunk_count.offset / 4] = text.count
+      bytes.set(text.bytes, byteCount)
+      urls.set(text.urlBytes, urlByteCount)
+      const chunkOffset = (chunkCount * chunkLayout.size) / 4
+      chunks.set(text.records.subarray(0, (text.count * chunkLayout.size) / 4), chunkOffset)
+      for (let chunk = 0; chunk < text.count; chunk++) {
+        const start = chunkOffset + (chunk * chunkLayout.size) / 4
+        if (chunks[start + chunkLayout.fields.flags.offset / 4] & nativeConstants.OT_SCENE_TEXT_LINK) {
+          chunks[start + chunkLayout.fields.link_offset.offset / 4] += urlByteCount
+        }
+      }
+      byteCount += text.bytes.length
+      chunkCount += text.count
+      urlByteCount += text.urlBytes.length
+    }
+    return this.getYogaHost().runMutation(() => {
+      beforeNative()
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_replace_styled_batch")
+      nativeResult(
+        "ot_text_buffer_replace_styled_batch",
+        this.opentui.symbols.ot_text_buffer_replace_styled_batch(
+          pointer,
+          records,
+          count,
+          bytes,
+          byteCount,
+          chunks,
+          chunkCount,
+          urls,
+          urlByteCount,
+          output,
+        ),
+      )
+      return output
+    })
+  }
+
+  public contextTextBufferSetSyntaxStyle(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    style: ContextSyntaxStyleHandle | null,
+  ): void {
+    const handle = encodeContextHandle(context, text)
+    const target = style === null ? null : encodeContextHandle(context, style)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_set_syntax_style")
+      nativeResult(
+        "ot_text_buffer_set_syntax_style",
+        this.opentui.symbols.ot_text_buffer_set_syntax_style(pointer, handle, target),
+      )
+    })
+  }
+
+  public contextTextBufferGetInfo(context: NativeContextHandle, text: ContextTextBufferHandle): NativeTextBufferInfo {
+    const layout = nativeLayouts.ot_text_buffer_info
+    const handle = encodeContextHandle(context, text)
+    const output = new BigUint64Array(layout.size / 8)
+    const words = new Uint32Array(output.buffer)
+    words[layout.fields.struct_size.offset / 4] = layout.size
+    words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_get_info")
+    nativeResult("ot_text_buffer_get_info", this.opentui.symbols.ot_text_buffer_get_info(pointer, handle, output))
+    return {
+      contentEpoch: output[layout.fields.content_epoch.offset / 8],
+      byteLength: words[layout.fields.byte_count.offset / 4],
+      textLength: words[layout.fields.text_length.offset / 4],
+      lineCount: words[layout.fields.line_count.offset / 4],
+      highlightCount: words[layout.fields.highlight_count.offset / 4],
+      tabWidth: words[layout.fields.tab_width.offset / 4],
+    }
+  }
+
+  private readText(
+    operation: string,
+    read: (bytes: Uint8Array | null, capacity: number, count: Uint32Array) => number,
+  ): string {
+    const count = new Uint32Array(1)
+    nativeResult(operation, read(null, 0, count))
+    if (count[0] === 0) return ""
+    const bytes = new Uint8Array(count[0])
+    nativeResult(operation, read(viewOrNull(bytes), bytes.length, count))
+    if (count[0] !== bytes.length) {
+      throw new NativeError(operation, NativeStatus.InternalError)
+    }
+    return this.textDecoder.decode(bytes)
+  }
+
+  public contextTextBufferGetText(context: NativeContextHandle, text: ContextTextBufferHandle): string {
+    const handle = encodeContextHandle(context, text)
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_get_text")
+    return this.readText("ot_text_buffer_get_text", (bytes, capacity, count) =>
+      this.opentui.symbols.ot_text_buffer_get_text(pointer, handle, bytes, capacity, count),
+    )
+  }
+
+  public contextTextBufferGetRange(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    start: number,
+    end: number,
+  ): string {
+    const handle = encodeContextHandle(context, text)
+    const startOffset = toSafeFFIU32Length(start, "Text range start")
+    const endOffset = toSafeFFIU32Length(end, "Text range end")
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_get_range")
+    return this.readText("ot_text_buffer_get_range", (bytes, capacity, count) =>
+      this.opentui.symbols.ot_text_buffer_get_range(pointer, handle, startOffset, endOffset, bytes, capacity, count),
+    )
+  }
+
+  public contextTextBufferSetDefaults(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    mask: NativeEditorStyleMask,
+    style: NativeEditorStyle,
+  ): void {
+    const handle = encodeContextHandle(context, text)
+    const fields = toSafeFFIU32Length(mask, "Text default style mask")
+    const record = encodeEditorStyle(style)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_set_defaults")
+      nativeResult(
+        "ot_text_buffer_set_defaults",
+        this.opentui.symbols.ot_text_buffer_set_defaults(pointer, handle, fields, record),
+      )
+    })
+  }
+
+  public contextTextBufferSetTabWidth(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    width: number,
+  ): void {
+    const handle = encodeContextHandle(context, text)
+    const value = toSafeFFIU32Length(width, "Text tab width")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_set_tab_width")
+      nativeResult(
+        "ot_text_buffer_set_tab_width",
+        this.opentui.symbols.ot_text_buffer_set_tab_width(pointer, handle, value),
+      )
+    })
+  }
+
+  public contextTextBufferSetWidthMethod(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    widthMethod: WidthMethod,
+  ): void {
+    const handle = encodeContextHandle(context, text)
+    const method = widthMethodId(widthMethod, "text")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_set_width_method")
+      nativeResult(
+        "ot_text_buffer_set_width_method",
+        this.opentui.symbols.ot_text_buffer_set_width_method(pointer, handle, method),
+      )
+    })
+  }
+
+  public contextTextBufferHighlight(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    operation: NativeEditHighlightOperation,
+    argument = 0,
+    highlight?: Highlight,
+  ): void {
+    const handle = encodeContextHandle(context, text)
+    const selector = toSafeFFIU32Length(operation, "Text highlight operation")
+    const value = toSafeFFIU32Length(argument, "Text highlight argument")
+    const record = encodeContextHighlight(highlight)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_highlight")
+      nativeResult(
+        "ot_text_buffer_highlight",
+        this.opentui.symbols.ot_text_buffer_highlight(pointer, handle, selector, value, record),
+      )
+    })
+  }
+
+  /** The Context's id for an ordered list of style names (`ot_context_group_set`). */
+  public contextGroupSet(context: NativeContextHandle, names: readonly string[]): number {
+    const encoded = names.map((name) => this.encoder.encode(name))
+    const ends = new Uint32Array(encoded.length)
+    const bytes = new Uint8Array(encoded.reduce((end, name, index) => (ends[index] = end + name.length), 0))
+    encoded.forEach((name, index) => bytes.set(name, ends[index]! - name.length))
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_context_group_set")
+    nativeResult(
+      "ot_context_group_set",
+      this.opentui.symbols.ot_context_group_set(
+        pointer,
+        viewOrNull(bytes),
+        bytes.length,
+        viewOrNull(ends),
+        ends.length,
+        output,
+      ),
+    )
+    return output[0]!
+  }
+
+  /** Replaces layer `layerId` in `[start, end)` bytes with `runs`: (start, end, group set) triples. */
+  public contextTextBufferSetLayer(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    layerId: number,
+    start: number,
+    end: number,
+    runs: Uint32Array,
+  ): void {
+    const handle = encodeContextHandle(context, text)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_set_layer")
+      nativeResult(
+        "ot_text_buffer_set_layer",
+        this.opentui.symbols.ot_text_buffer_set_layer(
+          pointer,
+          handle,
+          layerId,
+          start,
+          end,
+          viewOrNull(runs),
+          runs.length / 3,
+        ),
+      )
+    })
+  }
+
+  public contextTextBufferGetHighlights(
+    context: NativeContextHandle,
+    text: ContextTextBufferHandle,
+    line: number,
+  ): Highlight[] {
+    const handle = encodeContextHandle(context, text)
+    const row = toSafeFFIU32Length(line, "Highlight line")
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_get_highlights")
+    nativeResult(
+      "ot_text_buffer_get_highlights",
+      this.opentui.symbols.ot_text_buffer_get_highlights(pointer, handle, row, null, 0, count),
+    )
+    if (count[0] === 0) return []
+    const capacity = count[0]
+    const records = new Uint32Array(capacity * (nativeLayouts.ot_edit_highlight.size / 4))
+    nativeResult(
+      "ot_text_buffer_get_highlights",
+      this.opentui.symbols.ot_text_buffer_get_highlights(pointer, handle, row, records, capacity, count),
+    )
+    if (count[0] !== capacity) throw new NativeError("ot_text_buffer_get_highlights", NativeStatus.InternalError)
+    return decodeContextHighlights(records)
+  }
+
+  public contextTextBufferViewSetViewport(
+    context: NativeContextHandle,
+    view: ContextTextBufferViewHandle,
+    viewport: NativeEditorViewport,
+    sizeOnly = false,
+  ): void {
+    const layout = nativeLayouts.ot_editor_viewport
+    const handle = encodeContextHandle(context, view)
+    const record = createContextRecord(layout)
+    record[layout.fields.x.offset / 4] = toSafeFFIU32Length(viewport.x, "Text viewport x")
+    record[layout.fields.y.offset / 4] = toSafeFFIU32Length(viewport.y, "Text viewport y")
+    record[layout.fields.width.offset / 4] = toSafeFFIU32Length(viewport.width, "Text viewport width")
+    record[layout.fields.height.offset / 4] = toSafeFFIU32Length(viewport.height, "Text viewport height")
+    const resize = toFFIBool(sizeOnly, "Text viewport sizeOnly")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_set_viewport")
+      nativeResult(
+        "ot_text_buffer_view_set_viewport",
+        this.opentui.symbols.ot_text_buffer_view_set_viewport(pointer, handle, record, resize),
+      )
+    })
+  }
+
+  public contextTextBufferViewCommand(
+    context: NativeContextHandle,
+    view: ContextTextBufferViewHandle,
+    command: NativeTextViewCommand,
+    argument: number,
+  ): void {
+    const handle = encodeContextHandle(context, view)
+    const operation = toSafeFFIU32Length(command, "Text view command")
+    const value = toSafeFFIU32Length(argument, "Text view command argument")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_command")
+      nativeResult(
+        "ot_text_buffer_view_command",
+        this.opentui.symbols.ot_text_buffer_view_command(pointer, handle, operation, value),
+      )
+    })
+  }
+
+  public contextTextBufferViewSetTabColor(
+    context: NativeContextHandle,
+    view: ContextTextBufferViewHandle,
+    color: RGBA | null,
+  ): void {
+    const handle = encodeContextHandle(context, view)
+    const record = color === null ? null : contextBufferColor(color)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_set_tab_color")
+      nativeResult(
+        "ot_text_buffer_view_set_tab_color",
+        this.opentui.symbols.ot_text_buffer_view_set_tab_color(pointer, handle, record),
+      )
+    })
+  }
+
+  public contextTextBufferViewSelect(
+    context: NativeContextHandle,
+    view: ContextTextBufferViewHandle,
+    selection: NativeEditorSelection,
+  ): boolean {
+    const handle = encodeContextHandle(context, view)
+    const scratch = this.editorSelectionRecord ?? createEditorSelectionRecord()
+    this.editorSelectionRecord = undefined
+    try {
+      const record = encodeEditorSelection(selection, scratch)
+      const changed = scratch.changed
+      changed[0] = 0
+      this.getYogaHost().runMutation(() => {
+        const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_select")
+        nativeResult(
+          "ot_text_buffer_view_select",
+          this.opentui.symbols.ot_text_buffer_view_select(pointer, handle, record, changed),
+        )
+      })
+      return changed[0] !== 0
+    } finally {
+      this.editorSelectionRecord ??= scratch
+    }
+  }
+
+  /**
+   * Resets read only the operation, so each uses one prepared record. Text view selection never calls back.
+   * A reset of a view with no selection changes nothing, so `clear` skips the native call after the checks.
+   */
+  public contextTextBufferViewResetSelection(
+    context: NativeContextHandle,
+    view: ContextTextBufferViewHandle,
+    local: boolean,
+    clear = false,
+  ): void {
+    const handle = encodeContextHandle(context, view)
+    const record = local ? this.localSelectionResetRecord : this.selectionResetRecord
+    this.getYogaHost().assertMutable()
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_select")
+    if (clear) return
+    nativeResult(
+      "ot_text_buffer_view_select",
+      this.opentui.symbols.ot_text_buffer_view_select(pointer, handle, record, this.selectionResetChanged),
+    )
+  }
+
+  public contextTextBufferViewGetInfo(
+    context: NativeContextHandle,
+    view: ContextTextBufferViewHandle,
+  ): NativeEditorViewInfo {
+    const layout = nativeLayouts.ot_editor_view_info
+    const handle = encodeContextHandle(context, view)
+    const output = this.editorViewInfoRecord
+    output.fill(0)
+    output[layout.fields.struct_size.offset / 4] = layout.size
+    output[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_get_info")
+    nativeResult(
+      "ot_text_buffer_view_get_info",
+      this.opentui.symbols.ot_text_buffer_view_get_info(pointer, handle, output),
+    )
+    return {
+      virtualLineCount: output[layout.fields.virtual_line_count.offset / 4],
+      totalVirtualLineCount: output[layout.fields.total_virtual_line_count.offset / 4],
+      selection:
+        output[layout.fields.selection_present.offset / 4] === 0
+          ? null
+          : {
+              start: output[layout.fields.selection_start.offset / 4],
+              end: output[layout.fields.selection_end.offset / 4],
+            },
+      selectionOccupancy: output[layout.fields.selection_occupancy.offset / 4] === 0 ? "cell" : "boundary",
+    }
+  }
+
+  public contextTextBufferViewGetSelectedText(context: NativeContextHandle, view: ContextTextBufferViewHandle): string {
+    const handle = encodeContextHandle(context, view)
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_get_selected_text")
+    return this.readText("ot_text_buffer_view_get_selected_text", (bytes, capacity, count) =>
+      this.opentui.symbols.ot_text_buffer_view_get_selected_text(pointer, handle, bytes, capacity, count),
+    )
+  }
+
+  public contextTextBufferViewGetLines(
+    context: NativeContextHandle,
+    view: ContextTextBufferViewHandle,
+    logical = false,
+    firstLine = 0,
+    lineCount = MAX_FFI_U32,
+  ): LineInfo {
+    const layout = nativeLayouts.ot_editor_measure
+    const handle = encodeContextHandle(context, view)
+    const mode = toFFIBool(logical, "Text logical lines")
+    const first = toSafeFFIU32Length(firstLine, "Text first line")
+    const capacity = toSafeFFIU32Length(lineCount, "Text line count")
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_get_lines")
+    nativeResult(
+      "ot_text_buffer_view_get_lines",
+      this.opentui.symbols.ot_text_buffer_view_get_lines(pointer, handle, mode, 0, null, 0, output),
+    )
+    const total = output[layout.fields.line_count.offset / 4]
+    // Copy only the requested window, so a viewport read does not scale with the document (main #1462).
+    const count = Math.min(capacity, Math.max(0, total - first))
+    const lines = new Uint32Array(count * (nativeLayouts.ot_scene_text_line.size / 4))
+    if (count !== 0) {
+      nativeResult(
+        "ot_text_buffer_view_get_lines",
+        this.opentui.symbols.ot_text_buffer_view_get_lines(pointer, handle, mode, first, lines, count, output),
+      )
+      if (output[layout.fields.line_count.offset / 4] !== total)
+        throw new NativeError("ot_text_buffer_view_get_lines", NativeStatus.InternalError)
+    }
+    return decodeContextTextLines(lines, output[layout.fields.width_cols_max.offset / 4])
+  }
+
+  public contextTextBufferViewMeasure(
+    context: NativeContextHandle,
+    view: ContextTextBufferViewHandle,
+    width: number,
+    height: number,
+  ): MeasureResult {
+    const layout = nativeLayouts.ot_editor_measure
+    const handle = encodeContextHandle(context, view)
+    const columns = toSafeFFIU32Length(width, "Text measure width")
+    const rows = toSafeFFIU32Length(height, "Text measure height")
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_text_buffer_view_measure")
+    nativeResult(
+      "ot_text_buffer_view_measure",
+      this.opentui.symbols.ot_text_buffer_view_measure(pointer, handle, columns, rows, output),
+    )
+    return {
+      lineCount: output[layout.fields.line_count.offset / 4],
+      widthColsMax: output[layout.fields.width_cols_max.offset / 4],
+    }
+  }
+
+  public sceneSetTextView(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    view: ContextTextBufferViewHandle | null,
+  ): void {
+    const handle = encodeContextHandle(context, node)
+    const source = view === null ? null : encodeContextHandle(context, view)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_scene_set_text_view")
+      nativeResult("ot_scene_set_text_view", this.opentui.symbols.ot_scene_set_text_view(pointer, handle, source))
+    })
+  }
+
+  public sceneSetTextViewPaint(context: NativeContextHandle, node: SceneNodeHandle, enabled: boolean): void {
+    const handle = encodeContextHandle(context, node)
+    const value = toFFIBool(enabled, "Text view paint enabled")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_scene_set_text_view_paint")
+      nativeResult(
+        "ot_scene_set_text_view_paint",
+        this.opentui.symbols.ot_scene_set_text_view_paint(pointer, handle, value),
+      )
+    })
+  }
+
+  public contextDrawTextBufferView(
+    { context, target, frame }: NativeDrawingTarget,
+    view: ContextTextBufferViewHandle,
+    x: number,
+    y: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const destination = encodeContextHandle(context, target)
+    const request = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    const source = encodeContextHandle(context, view)
+    const column = toFFII32(x, "Text view x")
+    const row = toFFII32(y, "Text view y")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_draw_text_view")
+    nativeResult(
+      "ot_buffer_draw_text_view",
+      this.opentui.symbols.ot_buffer_draw_text_view(pointer, destination, request, source, column, row),
+    )
+  }
+
+  public contextDrawEditorView(
+    { context, target, frame }: NativeDrawingTarget,
+    view: ContextEditorViewHandle,
+    x: number,
+    y: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const destination = encodeContextHandle(context, target)
+    const request = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    const source = encodeContextHandle(context, view)
+    const column = toFFII32(x, "Editor view x")
+    const row = toFFII32(y, "Editor view y")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_draw_editor_view")
+    nativeResult(
+      "ot_buffer_draw_editor_view",
+      this.opentui.symbols.ot_buffer_draw_editor_view(pointer, destination, request, source, column, row),
+    )
+  }
+
+  public contextDrawSceneBody(
+    { context, target, frame }: NativeDrawingTarget,
+    node: SceneNodeHandle,
+    x: number,
+    y: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const destination = encodeContextHandle(context, target)
+    const request = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    const source = encodeContextHandle(context, node)
+    const column = toFFII32(x, "Scene body x")
+    const row = toFFII32(y, "Scene body y")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_draw_scene_body")
+    nativeResult(
+      "ot_buffer_draw_scene_body",
+      this.opentui.symbols.ot_buffer_draw_scene_body(pointer, destination, request, source, column, row),
+    )
+  }
+
+  public createContextEditBuffer(
+    context: NativeContextHandle,
+    options: NativeContextEditBufferOptions = {},
+  ): ContextEditBufferHandle {
+    this.getYogaHost().assertMutable()
+    const record = editBufferOptions(options, "editor")
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_create")
+    nativeResult("ot_edit_buffer_create", this.opentui.symbols.ot_edit_buffer_create(pointer, record, output))
+    return decodeContextHandle(context, output) as ContextEditBufferHandle
+  }
+
+  public destroyContextEditBuffer(context: NativeContextHandle, editBuffer: ContextEditBufferHandle): void {
+    this.destroyContextObject(context, editBuffer, "ot_edit_buffer_destroy")
+    const buffers = this.contextEditEvents.get(context)?.buffers
+    buffers?.get(editBuffer.slot)?.listeners.clear()
+    buffers?.delete(editBuffer.slot)
+  }
+
+  public createContextEditorView(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    width: number,
+    height: number,
+  ): ContextEditorViewHandle {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, editBuffer)
+    const columns = toSafeFFIU32Length(width, "Editor view width")
+    const rows = toSafeFFIU32Length(height, "Editor view height")
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_editor_view_create")
+    nativeResult(
+      "ot_editor_view_create",
+      this.opentui.symbols.ot_editor_view_create(pointer, handle, columns, rows, output),
+    )
+    return decodeContextHandle(context, output) as ContextEditorViewHandle
+  }
+
+  public destroyContextEditorView(context: NativeContextHandle, view: ContextEditorViewHandle): void {
+    this.destroyContextObject(context, view, "ot_editor_view_destroy")
+  }
+
+  public createContextSyntaxStyle(context: NativeContextHandle): ContextSyntaxStyleHandle {
+    this.getYogaHost().assertMutable()
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_syntax_style_create")
+    nativeResult("ot_syntax_style_create", this.opentui.symbols.ot_syntax_style_create(pointer, output))
+    try {
+      return decodeContextHandle(context, output) as ContextSyntaxStyleHandle
+    } catch (error) {
+      this.opentui.symbols.ot_syntax_style_destroy(pointer, output)
+      throw error
+    }
+  }
+
+  public destroyContextSyntaxStyle(context: NativeContextHandle, style: ContextSyntaxStyleHandle): void {
+    this.destroyContextObject(context, style, "ot_syntax_style_destroy")
+  }
+
+  public contextEditBufferSetSyntaxStyle(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    style: ContextSyntaxStyleHandle | null,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, editBuffer)
+    const target = style === null ? null : encodeContextHandle(context, style)
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_set_syntax_style")
+    nativeResult(
+      "ot_edit_buffer_set_syntax_style",
+      this.opentui.symbols.ot_edit_buffer_set_syntax_style(pointer, handle, target),
+    )
+  }
+
+  public contextEditBufferSetText(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    bytes: Uint8Array,
+    preserveHistory = false,
+  ): void {
+    const handle = encodeContextHandle(context, editBuffer)
+    const input = sessionBytes(bytes, "Edit buffer text length")
+    const preserve = toFFIBool(preserveHistory, "Edit buffer preserveHistory")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_set_text")
+      nativeResult(
+        "ot_edit_buffer_set_text",
+        this.opentui.symbols.ot_edit_buffer_set_text(pointer, handle, viewOrNull(input), input.length, preserve),
+      )
+    })
+  }
+
+  public contextEditBufferInsertText(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    bytes: Uint8Array,
+  ): void {
+    const handle = encodeContextHandle(context, editBuffer)
+    const input = sessionBytes(bytes, "Edit buffer insert length")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_insert_text")
+      nativeResult(
+        "ot_edit_buffer_insert_text",
+        this.opentui.symbols.ot_edit_buffer_insert_text(pointer, handle, viewOrNull(input), input.length),
+      )
+    })
+  }
+
+  public contextEditBufferDeleteRange(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+  ): void {
+    const handle = encodeContextHandle(context, editBuffer)
+    const rowStart = toSafeFFIU32Length(startRow, "Edit buffer start row")
+    const colStart = toSafeFFIU32Length(startCol, "Edit buffer start column")
+    const rowEnd = toSafeFFIU32Length(endRow, "Edit buffer end row")
+    const colEnd = toSafeFFIU32Length(endCol, "Edit buffer end column")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_delete_range")
+      nativeResult(
+        "ot_edit_buffer_delete_range",
+        this.opentui.symbols.ot_edit_buffer_delete_range(pointer, handle, rowStart, colStart, rowEnd, colEnd),
+      )
+    })
+  }
+
+  public contextEditBufferSetCursor(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    row: number,
+    col: number,
+  ): void {
+    const handle = encodeContextHandle(context, editBuffer)
+    const cursorRow = toSafeFFIU32Length(row, "Edit buffer cursor row")
+    const cursorCol = toSafeFFIU32Length(col, "Edit buffer cursor column")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_set_cursor")
+      nativeResult(
+        "ot_edit_buffer_set_cursor",
+        this.opentui.symbols.ot_edit_buffer_set_cursor(pointer, handle, cursorRow, cursorCol),
+      )
+    })
+  }
+
+  public contextEditBufferGetText(context: NativeContextHandle, editBuffer: ContextEditBufferHandle): string {
+    const handle = encodeContextHandle(context, editBuffer)
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_get_text")
+    return this.readText("ot_edit_buffer_get_text", (bytes, capacity, count) =>
+      this.opentui.symbols.ot_edit_buffer_get_text(pointer, handle, bytes, capacity, count),
+    )
+  }
+
+  public contextEditBufferGetInfo(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+  ): NativeEditBufferInfo {
+    const layout = nativeLayouts.ot_edit_buffer_info
+    const handle = encodeContextHandle(context, editBuffer)
+    const output = new BigUint64Array(layout.size / 8)
+    const words = new Uint32Array(output.buffer)
+    words[layout.fields.struct_size.offset / 4] = layout.size
+    words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_get_info")
+    nativeResult("ot_edit_buffer_get_info", this.opentui.symbols.ot_edit_buffer_get_info(pointer, handle, output))
+    return {
+      contentEpoch: output[layout.fields.content_epoch.offset / 8],
+      byteLength: words[layout.fields.byte_count.offset / 4],
+      lineCount: words[layout.fields.line_count.offset / 4],
+      cursor: {
+        row: words[layout.fields.cursor_row.offset / 4],
+        col: words[layout.fields.cursor_col.offset / 4],
+        offset: words[layout.fields.cursor_offset.offset / 4],
+      },
+      canUndo: words[layout.fields.can_undo.offset / 4] !== 0,
+      canRedo: words[layout.fields.can_redo.offset / 4] !== 0,
+      tabWidth: words[layout.fields.tab_width.offset / 4],
+    }
+  }
+
+  public contextEditBufferSetTabWidth(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    width: number,
+  ): void {
+    const handle = encodeContextHandle(context, editBuffer)
+    const value = toSafeFFIU32Length(width, "Edit buffer tab width")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_set_tab_width")
+      nativeResult(
+        "ot_edit_buffer_set_tab_width",
+        this.opentui.symbols.ot_edit_buffer_set_tab_width(pointer, handle, value),
+      )
+    })
+  }
+
+  public contextEditBufferCommand(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    command: NativeEditCommand,
+    argument = 0,
+  ): void {
+    const handle = encodeContextHandle(context, editBuffer)
+    const operation = toSafeFFIU32Length(command, "Edit buffer command")
+    const value = toSafeFFIU32Length(argument, "Edit buffer command argument")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_command")
+      nativeResult(
+        "ot_edit_buffer_command",
+        this.opentui.symbols.ot_edit_buffer_command(pointer, handle, operation, value),
+      )
+    })
+  }
+
+  public contextEditBufferHistory(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    redo: boolean,
+  ): string | null {
+    const handle = encodeContextHandle(context, editBuffer)
+    const direction = toFFIBool(redo, "Edit buffer redo")
+    // History mutates on each call; the ABI bounds cursor metadata at 64 bytes.
+    const bytes = new Uint8Array(64)
+    const count = new Uint32Array(1)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_history")
+      nativeResult(
+        "ot_edit_buffer_history",
+        this.opentui.symbols.ot_edit_buffer_history(pointer, handle, direction, bytes, bytes.length, count),
+      )
+    })
+    if (count[0] > bytes.length) throw new NativeError("ot_edit_buffer_history", NativeStatus.InternalError)
+    return count[0] === 0 ? null : this.decoder.decode(bytes.subarray(0, count[0]))
+  }
+
+  public contextEditBufferGetPosition(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    query: NativeEditPositionQuery,
+    a = 0,
+    b = 0,
+  ): LogicalCursor | null {
+    const layout = nativeLayouts.ot_edit_position
+    const handle = encodeContextHandle(context, editBuffer)
+    const selector = toSafeFFIU32Length(query, "Edit buffer position query")
+    const first = toSafeFFIU32Length(a, "Edit buffer position argument")
+    const second = toSafeFFIU32Length(b, "Edit buffer position column")
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_get_position")
+    nativeResult(
+      "ot_edit_buffer_get_position",
+      this.opentui.symbols.ot_edit_buffer_get_position(pointer, handle, selector, first, second, output),
+    )
+    return output[layout.fields.valid.offset / 4] === 0
+      ? null
+      : {
+          row: output[layout.fields.row.offset / 4],
+          col: output[layout.fields.col.offset / 4],
+          offset: output[layout.fields.offset.offset / 4],
+        }
+  }
+
+  public contextEditBufferGetRange(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    byCoords: boolean,
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+  ): string {
+    const handle = encodeContextHandle(context, editBuffer)
+    const coords = toFFIBool(byCoords, "Edit buffer range byCoords")
+    const rowStart = toSafeFFIU32Length(startRow, "Edit buffer range start row")
+    const colStart = toSafeFFIU32Length(startCol, "Edit buffer range start column")
+    const rowEnd = toSafeFFIU32Length(endRow, "Edit buffer range end row")
+    const colEnd = toSafeFFIU32Length(endCol, "Edit buffer range end column")
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_get_range")
+    return this.readText("ot_edit_buffer_get_range", (bytes, capacity, count) =>
+      this.opentui.symbols.ot_edit_buffer_get_range(
+        pointer,
+        handle,
+        coords,
+        rowStart,
+        colStart,
+        rowEnd,
+        colEnd,
+        bytes,
+        capacity,
+        count,
+      ),
+    )
+  }
+
+  public contextEditBufferConvertOffset(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    value: number,
+    toCell: boolean,
+  ): number {
+    const operation = "ot_edit_buffer_convert_offset"
+    const handle = encodeContextHandle(context, editBuffer)
+    const input = toSafeFFIU32Length(value, "Edit buffer index or offset")
+    const conversion = toCell ? nativeConstants.OT_EDIT_UTF16_TO_CELL : nativeConstants.OT_EDIT_CELL_TO_UTF16
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, operation)
+    nativeResult(
+      operation,
+      this.opentui.symbols.ot_edit_buffer_convert_offset(pointer, handle, conversion, input, output),
+    )
+    return output[0]
+  }
+
+  public contextEditBufferMeasureText(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    bytes: Uint8Array,
+  ): number {
+    const handle = encodeContextHandle(context, editBuffer)
+    const input = sessionBytes(bytes, "Edit buffer measure length")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_measure_text")
+    nativeResult(
+      "ot_edit_buffer_measure_text",
+      this.opentui.symbols.ot_edit_buffer_measure_text(pointer, handle, viewOrNull(input), input.length, output),
+    )
+    return output[0]
+  }
+
+  public editMeasureText(bytes: Uint8Array, widthMethod: WidthMethod, tabWidth: number): number {
+    const method = widthMethodId(widthMethod, "editor")
+    const width = toSafeFFIU32Length(tabWidth, "Edit buffer tab width")
+    const input = sessionBytes(bytes, "Edit buffer measure length")
+    const output = new Uint32Array(1)
+    this.editMeasureContext ??= this.createContext({ objectCapacity: 1, renderCellsMax: 1 })
+    const pointer = this.nativeContextPointer(this.editMeasureContext, "ot_edit_measure_text")
+    nativeResult(
+      "ot_edit_measure_text",
+      this.opentui.symbols.ot_edit_measure_text(pointer, viewOrNull(input), input.length, method, width, output),
+    )
+    return output[0]
+  }
+
+  public contextEditBufferSetDefaults(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    mask: NativeEditorStyleMask,
+    style: NativeEditorStyle,
+  ): void {
+    const handle = encodeContextHandle(context, editBuffer)
+    const fields = toSafeFFIU32Length(mask, "Editor default style mask")
+    const record = encodeEditorStyle(style)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_set_defaults")
+      nativeResult(
+        "ot_edit_buffer_set_defaults",
+        this.opentui.symbols.ot_edit_buffer_set_defaults(pointer, handle, fields, record),
+      )
+    })
+  }
+
+  public contextSyntaxStyleRegister(
+    context: NativeContextHandle,
+    style: ContextSyntaxStyleHandle,
+    name: string,
+    definition: NativeEditorStyle,
+  ): number {
+    const handle = encodeContextHandle(context, style)
+    if (typeof name !== "string") throw new TypeError("Syntax style name must be a string")
+    const bytes = this.encoder.encode(name)
+    const length = toSafeFFIU32Length(bytes.length, "Syntax style name length")
+    const record = encodeEditorStyle(definition)
+    const output = new Uint32Array(1)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_syntax_style_register")
+      nativeResult(
+        "ot_syntax_style_register",
+        this.opentui.symbols.ot_syntax_style_register(pointer, handle, viewOrNull(bytes), length, record, output),
+      )
+    })
+    return output[0]
+  }
+
+  public contextSyntaxStyleResolveByName(
+    context: NativeContextHandle,
+    style: ContextSyntaxStyleHandle,
+    name: string,
+  ): number | null {
+    const handle = encodeContextHandle(context, style)
+    if (typeof name !== "string") throw new TypeError("Syntax style name must be a string")
+    const bytes = sessionBytes(this.encoder.encode(name), "Syntax style name length")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_syntax_style_resolve")
+    nativeResult(
+      "ot_syntax_style_resolve",
+      this.opentui.symbols.ot_syntax_style_resolve(pointer, handle, viewOrNull(bytes), bytes.length, output),
+    )
+    return output[0] || null
+  }
+
+  public contextSyntaxStyleGetStyleCount(context: NativeContextHandle, style: ContextSyntaxStyleHandle): number {
+    const handle = encodeContextHandle(context, style)
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_syntax_style_get_count")
+    nativeResult("ot_syntax_style_get_count", this.opentui.symbols.ot_syntax_style_get_count(pointer, handle, output))
+    return output[0]
+  }
+
+  public contextEditBufferHighlight(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    operation: NativeEditHighlightOperation,
+    argument = 0,
+    highlight?: Highlight,
+  ): void {
+    const handle = encodeContextHandle(context, editBuffer)
+    const selector = toSafeFFIU32Length(operation, "Edit buffer highlight operation")
+    const value = toSafeFFIU32Length(argument, "Edit buffer highlight argument")
+    const record = encodeContextHighlight(highlight)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_highlight")
+      nativeResult(
+        "ot_edit_buffer_highlight",
+        this.opentui.symbols.ot_edit_buffer_highlight(pointer, handle, selector, value, record),
+      )
+    })
+  }
+
+  public contextEditBufferGetHighlights(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    line: number,
+  ): Highlight[] {
+    const handle = encodeContextHandle(context, editBuffer)
+    const row = toSafeFFIU32Length(line, "Highlight line")
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_get_highlights")
+    nativeResult(
+      "ot_edit_buffer_get_highlights",
+      this.opentui.symbols.ot_edit_buffer_get_highlights(pointer, handle, row, null, 0, count),
+    )
+    if (count[0] === 0) return []
+    const capacity = count[0]
+    const records = new Uint32Array(capacity * (nativeLayouts.ot_edit_highlight.size / 4))
+    nativeResult(
+      "ot_edit_buffer_get_highlights",
+      this.opentui.symbols.ot_edit_buffer_get_highlights(pointer, handle, row, records, capacity, count),
+    )
+    if (count[0] !== capacity) throw new NativeError("ot_edit_buffer_get_highlights", NativeStatus.InternalError)
+    return decodeContextHighlights(records)
+  }
+
+  /** Adds, removes or clears marks; returns the new id, the removed id or 0. */
+  public contextEditBufferMark(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    operation: NativeEditMarkOperation,
+    mark?: Partial<NativeEditMark>,
+  ): number {
+    const layout = nativeLayouts.ot_edit_mark
+    const handle = encodeContextHandle(context, editBuffer)
+    const fields = layout.fields
+    let record: Uint32Array | null = null
+    if (mark) {
+      record = createContextRecord(layout)
+      record[fields.id.offset / 4] = toSafeFFIU32Length(mark.id ?? 0, "Mark id")
+      record[fields.kind.offset / 4] = toSafeFFIU32Length(mark.kind ?? 0, "Mark type id")
+      record[fields.flags.offset / 4] = mark.atomic ? nativeConstants.OT_EDIT_MARK_ATOMIC : 0
+      record[fields.style.offset / 4] = toSafeFFIU32Length(mark.style ?? 0, "Mark style ID")
+      record[fields.priority.offset / 4] = toSafeFFIU32Length(mark.priority ?? 0, "Mark priority")
+      record[fields.start.offset / 4] = toSafeFFIU32Length(mark.start ?? 0, "Mark start")
+      record[fields.end.offset / 4] = toSafeFFIU32Length(mark.end ?? 0, "Mark end")
+    }
+    const output = record && new Uint32Array(1)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_edit_buffer_mark")
+      nativeResult(
+        "ot_edit_buffer_mark",
+        this.opentui.symbols.ot_edit_buffer_mark(pointer, handle, operation, record, output),
+      )
+    })
+    return output?.[0] ?? 0
+  }
+
+  /** Marks in (start, id) order: mark `id`, or all for 0, of type `kind`, or any when it is omitted. */
+  public contextEditBufferGetMarks(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    id = 0,
+    kind: number = nativeConstants.OT_EDIT_MARK_ANY_KIND,
+  ): NativeEditMark[] {
+    const layout = nativeLayouts.ot_edit_mark
+    const handle = encodeContextHandle(context, editBuffer)
+    const markId = toSafeFFIU32Length(id, "Mark id")
+    const markKind = toSafeFFIU32Length(kind, "Mark type id")
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_edit_buffer_get_marks")
+    const words = layout.size / 4
+    const copy = () =>
+      this.opentui.symbols.ot_edit_buffer_get_marks(
+        pointer,
+        handle,
+        markId,
+        markKind,
+        this.markRecords,
+        this.markRecords.length / words,
+        count,
+      )
+    // One call while the marks fit the kept records; an undersized call fails without output, so count and grow.
+    let status = copy()
+    if (status !== NativeStatus.Ok) {
+      nativeResult(
+        "ot_edit_buffer_get_marks",
+        this.opentui.symbols.ot_edit_buffer_get_marks(pointer, handle, markId, markKind, null, 0, count),
+      )
+      if (count[0] * words <= this.markRecords.length) nativeResult("ot_edit_buffer_get_marks", status)
+      this.markRecords = new Uint32Array(count[0] * 2 * words)
+      status = copy()
+      nativeResult("ot_edit_buffer_get_marks", status)
+    }
+    const records = this.markRecords
+    const marks: NativeEditMark[] = []
+    for (let offset = 0; offset < count[0] * words; offset += words) {
+      const field = (name: keyof typeof layout.fields) => records[offset + layout.fields[name].offset / 4]
+      marks.push({
+        id: field("id"),
+        kind: field("kind"),
+        atomic: (field("flags") & nativeConstants.OT_EDIT_MARK_ATOMIC) !== 0,
+        style: field("style"),
+        priority: field("priority"),
+        start: field("start"),
+        end: field("end"),
+      })
+    }
+    return marks
+  }
+
+  public contextEditorViewSetViewport(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    viewport: NativeEditorViewport,
+    sizeOnly = false,
+    moveCursor = false,
+  ): void {
+    const layout = nativeLayouts.ot_editor_viewport
+    const handle = encodeContextHandle(context, view)
+    const record = createContextRecord(layout)
+    record[layout.fields.x.offset / 4] = toSafeFFIU32Length(viewport.x, "Editor viewport x")
+    record[layout.fields.y.offset / 4] = toSafeFFIU32Length(viewport.y, "Editor viewport y")
+    record[layout.fields.width.offset / 4] = toSafeFFIU32Length(viewport.width, "Editor viewport width")
+    record[layout.fields.height.offset / 4] = toSafeFFIU32Length(viewport.height, "Editor viewport height")
+    const resize = toFFIBool(sizeOnly, "Editor viewport sizeOnly")
+    const move = toFFIBool(moveCursor, "Editor viewport moveCursor")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_editor_view_set_viewport")
+      nativeResult(
+        "ot_editor_view_set_viewport",
+        this.opentui.symbols.ot_editor_view_set_viewport(pointer, handle, record, resize, move),
+      )
+    })
+  }
+
+  public contextEditorViewGetViewport(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+  ): NativeEditorViewport {
+    const layout = nativeLayouts.ot_editor_viewport
+    const handle = encodeContextHandle(context, view)
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_editor_view_get_viewport")
+    nativeResult(
+      "ot_editor_view_get_viewport",
+      this.opentui.symbols.ot_editor_view_get_viewport(pointer, handle, output),
+    )
+    return {
+      x: output[layout.fields.x.offset / 4],
+      y: output[layout.fields.y.offset / 4],
+      width: output[layout.fields.width.offset / 4],
+      height: output[layout.fields.height.offset / 4],
+    }
+  }
+
+  public contextEditorViewSetScrollMargin(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    margin: number,
+  ): void {
+    const handle = encodeContextHandle(context, view)
+    const value = toFFIF32(margin, "Editor scroll margin")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_editor_view_set_scroll_margin")
+      nativeResult(
+        "ot_editor_view_set_scroll_margin",
+        this.opentui.symbols.ot_editor_view_set_scroll_margin(pointer, handle, value),
+      )
+    })
+  }
+
+  public contextEditorViewCommand(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    command: NativeEditorCommand,
+    argument = 0,
+  ): void {
+    const handle = encodeContextHandle(context, view)
+    const operation = toSafeFFIU32Length(command, "Editor view command")
+    const value = toSafeFFIU32Length(argument, "Editor view command argument")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_editor_view_command")
+      nativeResult(
+        "ot_editor_view_command",
+        this.opentui.symbols.ot_editor_view_command(pointer, handle, operation, value),
+      )
+    })
+  }
+
+  public contextEditorViewReplaceSelection(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    bytes: Uint8Array,
+  ): NativeEditorReplacement {
+    const handle = encodeContextHandle(context, view)
+    const input = sessionBytes(bytes, "Editor replacement length")
+    const output = new Uint32Array(1)
+    return this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_editor_view_replace_selection")
+      nativeResult(
+        "ot_editor_view_replace_selection",
+        this.opentui.symbols.ot_editor_view_replace_selection(pointer, handle, viewOrNull(input), input.length, output),
+      )
+      return { deleted: (output[0] & 1) !== 0, inserted: (output[0] & 2) !== 0 }
+    })
+  }
+
+  public contextEditorViewSetTabColor(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    color: RGBA | null,
+  ): void {
+    const handle = encodeContextHandle(context, view)
+    const record = color === null ? null : contextBufferColor(color)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_editor_view_set_tab_color")
+      nativeResult(
+        "ot_editor_view_set_tab_color",
+        this.opentui.symbols.ot_editor_view_set_tab_color(pointer, handle, record),
+      )
+    })
+  }
+
+  public contextEditorViewSelect(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    selection: NativeEditorSelection,
+  ): boolean {
+    const handle = encodeContextHandle(context, view)
+    const scratch = this.editorSelectionRecord ?? createEditorSelectionRecord()
+    this.editorSelectionRecord = undefined
+    try {
+      const record = encodeEditorSelection(selection, scratch)
+      const changed = scratch.changed
+      changed[0] = 0
+      this.getYogaHost().runMutation(() => {
+        const pointer = this.nativeContextPointer(context, "ot_editor_view_select")
+        nativeResult(
+          "ot_editor_view_select",
+          this.opentui.symbols.ot_editor_view_select(pointer, handle, record, changed),
+        )
+      })
+      return changed[0] !== 0
+    } finally {
+      this.editorSelectionRecord ??= scratch
+    }
+  }
+
+  public contextEditorViewGetInfo(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    followCursor = false,
+  ): NativeEditorViewInfo {
+    const layout = nativeLayouts.ot_editor_view_info
+    const handle = encodeContextHandle(context, view)
+    const follow = toFFIBool(followCursor, "Editor followCursor")
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_editor_view_get_info")
+    nativeResult(
+      "ot_editor_view_get_info",
+      this.opentui.symbols.ot_editor_view_get_info(pointer, handle, follow, output),
+    )
+    return {
+      virtualLineCount: output[layout.fields.virtual_line_count.offset / 4],
+      totalVirtualLineCount: output[layout.fields.total_virtual_line_count.offset / 4],
+      selection:
+        output[layout.fields.selection_present.offset / 4] === 0
+          ? null
+          : {
+              start: output[layout.fields.selection_start.offset / 4],
+              end: output[layout.fields.selection_end.offset / 4],
+            },
+      selectionOccupancy: output[layout.fields.selection_occupancy.offset / 4] === 0 ? "cell" : "boundary",
+    }
+  }
+
+  public contextEditorViewGetSelection(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+  ): Pick<NativeEditorViewInfo, "selection" | "selectionOccupancy"> {
+    const layout = nativeLayouts.ot_editor_view_info
+    const handle = encodeContextHandle(context, view)
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_editor_view_get_selection")
+    nativeResult(
+      "ot_editor_view_get_selection",
+      this.opentui.symbols.ot_editor_view_get_selection(pointer, handle, output),
+    )
+    return {
+      selection:
+        output[layout.fields.selection_present.offset / 4] === 0
+          ? null
+          : {
+              start: output[layout.fields.selection_start.offset / 4],
+              end: output[layout.fields.selection_end.offset / 4],
+            },
+      selectionOccupancy: output[layout.fields.selection_occupancy.offset / 4] === 0 ? "cell" : "boundary",
+    }
+  }
+
+  public contextEditorViewGetSelectedText(context: NativeContextHandle, view: ContextEditorViewHandle): string {
+    const handle = encodeContextHandle(context, view)
+    const pointer = this.nativeContextPointer(context, "ot_editor_view_get_selected_text")
+    return this.readText("ot_editor_view_get_selected_text", (bytes, capacity, count) =>
+      this.opentui.symbols.ot_editor_view_get_selected_text(pointer, handle, bytes, capacity, count),
+    )
+  }
+
+  public contextEditorViewGetPosition(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    query: NativeEditorPositionQuery,
+  ): VisualCursor {
+    const layout = nativeLayouts.ot_editor_position
+    const handle = encodeContextHandle(context, view)
+    const selector = toSafeFFIU32Length(query, "Editor position query")
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_editor_view_get_position")
+    nativeResult(
+      "ot_editor_view_get_position",
+      this.opentui.symbols.ot_editor_view_get_position(pointer, handle, selector, output),
+    )
+    return {
+      visualRow: output[layout.fields.visual_row.offset / 4],
+      visualCol: output[layout.fields.visual_col.offset / 4],
+      logicalRow: output[layout.fields.logical_row.offset / 4],
+      logicalCol: output[layout.fields.logical_col.offset / 4],
+      offset: output[layout.fields.offset.offset / 4],
+    }
+  }
+
+  public contextEditorViewGetLines(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    logical = false,
+  ): LineInfo {
+    const layout = nativeLayouts.ot_editor_measure
+    const handle = encodeContextHandle(context, view)
+    const mode = toFFIBool(logical, "Editor logical lines")
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_editor_view_get_lines")
+    nativeResult(
+      "ot_editor_view_get_lines",
+      this.opentui.symbols.ot_editor_view_get_lines(pointer, handle, mode, null, 0, output),
+    )
+    const count = output[layout.fields.line_count.offset / 4]
+    const lines = new Uint32Array(count * (nativeLayouts.ot_scene_text_line.size / 4))
+    if (count !== 0) {
+      nativeResult(
+        "ot_editor_view_get_lines",
+        this.opentui.symbols.ot_editor_view_get_lines(pointer, handle, mode, lines, count, output),
+      )
+      if (output[layout.fields.line_count.offset / 4] !== count)
+        throw new NativeError("ot_editor_view_get_lines", NativeStatus.InternalError)
+    }
+    return decodeContextTextLines(lines, output[layout.fields.width_cols_max.offset / 4])
+  }
+
+  public contextEditorViewMeasure(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    width: number,
+    height: number,
+  ): MeasureResult {
+    const layout = nativeLayouts.ot_editor_measure
+    const handle = encodeContextHandle(context, view)
+    const columns = toSafeFFIU32Length(width, "Editor measure width")
+    const rows = toSafeFFIU32Length(height, "Editor measure height")
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_editor_view_measure")
+    nativeResult(
+      "ot_editor_view_measure",
+      this.opentui.symbols.ot_editor_view_measure(pointer, handle, columns, rows, output),
+    )
+    return {
+      lineCount: output[layout.fields.line_count.offset / 4],
+      widthColsMax: output[layout.fields.width_cols_max.offset / 4],
+    }
+  }
+
+  public contextEditorViewSetPlaceholder(
+    context: NativeContextHandle,
+    view: ContextEditorViewHandle,
+    content: StyledText,
+  ): void {
+    const handle = encodeContextHandle(context, view)
+    const { bytes, records, count } = this.encodeStyledText(content, false)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_editor_view_set_placeholder")
+      nativeResult(
+        "ot_editor_view_set_placeholder",
+        this.opentui.symbols.ot_editor_view_set_placeholder(
+          pointer,
+          handle,
+          viewOrNull(bytes),
+          bytes.length,
+          count === 0 ? null : records,
+          count,
+        ),
+      )
+    })
+  }
+
+  public onContextEditEvent(
+    context: NativeContextHandle,
+    editBuffer: ContextEditBufferHandle,
+    handler: (event: NativeEditEventName) => void,
+  ): () => void {
+    this.getYogaHost().assertMutable()
+    if (typeof handler !== "function") throw new TypeError("Edit event handler must be a function")
+    const handle = decodeContextHandle(context, encodeContextHandle(context, editBuffer)) as ContextEditBufferHandle
+    this.contextEditBufferGetInfo(context, handle)
+    let registration = this.contextEditEvents.get(context)
+    if (!registration) {
+      const buffers = new Map<
+        number,
+        { handle: ContextEditBufferHandle; listeners: Set<{ handler: (event: NativeEditEventName) => void }> }
+      >()
+      const names: Partial<Record<number, NativeEditEventName>> = {
+        [NativeEditEvent.CursorChanged]: "cursor-changed",
+        [NativeEditEvent.ContentChanged]: "content-changed",
+        [NativeEditEvent.HistoryCursorChanged]: "cursorChanged",
+      }
+      const callback = this.opentui.createCallback(
+        (contextId: bigint, slot: number, generation: number, event: number) => {
+          this.getYogaHost().invokeCallback(() => {
+            const entry = buffers.get(slot)
+            if (!entry || entry.handle.contextId !== contextId || entry.handle.generation !== generation) return
+            const name = names[event]
+            if (name === undefined) throw new Error("Native editor returned an unknown event")
+            const listeners = [...entry.listeners]
+            // Do not batch events: application microtasks can occur between native edits.
+            queueMicrotask(() => {
+              for (const listener of listeners) {
+                if (!this.nativeContexts.has(context) || buffers.get(slot) !== entry) return
+                if (entry.listeners.has(listener)) listener.handler(name)
+              }
+            })
+          })
+        },
+        nativeCallbacks.ot_edit_event_callback,
+      )
+      try {
+        if (!callback.ptr) throw new Error("Failed to create native edit event callback")
+        registration = { callback, buffers }
+        this.contextEditEvents.set(context, registration)
+        const pointer = this.nativeContextPointer(context, "ot_context_set_edit_event_callback")
+        nativeResult(
+          "ot_context_set_edit_event_callback",
+          this.opentui.symbols.ot_context_set_edit_event_callback(pointer, callback.ptr),
+        )
+      } catch (error) {
+        this.contextEditEvents.delete(context)
+        callback.close()
+        throw error
+      }
+    }
+    let entry = registration.buffers.get(handle.slot)
+    if (!entry || entry.handle.contextId !== handle.contextId || entry.handle.generation !== handle.generation) {
+      entry = { handle, listeners: new Set() }
+      registration.buffers.set(handle.slot, entry)
+    }
+    const listener = { handler }
+    entry.listeners.add(listener)
+    return () => {
+      entry.listeners.delete(listener)
+      if (entry.listeners.size === 0 && registration.buffers.get(handle.slot) === entry)
+        registration.buffers.delete(handle.slot)
+    }
+  }
+
+  public sceneSetEditorView(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    view: ContextEditorViewHandle | null,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const target = view === null ? null : encodeContextHandle(context, view)
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_editor_view")
+    nativeResult("ot_scene_set_editor_view", this.opentui.symbols.ot_scene_set_editor_view(pointer, handle, target))
+  }
+
+  public sceneSetEditorOptions(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    options: NativeSceneEditorOptions,
+  ): void {
+    const layout = nativeLayouts.ot_scene_editor_options
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const style = CURSOR_ID_TO_STYLE.indexOf(options.style)
+    if (style < 0) throw new TypeError("Unknown scene editor cursor style")
+    const record = createContextRecord(layout)
+    record[layout.fields.show_cursor.offset / 4] = toFFIBool(options.showCursor, "Editor showCursor")
+    record[layout.fields.style.offset / 4] = style
+    record[layout.fields.blinking.offset / 4] = toFFIBool(options.blinking, "Editor blinking")
+    new Uint16Array(record.buffer, layout.fields.color.offset, layout.fields.color.size / 2).set(
+      contextBufferColor(options.color),
+    )
+    const cursor =
+      options.cursor === undefined ? nativeConstants.OT_MOUSE_POINTER_UNCHANGED : MOUSE_STYLE_TO_ID[options.cursor]
+    if (typeof cursor !== "number") {
+      throw new TypeError("Unknown scene editor mouse pointer style")
+    }
+    record[layout.fields.mouse_pointer.offset / 4] = cursor
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_editor_options")
+    nativeResult(
+      "ot_scene_set_editor_options",
+      this.opentui.symbols.ot_scene_set_editor_options(pointer, handle, record),
+    )
+  }
+
+  public destroyContextImage(context: NativeContextHandle, image: ContextImageHandle): void {
+    this.destroyContextObject(context, image, "ot_image_destroy")
+  }
+
+  public sceneSetImage(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    image: ContextImageHandle | null,
+    fit: "fit" | "cover" | "fill",
+    protocol: ImageRenderProtocol,
+    buffer: ContextBufferHandle | null,
+  ): void {
+    const handle = encodeContextHandle(context, node)
+    const source = image === null ? null : encodeContextHandle(context, image)
+    const storage = buffer === null ? null : encodeContextHandle(context, buffer)
+    const fitId = IMAGE_FITS.indexOf(fit)
+    const protocolId = IMAGE_PROTOCOL_TO_ID[protocol]
+    if (fitId < 0 || !Number.isInteger(protocolId)) throw new TypeError("Unknown image fit or protocol")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_scene_set_image")
+      nativeResult(
+        "ot_scene_set_image",
+        this.opentui.symbols.ot_scene_set_image(pointer, handle, source, fitId, protocolId, storage),
+      )
+    })
+  }
+
+  public sceneSetVideo(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    fit: "fit" | "cover" | "fill",
+    buffer: ContextBufferHandle | null,
+  ): void {
+    const handle = encodeContextHandle(context, node)
+    const storage = buffer === null ? null : encodeContextHandle(context, buffer)
+    const fitId = IMAGE_FITS.indexOf(fit)
+    if (fitId < 0) throw new TypeError("Unknown video fit")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_scene_set_video")
+      nativeResult("ot_scene_set_video", this.opentui.symbols.ot_scene_set_video(pointer, handle, fitId, storage))
+    })
+  }
+
+  /** Sets the source region an image or video node shows; undefined shows the whole source. */
+  public sceneSetCrop(context: NativeContextHandle, node: SceneNodeHandle, crop: ExtractOptions | undefined): void {
+    const handle = encodeContextHandle(context, node)
+    const { left = 0, top = 0, width = 0, height = 0 } = crop ?? {}
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_scene_set_crop")
+      nativeResult(
+        "ot_scene_set_crop",
+        this.opentui.symbols.ot_scene_set_crop(pointer, handle, left, top, width, height),
+      )
+    })
+  }
+
+  /** Replaces the node's player; an empty path closes it. Without audio, playback opens no audio device. */
+  public videoOpen(context: NativeContextHandle, node: SceneNodeHandle, path: string, audio: boolean): NativeVideoInfo {
+    const handle = encodeContextHandle(context, node)
+    const bytes = path.length === 0 ? null : sessionBytes(this.encoder.encode(path), "Video path length")
+    const layout = nativeLayouts.ot_video_info
+    const output = new Uint8Array(layout.size)
+    const flags = audio ? 0 : nativeConstants.OT_VIDEO_OPEN_NO_AUDIO
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_open")
+      nativeResult(
+        "ot_video_open",
+        this.opentui.symbols.ot_video_open(pointer, handle, bytes, bytes?.byteLength ?? 0, flags, output),
+      )
+    })
+    const view = new DataView(output.buffer)
+    const fields = layout.fields
+    return {
+      durationUs: view.getBigInt64(fields.duration_us.offset, true),
+      width: view.getUint32(fields.width.offset, true),
+      height: view.getUint32(fields.height.offset, true),
+      fpsNum: view.getUint32(fields.fps_num.offset, true),
+      fpsDen: view.getUint32(fields.fps_den.offset, true),
+      hasAudio: view.getUint32(fields.has_audio.offset, true) !== 0,
+    }
+  }
+
+  public videoCall(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    operation: "ot_video_play" | "ot_video_pause",
+  ): void {
+    const handle = encodeContextHandle(context, node)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, operation)
+      nativeResult(operation, this.opentui.symbols[operation](pointer, handle))
+    })
+  }
+
+  public videoSeek(context: NativeContextHandle, node: SceneNodeHandle, timeUs: bigint): void {
+    const handle = encodeContextHandle(context, node)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_seek")
+      nativeResult("ot_video_seek", this.opentui.symbols.ot_video_seek(pointer, handle, timeUs))
+    })
+  }
+
+  public videoSetLoop(context: NativeContextHandle, node: SceneNodeHandle, loop: boolean): void {
+    const handle = encodeContextHandle(context, node)
+    const value = toFFIBool(loop, "Video loop")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_set_loop")
+      nativeResult("ot_video_set_loop", this.opentui.symbols.ot_video_set_loop(pointer, handle, value))
+    })
+  }
+
+  public videoSetMuted(context: NativeContextHandle, node: SceneNodeHandle, muted: boolean): void {
+    const handle = encodeContextHandle(context, node)
+    const value = toFFIBool(muted, "Video muted")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_set_muted")
+      nativeResult("ot_video_set_muted", this.opentui.symbols.ot_video_set_muted(pointer, handle, value))
+    })
+  }
+
+  public videoSetVolume(context: NativeContextHandle, node: SceneNodeHandle, volume: number): void {
+    const handle = encodeContextHandle(context, node)
+    const value = toFFIF32(volume, "Video volume")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_set_volume")
+      nativeResult("ot_video_set_volume", this.opentui.symbols.ot_video_set_volume(pointer, handle, value))
+    })
+  }
+
+  public videoSetAvSyncOffset(context: NativeContextHandle, node: SceneNodeHandle, offsetUs: bigint): void {
+    const handle = encodeContextHandle(context, node)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_set_av_sync_offset")
+      nativeResult(
+        "ot_video_set_av_sync_offset",
+        this.opentui.symbols.ot_video_set_av_sync_offset(pointer, handle, offsetUs),
+      )
+    })
+  }
+
+  public videoSetMaxFps(context: NativeContextHandle, node: SceneNodeHandle, fps: number): void {
+    const handle = encodeContextHandle(context, node)
+    if (!isFFIU32(fps)) throw new RangeError("Video maxFps must be a u32")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_set_max_fps")
+      nativeResult("ot_video_set_max_fps", this.opentui.symbols.ot_video_set_max_fps(pointer, handle, fps))
+    })
+  }
+
+  public videoGetState(context: NativeContextHandle, node: SceneNodeHandle): NativeVideoState {
+    const handle = encodeContextHandle(context, node)
+    const layout = nativeLayouts.ot_video_state
+    const output = this.videoStateRecord
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_get_state")
+      nativeResult("ot_video_get_state", this.opentui.symbols.ot_video_get_state(pointer, handle, output))
+    })
+    const view = this.videoStateView
+    const flags = view.getUint32(layout.fields.flags.offset, true)
+    return {
+      currentTimeUs: view.getBigInt64(layout.fields.current_time_us.offset, true),
+      framePtsUs: view.getBigInt64(layout.fields.frame_pts_us.offset, true),
+      playing: (flags & nativeConstants.OT_VIDEO_PLAYING) !== 0,
+      ended: (flags & nativeConstants.OT_VIDEO_ENDED) !== 0,
+      buffering: (flags & nativeConstants.OT_VIDEO_BUFFERING) !== 0,
+      audio: (flags & nativeConstants.OT_VIDEO_AUDIO) !== 0,
+      hasFrame: (flags & nativeConstants.OT_VIDEO_HAS_FRAME) !== 0,
+      failed: (flags & nativeConstants.OT_VIDEO_ERROR) !== 0,
+      qualityTier: view.getUint32(layout.fields.quality_tier.offset, true),
+    }
+  }
+
+  public videoGetError(context: NativeContextHandle, node: SceneNodeHandle): string {
+    const handle = encodeContextHandle(context, node)
+    return this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_video_get_error")
+      return this.readText("ot_video_get_error", (bytes, capacity, count) =>
+        this.opentui.symbols.ot_video_get_error(pointer, handle, bytes, capacity, count),
+      )
+    })
+  }
+
+  public contextDrawImage(
+    { context, target, frame }: NativeDrawingTarget,
+    image: ContextImageHandle,
+    options: NativeContextImageDraw,
+  ): boolean {
+    const layout = nativeLayouts.ot_image_draw_options
+    const handle = encodeContextHandle(context, target)
+    const ticket = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    const source = encodeContextHandle(context, image)
+    const record = new Uint32Array(layout.size / 4)
+    encodeImageDrawOptions(options, record, new Int32Array(record.buffer), 0)
+    const output = new Uint32Array(1)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_buffer_draw_image")
+      nativeResult(
+        "ot_buffer_draw_image",
+        this.opentui.symbols.ot_buffer_draw_image(pointer, handle, ticket, source, record, output),
+      )
+    })
+    return output[0] !== 0
+  }
+
+  public sessionSetImageResolution(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    terminalWidth: number,
+    terminalHeight: number,
+    pixelWidth: number,
+    pixelHeight: number,
+  ): void {
+    const handle = encodeContextHandle(context, session)
+    const columns = toSafeFFIU32Length(terminalWidth, "Terminal image columns")
+    const rows = toSafeFFIU32Length(terminalHeight, "Terminal image rows")
+    const width = toSafeFFIU32Length(pixelWidth, "Terminal image pixel width")
+    const height = toSafeFFIU32Length(pixelHeight, "Terminal image pixel height")
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_session_set_image_resolution")
+      nativeResult(
+        "ot_session_set_image_resolution",
+        this.opentui.symbols.ot_session_set_image_resolution(pointer, handle, columns, rows, width, height),
+      )
+    })
+  }
+
+  public sessionSetKittyImageTransport(context: NativeContextHandle, session: SessionHandle, mode: number): void {
+    const handle = encodeContextHandle(context, session)
+    const value = toSafeFFIU32Length(mode, "Session Kitty image transport")
+    const pointer = this.nativeContextPointer(context, "ot_session_set_kitty_image_transport")
+    nativeResult(
+      "ot_session_set_kitty_image_transport",
+      this.opentui.symbols.ot_session_set_kitty_image_transport(pointer, handle, value),
+    )
+  }
+
+  public sessionGetKittyImageTransport(
+    context: NativeContextHandle,
+    session: SessionHandle,
+  ): NativeSessionKittyImageTransportStatus {
+    const layout = nativeLayouts.ot_session_kitty_image_transport
+    const handle = encodeContextHandle(context, session)
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_session_get_kitty_image_transport")
+    nativeResult(
+      "ot_session_get_kitty_image_transport",
+      this.opentui.symbols.ot_session_get_kitty_image_transport(pointer, handle, output),
+    )
+    return {
+      requested: output[layout.fields.requested.offset / 4],
+      effective: output[layout.fields.effective.offset / 4],
+      fileState: output[layout.fields.file_state.offset / 4],
+      fallback: output[layout.fields.fallback.offset / 4],
+      pendingFiles: output[layout.fields.pending_files.offset / 4],
+      pendingBytes: output[layout.fields.pending_bytes.offset / 4],
+    }
+  }
+
+  public sessionPollKittyImageTransport(context: NativeContextHandle, session: SessionHandle, nowNs: bigint): boolean {
+    const now = toFFIU64(nowNs, "Session nowNs")
+    const handle = encodeContextHandle(context, session)
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_poll_kitty_image_transport")
+    nativeResult(
+      "ot_session_poll_kitty_image_transport",
+      this.opentui.symbols.ot_session_poll_kitty_image_transport(pointer, handle, now, output),
+    )
+    return output[0] !== 0
+  }
+
+  public sessionCancelKittyImageTransport(context: NativeContextHandle, session: SessionHandle, failed: boolean): void {
+    const handle = encodeContextHandle(context, session)
+    const value = toFFIBool(failed, "Session Kitty image transport failed")
+    const pointer = this.nativeContextPointer(context, "ot_session_cancel_kitty_image_transport")
+    nativeResult(
+      "ot_session_cancel_kitty_image_transport",
+      this.opentui.symbols.ot_session_cancel_kitty_image_transport(pointer, handle, value),
+    )
+  }
+
+  public sessionProcessKittyImageReply(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    bytes: Uint8Array,
+  ): number {
+    const handle = encodeContextHandle(context, session)
+    const input = sessionBytes(bytes, "Session Kitty image reply length")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_process_kitty_image_reply")
+    nativeResult(
+      "ot_session_process_kitty_image_reply",
+      this.opentui.symbols.ot_session_process_kitty_image_reply(
+        pointer,
+        handle,
+        viewOrNull(input),
+        input.byteLength,
+        output,
+      ),
+    )
+    return output[0]
+  }
+
+  public sessionStartKittyFileProbe(context: NativeContextHandle, session: SessionHandle): void {
+    const handle = encodeContextHandle(context, session)
+    const pointer = this.nativeContextPointer(context, "ot_session_start_kitty_file_probe")
+    nativeResult(
+      "ot_session_start_kitty_file_probe",
+      this.opentui.symbols.ot_session_start_kitty_file_probe(pointer, handle),
+    )
+  }
+
+  public createContextBuffer(context: NativeContextHandle, options: NativeContextBufferOptions): ContextBufferHandle {
+    const layout = nativeLayouts.ot_buffer_options
+    const widthMethod = widthMethodId(options.widthMethod ?? "unicode", "buffer")
+    const record = createContextRecord(layout)
+    record[layout.fields.width.offset / 4] = toSafeFFIU32Length(options.width, "Context buffer width")
+    record[layout.fields.height.offset / 4] = toSafeFFIU32Length(options.height, "Context buffer height")
+    record[layout.fields.width_method.offset / 4] = widthMethod
+    record[layout.fields.flags.offset / 4] = toFFIBool(options.respectAlpha ?? false, "Context buffer respectAlpha")
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_buffer_create")
+    nativeResult("ot_buffer_create", this.opentui.symbols.ot_buffer_create(pointer, record, output))
+    return decodeContextHandle(context, output) as ContextBufferHandle
+  }
+
+  public destroyContextBuffer(context: NativeContextHandle, buffer: ContextBufferHandle): void {
+    const handle = encodeContextHandle(context, buffer)
+    const pointer = this.nativeContextPointer(context, "ot_buffer_destroy")
+    nativeResult("ot_buffer_destroy", this.opentui.symbols.ot_buffer_destroy(pointer, handle))
+  }
+
+  public contextResizeBuffer(
+    context: NativeContextHandle,
+    buffer: ContextBufferHandle,
+    width: number,
+    height: number,
+  ): void {
+    const handle = encodeContextHandle(context, buffer)
+    const columns = toSafeFFIU32Length(width, "Context buffer width")
+    const rows = toSafeFFIU32Length(height, "Context buffer height")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_resize")
+    nativeResult("ot_buffer_resize", this.opentui.symbols.ot_buffer_resize(pointer, handle, columns, rows))
+  }
+
+  public contextDrawBuffer(drawing: NativeDrawingTarget, options: NativeBufferDraw): void {
+    this.getYogaHost().assertMutable()
+    // Convert first: a caller's toString can draw and reuse the scratch record and text buffers.
+    const text = drawRecordText(options)
+    const bottom = drawRecordBottomTitle(options)
+    const scratch = this.bufferDrawRecord ?? createBufferDrawRecord()
+    this.bufferDrawRecord = undefined
+    try {
+      const { context, target, frame } = drawing
+      const handle = encodeContextHandle(context, target)
+      const ticket = frame === null ? null : encodeSceneFrameRequest(context, frame)
+      const { signed, colors } = scratch
+      const encoded = encodeBufferDrawRecord(context, options, scratch.words, signed, colors, 0, scratch.source)
+      const record = scratch.records[encoded.operation]
+      const source = encoded.source
+      // No JavaScript runs between these encodes and the call, so the text buffers can be shared.
+      const textBytes = this.drawTextBytes
+      const bottomBytes = this.drawBottomBytes
+      const textLength = encodeDrawText(text, textBytes)
+      const bottomLength = encodeDrawText(bottom, bottomBytes)
+      const pointer = this.nativeContextPointer(context, "ot_buffer_draw")
+      nativeResult(
+        "ot_buffer_draw",
+        this.opentui.symbols.ot_buffer_draw(
+          pointer,
+          handle,
+          ticket,
+          record,
+          source,
+          textLength === 0 ? this.emptyBytes : textBytes,
+          textLength,
+          bottomLength === 0 ? this.emptyBytes : bottomBytes,
+          bottomLength,
+        ),
+      )
+    } finally {
+      this.bufferDrawRecord ??= scratch
+    }
+  }
+
+  public contextBufferStack({ context, target, frame }: NativeDrawingTarget, options: NativeBufferStack): number {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, target)
+    const ticket = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    const operation = BUFFER_STACK_OPERATIONS.indexOf(options.operation)
+    if (operation < 0) throw new TypeError("Invalid checked buffer stack operation")
+    const x = toFFII32(options.x ?? 0, "Buffer scissor x")
+    const y = toFFII32(options.y ?? 0, "Buffer scissor y")
+    const width = toSafeFFIU32Length(options.width ?? 0, "Buffer scissor width")
+    const height = toSafeFFIU32Length(options.height ?? 0, "Buffer scissor height")
+    const opacity = options.opacity ?? 1
+    if (!Number.isFinite(opacity)) throw new RangeError("Buffer opacity must be finite")
+    // Stack operations never call back into JavaScript, so one input and output pair serves every call.
+    const input = this.bufferStackInput
+    const output = this.bufferStackOutput
+    input[0] = Math.max(0, Math.min(1, opacity))
+    output[0] = 0
+    const pointer = this.nativeContextPointer(context, "ot_buffer_stack")
+    nativeResult(
+      "ot_buffer_stack",
+      this.opentui.symbols.ot_buffer_stack(pointer, handle, ticket, operation, x, y, width, height, input, output),
+    )
+    return output[0]
+  }
+
+  public contextDrawGrid({ context, target, frame }: NativeDrawingTarget, options: NativeBufferGrid): void {
+    const layout = nativeLayouts.ot_buffer_grid_options
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, target)
+    const ticket = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    const { borderChars, borderFg, borderBg, columnOffsets, rowOffsets, drawInner, drawOuter } = options
+    if (borderChars.length !== 11) throw new RangeError("Border characters must contain 11 Unicode scalars")
+    const [columns, rows] = [columnOffsets, rowOffsets].map(
+      (offsets) =>
+        new Int32Array(
+          typedArrayAccessors.buffer.get!.call(offsets),
+          typedArrayAccessors.byteOffset.get!.call(offsets),
+          typedArrayAccessors.length.get!.call(offsets),
+        ),
+    )
+    const record = createContextRecord(layout)
+    record[layout.fields.flags.offset / 4] =
+      toFFIBool(drawInner, "Grid inner borders") | (toFFIBool(drawOuter, "Grid outer borders") << 1)
+    const colors = new Uint16Array(record.buffer)
+    contextBufferColor(borderFg, colors, layout.fields.foreground.offset / 2)
+    contextBufferColor(borderBg, colors, layout.fields.background.offset / 2)
+    record.set(borderChars, layout.fields.border_chars.offset / 4)
+    const columnCount = toSafeFFIU32Length(columns.length, "Grid column offsets")
+    const rowCount = toSafeFFIU32Length(rows.length, "Grid row offsets")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_draw_grid")
+    nativeResult(
+      "ot_buffer_draw_grid",
+      this.opentui.symbols.ot_buffer_draw_grid(pointer, handle, ticket, record, columns, columnCount, rows, rowCount),
+    )
+  }
+
+  public contextDrawPackedBuffer(
+    { context, target, frame }: NativeDrawingTarget,
+    data: Uint8Array | PointerInput,
+    byteLength: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, target)
+    const ticket = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    const length = toSafeFFIU32Length(byteLength, "Packed buffer byte count")
+    const input = pixelInput(data, length)
+    const cellX = toFFII32(x, "Packed buffer x")
+    const cellY = toFFII32(y, "Packed buffer y")
+    const cellWidth = toSafeFFIU32Length(width, "Packed buffer dimension")
+    const cellHeight = toSafeFFIU32Length(height, "Packed buffer dimension")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_draw_packed")
+    nativeResult(
+      "ot_buffer_draw_packed",
+      this.opentui.symbols.ot_buffer_draw_packed(
+        pointer,
+        handle,
+        ticket,
+        input,
+        length,
+        cellX,
+        cellY,
+        cellWidth,
+        cellHeight,
+      ),
+    )
+  }
+
+  public contextDrawSuperSampleBuffer(
+    { context, target, frame }: NativeDrawingTarget,
+    data: Uint8Array | PointerInput,
+    byteLength: number,
+    x: number,
+    y: number,
+    format: "rgba8unorm" | "bgra8unorm",
+    stride: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, target)
+    const ticket = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    if (format !== "rgba8unorm" && format !== "bgra8unorm") throw new TypeError("Unknown pixel format")
+    const length = toSafeFFIU32Length(byteLength, "Supersample buffer byte count")
+    const input = pixelInput(data, length)
+    const cellX = toFFII32(x, "Supersample buffer x")
+    const cellY = toFFII32(y, "Supersample buffer y")
+    const pixelFormat = format === "bgra8unorm" ? 0 : 1
+    const rowBytes = toSafeFFIU32Length(stride, "Supersample buffer dimension")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_draw_supersample")
+    nativeResult(
+      "ot_buffer_draw_supersample",
+      this.opentui.symbols.ot_buffer_draw_supersample(
+        pointer,
+        handle,
+        ticket,
+        input,
+        length,
+        cellX,
+        cellY,
+        pixelFormat,
+        rowBytes,
+      ),
+    )
+  }
+
+  public contextDrawGrayscaleBuffer(
+    { context, target, frame }: NativeDrawingTarget,
+    data: Float32Array,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    foreground: RGBA | null,
+    background: RGBA | null,
+    supersampled: boolean,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, target)
+    const ticket = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    if (!(data instanceof Float32Array)) throw new TypeError("Grayscale input must be a Float32Array")
+    const input = new Float32Array(
+      typedArrayAccessors.buffer.get!.call(data),
+      typedArrayAccessors.byteOffset.get!.call(data),
+      typedArrayAccessors.length.get!.call(data),
+    )
+    const count = toSafeFFIU32Length(input.length, "Grayscale sample count")
+    toFFII32(x, "Grayscale x")
+    toFFII32(y, "Grayscale y")
+    const sourceWidth = toSafeFFIU32Length(width, "Grayscale source width")
+    const sourceHeight = toSafeFFIU32Length(height, "Grayscale source height")
+    const fg = foreground === null ? null : contextBufferColor(foreground)
+    const bg = background === null ? null : contextBufferColor(background)
+    const doubled = toFFIBool(supersampled, "Grayscale supersampling")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_draw_grayscale")
+    nativeResult(
+      "ot_buffer_draw_grayscale",
+      this.opentui.symbols.ot_buffer_draw_grayscale(
+        pointer,
+        handle,
+        ticket,
+        input,
+        count,
+        x,
+        y,
+        sourceWidth,
+        sourceHeight,
+        fg,
+        bg,
+        doubled,
+      ),
+    )
+  }
+
+  public contextColorMatrixBuffer(
+    { context, target, frame }: NativeDrawingTarget,
+    matrix: Float32Array,
+    mask: Float32Array | null,
+    strength: number,
+    channel: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, target)
+    const ticket = frame === null ? null : encodeSceneFrameRequest(context, frame)
+    const [transform, cells] = [matrix, mask].map((value) => {
+      if (value === null) return null
+      if (!(value instanceof Float32Array)) throw new TypeError("Color matrix input must be a Float32Array")
+      return new Float32Array(
+        typedArrayAccessors.buffer.get!.call(value),
+        typedArrayAccessors.byteOffset.get!.call(value),
+        typedArrayAccessors.length.get!.call(value),
+      )
+    })
+    if (transform === null || transform.length !== 16) throw new RangeError("Color matrix must contain 16 floats")
+    const count = toSafeFFIU32Length(cells?.length ?? 0, "Color matrix mask length")
+    if (!Number.isFinite(strength)) throw new RangeError("Color matrix strength must be finite")
+    const targetChannel = toSafeFFIU32Length(channel, "Color matrix channel")
+    const pointer = this.nativeContextPointer(context, "ot_buffer_color_matrix")
+    nativeResult(
+      "ot_buffer_color_matrix",
+      this.opentui.symbols.ot_buffer_color_matrix(
+        pointer,
+        handle,
+        ticket,
+        transform,
+        transform.length,
+        // An empty mask must remain non-null on runtimes with null empty-array pointers.
+        cells?.length === 0 ? transform : cells,
+        count,
+        new Float32Array([strength]),
+        targetChannel,
+      ),
+    )
+  }
+
+  public contextAcquireBufferLease(
+    context: NativeContextHandle,
+    buffer: ContextBufferHandle,
+  ): NativeContextBufferLease {
+    return this.acquireBufferLease(context, buffer)
+  }
+
+  public createSession(context: NativeContextHandle, options: NativeSessionOptions): SessionHandle {
+    const layout = nativeLayouts.ot_session_options
+    const record = new BigUint64Array(layout.size / 8)
+    const words = new Uint32Array(record.buffer)
+    words[layout.fields.struct_size.offset / 4] = layout.size
+    words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    words[layout.fields.chunk_size.offset / 4] = toSafeFFIU32Length(options.chunkSize, "Session chunkSize")
+    words[layout.fields.span_capacity.offset / 4] = toSafeFFIU32Length(options.spanCapacity, "Session spanCapacity")
+    record[layout.fields.max_bytes.offset / 8] = toFFIU64(options.maxBytes, "Session maxBytes")
+    words[layout.fields.control_capacity.offset / 4] = toSafeFFIU32Length(
+      options.controlCapacity ?? 0,
+      "Session controlCapacity",
+    )
+    const output = new Uint32Array(handleWords)
+    const pointer = this.nativeContextPointer(context, "ot_session_create")
+    nativeResult("ot_session_create", this.opentui.symbols.ot_session_create(pointer, record, output))
+    return decodeContextHandle(context, output) as SessionHandle
+  }
+
+  public sessionGetWriteLimit(context: NativeContextHandle, session: SessionHandle): bigint {
+    const handle = encodeContextHandle(context, session)
+    const output = new BigUint64Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_get_write_limit")
+    nativeResult("ot_session_get_write_limit", this.opentui.symbols.ot_session_get_write_limit(pointer, handle, output))
+    return output[0]
+  }
+
+  public sessionWrite(context: NativeContextHandle, session: SessionHandle, bytes: Uint8Array): void {
+    const handle = encodeContextHandle(context, session)
+    const input = sessionBytes(bytes, "Session write length")
+    const length = input.byteLength
+    const pointer = this.nativeContextPointer(context, "ot_session_write")
+    const status = this.opentui.symbols.ot_session_write(pointer, handle, length === 0 ? null : input, length)
+    if (status === NativeStatus.OutputBackpressure && length > this.sessionGetWriteLimit(context, session)) {
+      throw new RangeError("Session write exceeds the atomic output limit")
+    }
+    nativeResult("ot_session_write", status)
+  }
+
+  public sessionAttachRenderer(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    options: NativeSessionRendererOptions,
+  ): void {
+    const layout = nativeLayouts.ot_session_renderer_env_options
+    const handle = encodeContextHandle(context, session)
+    const remote = options.remote
+    const record = createContextRecord(layout)
+    record[layout.fields.width.offset / 4] = toSafeFFIU32Length(options.width, "Session renderer width")
+    record[layout.fields.height.offset / 4] = toSafeFFIU32Length(options.height, "Session renderer height")
+    record[layout.fields.remote_mode.offset / 4] =
+      remote === undefined
+        ? nativeConstants.OT_SESSION_REMOTE_AUTO
+        : toFFIBool(remote, "Session renderer remote")
+          ? nativeConstants.OT_SESSION_REMOTE_REMOTE
+          : nativeConstants.OT_SESSION_REMOTE_LOCAL
+    const environment = options.environment ?? {}
+    const bytes = new Uint8Array(nativeConstants.OT_SESSION_ENV_BYTES_MAX)
+    const lengths = new DataView(bytes.buffer)
+    let offset = 0
+    for (const key of Object.keys(environment)) {
+      const value = environment[key]
+      if (typeof value !== "string") throw new TypeError("Session environment values must be strings")
+      // UTF-8 never has fewer bytes than UTF-16 code units, so this bounds the encoding work.
+      if (key.length + value.length + 8 > bytes.length - offset) {
+        throw new RangeError(`Session environment exceeds ${bytes.length} bytes`)
+      }
+      const keyBytes = this.encoder.encode(key)
+      const valueBytes = this.encoder.encode(value)
+      if (keyBytes.length + valueBytes.length + 8 > bytes.length - offset) {
+        throw new RangeError(`Session environment exceeds ${bytes.length} bytes`)
+      }
+      lengths.setUint32(offset, keyBytes.length, true)
+      lengths.setUint32(offset + 4, valueBytes.length, true)
+      bytes.set(keyBytes, offset + 8)
+      bytes.set(valueBytes, offset + 8 + keyBytes.length)
+      offset += 8 + keyBytes.length + valueBytes.length
+      record[layout.fields.entry_count.offset / 4]++
+    }
+    record[layout.fields.byte_count.offset / 4] = offset
+    const input = bytes.subarray(0, offset)
+    const pointer = this.nativeContextPointer(context, "ot_session_attach_renderer_with_env")
+    nativeResult(
+      "ot_session_attach_renderer_with_env",
+      this.opentui.symbols.ot_session_attach_renderer_with_env(pointer, handle, record, input),
+    )
+  }
+
+  public sessionResizeRenderer(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    width: number,
+    height: number,
+  ): void {
+    const handle = encodeContextHandle(context, session)
+    const columns = toSafeFFIU32Length(width, "Session renderer width")
+    const rows = toSafeFFIU32Length(height, "Session renderer height")
+    const pointer = this.nativeContextPointer(context, "ot_session_resize_renderer")
+    nativeResult(
+      "ot_session_resize_renderer",
+      this.opentui.symbols.ot_session_resize_renderer(pointer, handle, columns, rows),
+    )
+  }
+
+  public sessionSetDebugOverlay(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    enabled: boolean,
+    corner: DebugOverlayCorner,
+  ): void {
+    const handle = encodeContextHandle(context, session)
+    const active = toFFIBool(enabled, "Session debug overlay enabled")
+    const position = toSafeFFIU32Length(corner, "Session debug overlay corner")
+    const pointer = this.nativeContextPointer(context, "ot_session_set_debug_overlay")
+    nativeResult(
+      "ot_session_set_debug_overlay",
+      this.opentui.symbols.ot_session_set_debug_overlay(pointer, handle, active, position),
+    )
+  }
+
+  public sessionUpdateStats(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    overallMs: number,
+    fps: number,
+    callbackMs: number,
+  ): void {
+    const handle = encodeContextHandle(context, session)
+    const framesPerSecond = toSafeFFIU32Length(fps, "Session frames per second")
+    for (const value of [overallMs, callbackMs]) {
+      if (!Number.isFinite(value) || value < 0)
+        throw new RangeError("Session frame times must be finite nonnegative numbers")
+    }
+    const pointer = this.nativeContextPointer(context, "ot_session_update_stats")
+    nativeResult(
+      "ot_session_update_stats",
+      this.opentui.symbols.ot_session_update_stats(pointer, handle, overallMs, framesPerSecond, callbackMs),
+    )
+  }
+
+  public sessionUpdateMemoryStats(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    heapUsed: number,
+    heapTotal: number,
+    arrayBuffers: number,
+  ): void {
+    const handle = encodeContextHandle(context, session)
+    const used = toSafeFFIU32Length(heapUsed, "Session heap used")
+    const total = toSafeFFIU32Length(heapTotal, "Session heap total")
+    const buffers = toSafeFFIU32Length(arrayBuffers, "Session array buffers")
+    const pointer = this.nativeContextPointer(context, "ot_session_update_memory_stats")
+    nativeResult(
+      "ot_session_update_memory_stats",
+      this.opentui.symbols.ot_session_update_memory_stats(pointer, handle, used, total, buffers),
+    )
+  }
+
+  public sessionDumpHitGrid(context: NativeContextHandle, session: SessionHandle): void {
+    const handle = encodeContextHandle(context, session)
+    const pointer = this.nativeContextPointer(context, "ot_session_dump_hit_grid")
+    nativeResult("ot_session_dump_hit_grid", this.opentui.symbols.ot_session_dump_hit_grid(pointer, handle))
+  }
+
+  public sessionGetRendererState(context: NativeContextHandle, session: SessionHandle): NativeSessionRendererState {
+    const layout = nativeLayouts.ot_session_renderer_state
+    const handle = encodeContextHandle(context, session)
+    const output = new BigUint64Array(layout.size / 8)
+    const words = new Uint32Array(output.buffer)
+    words[layout.fields.struct_size.offset / 4] = layout.size
+    words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const pointer = this.nativeContextPointer(context, "ot_session_get_renderer_state")
+    nativeResult(
+      "ot_session_get_renderer_state",
+      this.opentui.symbols.ot_session_get_renderer_state(pointer, handle, output),
+    )
+    return {
+      width: words[layout.fields.width.offset / 4],
+      height: words[layout.fields.height.offset / 4],
+      frameCount: output[layout.fields.frame_count.offset / 8],
+      framePending: words[layout.fields.frame_pending.offset / 4] !== 0,
+      imageUploadsPending: words[layout.fields.image_uploads_pending.offset / 4],
+      droppedFrames: words[layout.fields.dropped_frames.offset / 4],
+      droppedFrameBytes: words[layout.fields.dropped_frame_bytes.offset / 4],
+    }
+  }
+
+  public sessionAcquireBufferLease(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    which: SessionBuffer,
+  ): NativeSessionBufferLease {
+    if (which !== "current" && which !== "next") throw new TypeError("Session buffer must be current or next")
+    return this.acquireBufferLease(context, session, which)
+  }
+
+  public sessionGetLinkId(context: NativeContextHandle, session: SessionHandle, x: number, y: number): number {
+    const handle = encodeContextHandle(context, session)
+    toFFII32(x, "Link x")
+    toFFII32(y, "Link y")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_get_link_id")
+    nativeResult("ot_session_get_link_id", this.opentui.symbols.ot_session_get_link_id(pointer, handle, x, y, output))
+    return output[0] ?? 0
+  }
+
+  private acquireBufferLease(
+    context: NativeContextHandle,
+    target: ContextObjectHandle,
+    which?: SessionBuffer,
+    frame?: NativeSceneFrameRequest,
+  ): NativeContextBufferLease {
+    const layout = nativeLayouts.ot_buffer_lease_snapshot
+    const handle = encodeContextHandle(context, target)
+    const ticket = frame === undefined ? null : encodeSceneFrameRequest(context, frame)
+    const output = new BigUint64Array(layout.size / 8)
+    const words = new Uint32Array(output.buffer)
+    const lease = new BigUint64Array(output.buffer, layout.fields.lease.offset, layout.fields.lease.size / 8)
+    words[layout.fields.struct_size.offset / 4] = layout.size
+    words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const operation = ticket
+      ? "ot_scene_frame_acquire_buffer_lease"
+      : which === undefined
+        ? "ot_buffer_acquire_lease"
+        : "ot_session_acquire_buffer_lease"
+    const pointer = this.nativeContextPointer(context, operation)
+    nativeResult(
+      operation,
+      ticket
+        ? this.opentui.symbols.ot_scene_frame_acquire_buffer_lease(
+            pointer,
+            handle,
+            ticket,
+            which === "current" ? 0 : 1,
+            output,
+          )
+        : which === undefined
+          ? this.opentui.symbols.ot_buffer_acquire_lease(pointer, handle, output)
+          : this.opentui.symbols.ot_session_acquire_buffer_lease(pointer, handle, which === "current" ? 0 : 1, output),
+    )
+    try {
+      return {
+        handle: decodeContextHandle(context, lease),
+        width: words[layout.fields.width.offset / 4],
+        height: words[layout.fields.height.offset / 4],
+        generation: output[layout.fields.generation.offset / 8],
+        char: toPointer(output[layout.fields.char_ptr.offset / 8]),
+        fg: toPointer(output[layout.fields.fg_ptr.offset / 8]),
+        bg: toPointer(output[layout.fields.bg_ptr.offset / 8]),
+        attributes: toPointer(output[layout.fields.attributes_ptr.offset / 8]),
+      }
+    } catch (error) {
+      this.opentui.symbols.ot_buffer_lease_release(pointer, lease)
+      throw error
+    }
+  }
+
+  public contextValidateBufferLease(context: NativeContextHandle, lease: ContextObjectHandle): void {
+    const handle = encodeContextHandle(context, lease)
+    const pointer = this.nativeContextPointer(context, "ot_buffer_lease_validate")
+    nativeResult("ot_buffer_lease_validate", this.opentui.symbols.ot_buffer_lease_validate(pointer, handle))
+  }
+
+  public contextReleaseBufferLease(context: NativeContextHandle, lease: ContextObjectHandle): void {
+    const handle = encodeContextHandle(context, lease)
+    const pointer = this.nativeContextPointer(context, "ot_buffer_lease_release")
+    nativeResult("ot_buffer_lease_release", this.opentui.symbols.ot_buffer_lease_release(pointer, handle))
+  }
+
+  public contextBufferLeaseGetRealCharSize(
+    context: NativeContextHandle,
+    lease: ContextObjectHandle,
+    addLineBreaks: boolean,
+  ): number {
+    const handle = encodeContextHandle(context, lease)
+    const lineBreaks = toFFIBool(addLineBreaks, "Buffer lease addLineBreaks")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_buffer_lease_get_real_char_size")
+    nativeResult(
+      "ot_buffer_lease_get_real_char_size",
+      this.opentui.symbols.ot_buffer_lease_get_real_char_size(pointer, handle, lineBreaks, output),
+    )
+    return output[0]
+  }
+
+  public contextBufferLeaseWriteResolvedChars(
+    context: NativeContextHandle,
+    lease: ContextObjectHandle,
+    bytes: Uint8Array,
+    addLineBreaks: boolean,
+    cellLengths?: Uint8Array,
+  ): number {
+    const handle = encodeContextHandle(context, lease)
+    const target = sessionBytes(bytes, "Buffer lease resolved character capacity")
+    const capacity = target.byteLength
+    const lineBreaks = toFFIBool(addLineBreaks, "Buffer lease addLineBreaks")
+    const lengths = cellLengths === undefined ? null : sessionBytes(cellLengths, "Buffer lease cell length capacity")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_buffer_lease_write_resolved_chars")
+    nativeResult(
+      "ot_buffer_lease_write_resolved_chars",
+      this.opentui.symbols.ot_buffer_lease_write_resolved_chars(
+        pointer,
+        handle,
+        capacity === 0 ? null : target,
+        capacity,
+        lineBreaks,
+        lengths,
+        lengths?.byteLength ?? 0,
+        output,
+      ),
+    )
+    return output[0]
+  }
+
+  public sessionSetupTerminal(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    options: NativeSessionTerminalOptions = {},
+  ): void {
+    const layout = nativeLayouts.ot_session_terminal_options
+    const handle = encodeContextHandle(context, session)
+    const synchronizedOutput = options.synchronizedOutput ?? "auto"
+    if (!Object.hasOwn(SYNCHRONIZED_OUTPUT_FLAGS, synchronizedOutput)) {
+      throw new TypeError("Session synchronizedOutput must be auto, always, or never")
+    }
+    const flag = (value: boolean | undefined, label: string, bit: number) =>
+      toFFIBool(value ?? true, `Session ${label}`) ? bit : 0
+    const flags =
+      flag(options.useAlternateScreen, "useAlternateScreen", nativeConstants.OT_TERMINAL_ALTERNATE_SCREEN) |
+      flag(options.mouse, "mouse", nativeConstants.OT_TERMINAL_MOUSE) |
+      flag(options.mouseMovement, "mouseMovement", nativeConstants.OT_TERMINAL_MOUSE_MOVEMENT) |
+      flag(options.clearOnClose, "clearOnClose", nativeConstants.OT_TERMINAL_CLEAR_ON_CLOSE) |
+      (options.replySentinel ? nativeConstants.OT_TERMINAL_REPLY_SENTINEL : 0) |
+      SYNCHRONIZED_OUTPUT_FLAGS[synchronizedOutput] |
+      (options.hostMultiplexer ? nativeConstants.OT_TERMINAL_HOST_MULTIPLEXER : 0)
+    const record = createContextRecord(layout)
+    record[layout.fields.flags.offset / 4] = flags
+    record[layout.fields.kitty_keyboard_flags.offset / 4] = toSafeFFIU32Length(
+      options.kittyKeyboardFlags ??
+        nativeConstants.OT_KITTY_KEYBOARD_DISAMBIGUATE | nativeConstants.OT_KITTY_KEYBOARD_ALTERNATE_KEYS,
+      "Session kittyKeyboardFlags",
+    )
+    const pointer = this.nativeContextPointer(context, "ot_session_setup_terminal")
+    nativeResult("ot_session_setup_terminal", this.opentui.symbols.ot_session_setup_terminal(pointer, handle, record))
+  }
+
+  public sessionSuspend(context: NativeContextHandle, session: SessionHandle): void {
+    const handle = encodeContextHandle(context, session)
+    const pointer = this.nativeContextPointer(context, "ot_session_suspend")
+    nativeResult("ot_session_suspend", this.opentui.symbols.ot_session_suspend(pointer, handle))
+  }
+
+  public sessionResume(context: NativeContextHandle, session: SessionHandle): void {
+    const handle = encodeContextHandle(context, session)
+    const pointer = this.nativeContextPointer(context, "ot_session_resume")
+    nativeResult("ot_session_resume", this.opentui.symbols.ot_session_resume(pointer, handle))
+  }
+
+  public sessionGetTerminalState(context: NativeContextHandle, session: SessionHandle): NativeSessionTerminalPhase {
+    const handle = encodeContextHandle(context, session)
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_get_terminal_state")
+    nativeResult(
+      "ot_session_get_terminal_state",
+      this.opentui.symbols.ot_session_get_terminal_state(pointer, handle, output),
+    )
+    return output[0]
+  }
+
+  public sessionPump(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    nowNs: bigint,
+    workBudget: number,
+  ): NativeSessionPumpResult {
+    const layout = nativeLayouts.ot_session_pump_result
+    const handle = encodeContextHandle(context, session)
+    const now = toFFIU64(nowNs, "Session nowNs")
+    const budget = toSafeFFIU32Length(workBudget, "Session workBudget")
+    const output = new BigUint64Array(layout.size / 8)
+    const words = new Uint32Array(output.buffer)
+    words[layout.fields.struct_size.offset / 4] = layout.size
+    words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const pointer = this.nativeContextPointer(context, "ot_session_pump")
+    nativeResult("ot_session_pump", this.opentui.symbols.ot_session_pump(pointer, handle, now, budget, output))
+    const status: NativeSessionPumpStatus = words[layout.fields.status.offset / 4]
+    return {
+      status,
+      deadlineNs: status === NativeSessionPumpStatus.WaitUntil ? output[layout.fields.deadline_ns.offset / 8] : null,
+    }
+  }
+
+  public sessionPumpExit(context: NativeContextHandle, session: SessionHandle): NativeSessionPumpStatus {
+    const handle = encodeContextHandle(context, session)
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_pump_exit")
+    nativeResult("ot_session_pump_exit", this.opentui.symbols.ot_session_pump_exit(pointer, handle, output))
+    return output[0]
+  }
+
+  /**
+   * Parses terminal input into `ot_input_event` records (`records` must be 4-byte aligned) and
+   * their payload bytes. Stops when either buffer runs low; call again with the unconsumed rest.
+   */
+  public sessionInputFeed(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    bytes: Uint8Array,
+    nowNs: bigint,
+    records: Uint8Array,
+    payload: Uint8Array,
+  ): NativeInputDrain {
+    const layout = nativeLayouts.ot_input_drain
+    const handle = encodeContextHandle(context, session)
+    const input = sessionBytes(bytes, "Session input length")
+    const now = toFFIU64(nowNs, "Session input nowNs")
+    const recordView = sessionBytes(records, "Session input records length")
+    const payloadView = sessionBytes(payload, "Session input payload length")
+    if (recordView.byteOffset % nativeLayouts.ot_input_event.alignment !== 0) {
+      throw new RangeError("Session input records must be aligned to ot_input_event")
+    }
+    const capacity = Math.floor(recordView.byteLength / nativeLayouts.ot_input_event.size)
+    const output = new BigUint64Array(layout.size / 8)
+    const words = new Uint32Array(output.buffer)
+    words[layout.fields.struct_size.offset / 4] = layout.size
+    words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const pointer = this.nativeContextPointer(context, "ot_session_input_feed")
+    nativeResult(
+      "ot_session_input_feed",
+      this.opentui.symbols.ot_session_input_feed(
+        pointer,
+        handle,
+        input.byteLength === 0 ? null : input,
+        input.byteLength,
+        now,
+        recordView,
+        capacity,
+        payloadView,
+        payloadView.byteLength,
+        output,
+      ),
+    )
+    const deadline = output[layout.fields.deadline_ns.offset / 8]!
+    return {
+      consumed: words[layout.fields.consumed.offset / 4]!,
+      count: words[layout.fields.count.offset / 4]!,
+      deadlineNs: deadline === 0n ? null : deadline,
+    }
+  }
+
+  /** `flags` combines `OT_INPUT_EXPECT_*` bits. Emits nothing; the next feed re-evaluates. */
+  public sessionInputExpect(context: NativeContextHandle, session: SessionHandle, flags: number): void {
+    const handle = encodeContextHandle(context, session)
+    const value = toSafeFFIU32Length(flags, "Session input expectations")
+    const pointer = this.nativeContextPointer(context, "ot_session_input_expect")
+    nativeResult("ot_session_input_expect", this.opentui.symbols.ot_session_input_expect(pointer, handle, value))
+  }
+
+  public sessionInputReset(context: NativeContextHandle, session: SessionHandle, flags: number): void {
+    const handle = encodeContextHandle(context, session)
+    const pointer = this.nativeContextPointer(context, "ot_session_input_reset")
+    nativeResult("ot_session_input_reset", this.opentui.symbols.ot_session_input_reset(pointer, handle, flags))
+  }
+
+  /** Discards terminal input queued on process stdin. Best effort; see `ot_terminal_flush_input`. */
+  public terminalFlushInput(): void {
+    nativeResult("ot_terminal_flush_input", this.opentui.symbols.ot_terminal_flush_input())
+  }
+
+  public sessionControl(context: NativeContextHandle, session: SessionHandle, command: NativeSessionControl): void {
+    const layout = nativeLayouts.ot_session_control_options
+    const handle = encodeContextHandle(context, session)
+    const record = createContextRecord(layout)
+    const kind = layout.fields.kind.offset / 4
+    let bytes: Uint8Array | null = null
+    switch (command.kind) {
+      case "capability-response":
+        record[kind] = nativeConstants.OT_CONTROL_CAPABILITY_RESPONSE
+        bytes = sessionBytes(command.bytes, "Session capability response length")
+        break
+      case "palette-query":
+        record[kind] = nativeConstants.OT_CONTROL_PALETTE_QUERY
+        record[layout.fields.argument.offset / 4] = command.sentinel ? 1 : 0
+        bytes = sessionBytes(command.bytes, "Session palette query length")
+        break
+      case "title": {
+        record[kind] = nativeConstants.OT_CONTROL_TITLE
+        const title = command.title
+        if (typeof title !== "string") throw new TypeError("Session title must be a string")
+        // The title and its OSC 0 framing fit one control packet. UTF-8 is never shorter than UTF-16.
+        if (title.length > NATIVE_SESSION_CONTROL_PACKET_BYTES - "\x1b]0;\x07".length) {
+          throw new NativeError("ot_session_control", NativeStatus.InvalidArgument)
+        }
+        bytes = this.encoder.encode(title)
+        break
+      }
+      case "mouse": {
+        record[kind] = nativeConstants.OT_CONTROL_MOUSE
+        const mode = command.mode
+        if (mode !== "disabled" && mode !== "drag" && mode !== "motion") {
+          throw new TypeError("Session mouse mode must be disabled, drag, or motion")
+        }
+        record[layout.fields.argument.offset / 4] = mode === "disabled" ? 0 : mode === "drag" ? 1 : 2
+        break
+      }
+      case "kitty-keyboard-flags":
+        record[kind] = nativeConstants.OT_CONTROL_KITTY_KEYBOARD_FLAGS
+        record[layout.fields.argument.offset / 4] = toSafeFFIU32Length(command.flags, "Session Kitty keyboard flags")
+        break
+      case "program-status":
+        record[kind] = nativeConstants.OT_CONTROL_PROGRAM_STATUS
+        bytes = programStatusPayload(command.status, this.encoder)
+        break
+      case "restore-modes":
+        record[kind] = nativeConstants.OT_CONTROL_RESTORE_MODES
+        break
+      case "query-pixel-resolution":
+        record[kind] = nativeConstants.OT_CONTROL_QUERY_PIXEL_RESOLUTION
+        record[layout.fields.argument.offset / 4] = command.sentinel ? 1 : 0
+        break
+      case "query-theme-colors":
+        record[kind] = nativeConstants.OT_CONTROL_QUERY_THEME_COLORS
+        record[layout.fields.argument.offset / 4] = command.sentinel ? 1 : 0
+        break
+      case "reset-background":
+        record[kind] = nativeConstants.OT_CONTROL_RESET_BACKGROUND
+        break
+      case "end-reply-sentinel":
+        record[kind] = nativeConstants.OT_CONTROL_END_REPLY_SENTINEL
+        break
+      default:
+        throw new TypeError("Unknown Session control kind")
+    }
+    const length = bytes?.byteLength ?? 0
+    const pointer = this.nativeContextPointer(context, "ot_session_control")
+    nativeResult(
+      "ot_session_control",
+      this.opentui.symbols.ot_session_control(pointer, handle, record, length === 0 ? null : bytes, length),
+    )
+  }
+
+  public sessionClipboard(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    target: number,
+    bytes: Uint8Array,
+  ): boolean {
+    const handle = encodeContextHandle(context, session)
+    const selection = toSafeFFIU32Length(target, "Session clipboard target")
+    const input = sessionBytes(bytes, "Session clipboard byte count")
+    const out = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_clipboard")
+    nativeResult(
+      "ot_session_clipboard",
+      this.opentui.symbols.ot_session_clipboard(pointer, handle, selection, input, input.byteLength, out),
+    )
+    return out[0] !== 0
+  }
+
+  public sessionNotification(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    message: string,
+    title?: string,
+  ): boolean {
+    const handle = encodeContextHandle(context, session)
+    if (typeof message !== "string" || (title !== undefined && typeof title !== "string")) {
+      throw new TypeError("Notification message and title must be strings")
+    }
+    // One extra UTF-16 unit preserves native over-limit rejection without an unbounded encoding allocation.
+    const limit = NATIVE_SESSION_CONTROL_PACKET_BYTES + 1
+    const body = this.encoder.encode(message.slice(0, limit))
+    const heading = title === undefined ? null : this.encoder.encode(title.slice(0, limit))
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_notification")
+    nativeResult(
+      "ot_session_notification",
+      this.opentui.symbols.ot_session_notification(
+        pointer,
+        handle,
+        body,
+        body.byteLength,
+        heading,
+        heading?.byteLength ?? 0,
+        output,
+      ),
+    )
+    return output[0] !== 0
+  }
+
+  public sessionSetPaletteState(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    palette: readonly RGBA[],
+    foreground: RGBA,
+    background: RGBA,
+    epoch: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const count = toSafeFFIU32Length(palette.length, "Session palette length")
+    if (count > 256) throw new RangeError("Session palette cannot exceed 256 colors")
+    const input = new Uint16Array(count * 4)
+    for (let index = 0; index < count; index++) contextBufferColor(palette[index], input, index * 4)
+    const fg = contextBufferColor(foreground)
+    const bg = contextBufferColor(background)
+    const revision = toSafeFFIU32Length(epoch, "Session palette epoch")
+    const pointer = this.nativeContextPointer(context, "ot_session_set_palette_state")
+    nativeResult(
+      "ot_session_set_palette_state",
+      this.opentui.symbols.ot_session_set_palette_state(pointer, handle, input, count, fg, bg, revision),
+    )
+  }
+
+  public sessionSetCursor(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    options: NativeSessionCursorOptions,
+  ): void {
+    const layout = nativeLayouts.ot_session_cursor_update
+    const handle = encodeContextHandle(context, session)
+    const { position, style, blinking, color, cursor } = options
+    const bytes = new Uint8Array(layout.size)
+    const words = new Int32Array(bytes.buffer)
+    if (position !== undefined) {
+      const { x, y, visible } = position
+      for (const coordinate of [x, y]) {
+        if (!Number.isFinite(coordinate) || coordinate < -0x8000_0000 || coordinate > 0x7fff_ffff) {
+          throw new RangeError("Session cursor coordinates must fit signed 32-bit cells")
+        }
+      }
+      words[layout.fields.fields.offset / 4] |= nativeConstants.OT_CURSOR_POSITION
+      words[layout.fields.x.offset / 4] = x
+      words[layout.fields.y.offset / 4] = y
+      bytes[layout.fields.visible.offset] = toFFIBool(visible, "Session cursor visibility")
+    }
+    if (style != null) {
+      const id = CURSOR_STYLE_TO_ID[style]
+      if (typeof id !== "number") throw new TypeError("Unknown cursor style")
+      words[layout.fields.fields.offset / 4] |= nativeConstants.OT_CURSOR_STYLE
+      bytes[layout.fields.style.offset] = id
+    }
+    if (blinking != null) {
+      words[layout.fields.fields.offset / 4] |= nativeConstants.OT_CURSOR_BLINKING
+      bytes[layout.fields.blinking.offset] = toFFIBool(blinking, "Session cursor blinking")
+    }
+    if (color != null) {
+      const source = rgbaBuffer(color)
+      if (source.length !== 4) throw new RangeError("Session cursor color must have four packed RGBA lanes")
+      words[layout.fields.fields.offset / 4] |= nativeConstants.OT_CURSOR_COLOR
+      new Uint16Array(bytes.buffer, layout.fields.color.offset, layout.fields.color.size / 2).set(source)
+    }
+    if (cursor != null) {
+      const id = MOUSE_STYLE_TO_ID[cursor]
+      if (typeof id !== "number") throw new TypeError("Unknown mouse pointer style")
+      words[layout.fields.fields.offset / 4] |= nativeConstants.OT_CURSOR_MOUSE_POINTER
+      bytes[layout.fields.mouse_pointer.offset] = id
+    }
+    const record = new Uint32Array(nativeLayouts.ot_session_control_options.size / 4)
+    record[nativeLayouts.ot_session_control_options.fields.struct_size.offset / 4] =
+      nativeLayouts.ot_session_control_options.size
+    record[nativeLayouts.ot_session_control_options.fields.abi_version.offset / 4] =
+      nativeConstants.OT_CONTEXT_ABI_VERSION
+    record[nativeLayouts.ot_session_control_options.fields.kind.offset / 4] = nativeConstants.OT_CONTROL_CURSOR
+    const pointer = this.nativeContextPointer(context, "ot_session_control")
+    nativeResult(
+      "ot_session_control",
+      this.opentui.symbols.ot_session_control(pointer, handle, record, bytes, bytes.byteLength),
+    )
+  }
+
+  public sessionGetCapabilities(context: NativeContextHandle, session: SessionHandle): NativeSessionCapabilities {
+    const layout = nativeLayouts.ot_session_capabilities
+    const handle = encodeContextHandle(context, session)
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_session_get_capabilities")
+    nativeResult(
+      "ot_session_get_capabilities",
+      this.opentui.symbols.ot_session_get_capabilities(pointer, handle, output),
+    )
+    const flags = output[layout.fields.flags.offset / 4]
+    const flag = (bit: number) => (flags & bit) !== 0
+    const bytes = new Uint8Array(output.buffer)
+    return {
+      kitty_keyboard: flag(nativeConstants.OT_CAP_KITTY_KEYBOARD),
+      kitty_graphics: flag(nativeConstants.OT_CAP_KITTY_GRAPHICS),
+      rgb: flag(nativeConstants.OT_CAP_RGB),
+      ansi256: flag(nativeConstants.OT_CAP_ANSI256),
+      sgr_pixels: flag(nativeConstants.OT_CAP_SGR_PIXELS),
+      color_scheme_updates: flag(nativeConstants.OT_CAP_COLOR_SCHEME_UPDATES),
+      explicit_width: flag(nativeConstants.OT_CAP_EXPLICIT_WIDTH),
+      scaled_text: flag(nativeConstants.OT_CAP_SCALED_TEXT),
+      sixel: flag(nativeConstants.OT_CAP_SIXEL),
+      focus_tracking: flag(nativeConstants.OT_CAP_FOCUS_TRACKING),
+      sync: flag(nativeConstants.OT_CAP_SYNC),
+      bracketed_paste: flag(nativeConstants.OT_CAP_BRACKETED_PASTE),
+      hyperlinks: flag(nativeConstants.OT_CAP_HYPERLINKS),
+      osc52: flag(nativeConstants.OT_CAP_OSC52),
+      notifications: flag(nativeConstants.OT_CAP_NOTIFICATIONS),
+      explicit_cursor_positioning: flag(nativeConstants.OT_CAP_EXPLICIT_CURSOR_POSITIONING),
+      remote: flag(nativeConstants.OT_CAP_REMOTE),
+      program_status: flag(nativeConstants.OT_CAP_PROGRAM_STATUS),
+      unicode: widthMethodFromCode(output[layout.fields.width_method.offset / 4]),
+      multiplexer: (["none", "tmux", "zellij", "screen", "unknown"] as const)[
+        output[layout.fields.multiplexer.offset / 4]
+      ],
+      image_protocol: (["auto", "kitty", "sixel", "blocks"] as const)[output[layout.fields.image_protocol.offset / 4]],
+      osc52_support: (["unknown", "supported", "unsupported"] as const)[output[layout.fields.osc52_support.offset / 4]],
+      kittyKeyboardFlags: output[layout.fields.kitty_keyboard_flags.offset / 4],
+      terminal: {
+        name: this.decoder.decode(
+          bytes.subarray(
+            layout.fields.term_name.offset,
+            layout.fields.term_name.offset + output[layout.fields.term_name_len.offset / 4],
+          ),
+        ),
+        version: this.decoder.decode(
+          bytes.subarray(
+            layout.fields.term_version.offset,
+            layout.fields.term_version.offset + output[layout.fields.term_version_len.offset / 4],
+          ),
+        ),
+        from_xtversion: output[layout.fields.term_from_xtversion.offset / 4] !== 0,
+      },
+    }
+  }
+
+  public sessionReadOutput(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    bytes: Uint8Array,
+  ): NativeOutputTicket | null {
+    const layout = nativeLayouts.ot_output_ticket
+    const handle = encodeContextHandle(context, session)
+    const target = sessionBytes(bytes, "Session output capacity")
+    const capacity = target.byteLength
+    const output = new BigUint64Array(layout.size / 8)
+    const pointer = this.nativeContextPointer(context, "ot_session_read_output")
+    nativeResult(
+      "ot_session_read_output",
+      this.opentui.symbols.ot_session_read_output(pointer, handle, capacity === 0 ? null : target, capacity, output),
+    )
+    const byteCount = new Uint32Array(output.buffer)[layout.fields.byte_count.offset / 4]
+    return byteCount === 0
+      ? null
+      : {
+          session: decodeContextHandle(
+            context,
+            new BigUint64Array(output.buffer, layout.fields.session.offset, nativeLayouts.ot_handle.size / 8),
+          ) as SessionHandle,
+          requestId: output[layout.fields.request_id.offset / 8],
+          byteCount,
+        }
+  }
+
+  public sessionDrainStdout(context: NativeContextHandle, session: SessionHandle, maxBytes = 65_536): number {
+    const handle = encodeContextHandle(context, session)
+    const limit = toSafeFFIU32Length(maxBytes, "Stdout byte limit")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_drain_stdout")
+    nativeResult(
+      "ot_session_drain_stdout",
+      this.opentui.symbols.ot_session_drain_stdout(pointer, handle, limit, output),
+    )
+    return output[0]
+  }
+
+  /** Collects a finished stdout writer copy and, when `maxBytes` is positive, starts the next. `wait` waits for
+   * the running copy (process exit). */
+  public sessionPostStdout(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    maxBytes: number,
+    wait: boolean,
+  ): { written: number; inFlight: boolean } {
+    const handle = encodeContextHandle(context, session)
+    const limit = toSafeFFIU32Length(maxBytes, "Stdout byte limit")
+    const state = new Uint32Array(1)
+    const written = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_session_post_stdout")
+    nativeResult(
+      "ot_session_post_stdout",
+      this.opentui.symbols.ot_session_post_stdout(pointer, handle, limit, wait ? 1 : 0, state, written),
+    )
+    return { written: written[0]!, inFlight: state[0] === 1 }
+  }
+
+  public sessionCompleteOutput(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    ticket: NativeOutputTicket,
+    success: boolean,
+  ): void {
+    const layout = nativeLayouts.ot_output_ticket
+    const written = toFFIBool(success, "Session output success")
+    const record = new BigUint64Array(layout.size / 8)
+    encodeContextHandle(
+      context,
+      ticket.session,
+      new BigUint64Array(record.buffer, layout.fields.session.offset, nativeLayouts.ot_handle.size / 8),
+    )
+    record[layout.fields.request_id.offset / 8] = toFFIU64(ticket.requestId, "Output requestId")
+    new Uint32Array(record.buffer)[layout.fields.byte_count.offset / 4] = toSafeFFIU32Length(
+      ticket.byteCount,
+      "Output byteCount",
+    )
+    const handle = encodeContextHandle(context, session)
+    const pointer = this.nativeContextPointer(context, "ot_session_complete_output")
+    nativeResult(
+      "ot_session_complete_output",
+      this.opentui.symbols.ot_session_complete_output(pointer, handle, record, written),
+    )
+  }
+
+  public sessionClose(context: NativeContextHandle, session: SessionHandle): void {
+    const handle = encodeContextHandle(context, session)
+    nativeResult(
+      "ot_session_close",
+      this.opentui.symbols.ot_session_close(this.nativeContextPointer(context, "ot_session_close"), handle),
+    )
+  }
+
+  public sessionDropOutput(context: NativeContextHandle, session: SessionHandle): void {
+    const handle = encodeContextHandle(context, session)
+    nativeResult(
+      "ot_session_drop_output",
+      this.opentui.symbols.ot_session_drop_output(this.nativeContextPointer(context, "ot_session_drop_output"), handle),
+    )
+  }
+
+  public sessionCancel(context: NativeContextHandle, session: SessionHandle): void {
+    const handle = encodeContextHandle(context, session)
+    nativeResult(
+      "ot_session_cancel",
+      this.opentui.symbols.ot_session_cancel(this.nativeContextPointer(context, "ot_session_cancel"), handle),
+    )
+  }
+
+  public sessionGetState(context: NativeContextHandle, session: SessionHandle): NativeSessionState {
+    const handle = encodeContextHandle(context, session)
+    const output = new Uint32Array(1)
+    nativeResult(
+      "ot_session_get_state",
+      this.opentui.symbols.ot_session_get_state(
+        this.nativeContextPointer(context, "ot_session_get_state"),
+        handle,
+        output,
+      ),
+    )
+    return output[0]
+  }
+
+  public destroySession(context: NativeContextHandle, session: SessionHandle): void {
+    this.destroyContextObject(context, session, "ot_session_destroy")
+    // Session teardown also invalidates detached nodes. Ask native ownership only
+    // for the sparse custom-provider set, never mirror every scene node in JS.
+    const registrations = this.sceneMeasures.get(context)?.nodes
+    if (!registrations) return
+    for (const [slot, entry] of registrations) {
+      try {
+        this.sceneHasMeasure(context, entry.handle)
+      } catch (error) {
+        if (!(error instanceof NativeError) || error.status !== NativeStatus.StaleHandle) throw error
+        registrations.delete(slot)
+      }
+    }
+  }
+
+  public sceneCreateNode(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    kind: (typeof SCENE_NODE_KINDS)[number],
+    num: number,
+  ): SceneNodeHandle {
+    this.getYogaHost().assertMutable()
+    const scratch = this.sceneCreateRecord ?? createSceneNodeRecord()
+    this.sceneCreateRecord = undefined
+    try {
+      const handle = encodeContextHandle(context, session, scratch.handle.record, scratch.handle.words)
+      const tag = SCENE_NODE_KINDS.indexOf(kind)
+      if (tag < 0) throw new TypeError("Unknown scene node kind")
+      const number = toSafeFFIU32Length(num, "Scene node number")
+      const output = scratch.target.record
+      const pointer = this.nativeContextPointer(context, "ot_scene_create_node")
+      nativeResult(
+        "ot_scene_create_node",
+        this.opentui.symbols.ot_scene_create_node(pointer, handle, tag, number, output),
+      )
+      try {
+        return decodeContextHandle(context, output, scratch.target.words) as SceneNodeHandle
+      } catch (error) {
+        const live = this.nativeContexts.get(context)
+        if (live !== undefined) this.opentui.symbols.ot_scene_destroy_node(live, output)
+        throw error
+      }
+    } finally {
+      this.sceneCreateRecord ??= scratch
+    }
+  }
+
+  public sceneDestroyNode(context: NativeContextHandle, node: SceneNodeHandle): void {
+    this.getYogaHost().assertMutable()
+    const scratch = this.sceneDestroyHandle ?? createContextHandleRecord()
+    this.sceneDestroyHandle = undefined
+    try {
+      const handle = encodeContextHandle(context, node, scratch.record, scratch.words)
+      const slot = scratch.words[nativeLayouts.ot_handle.fields.slot.offset / 4]
+      const pointer = this.nativeContextPointer(context, "ot_scene_destroy_node")
+      nativeResult("ot_scene_destroy_node", this.opentui.symbols.ot_scene_destroy_node(pointer, handle))
+      this.sceneMeasures.get(context)?.nodes.delete(slot)
+    } finally {
+      this.sceneDestroyHandle ??= scratch
+    }
+  }
+
+  public sceneSetMeasure(context: NativeContextHandle, node: SceneNodeHandle, measure: MeasureFunction | null): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const identity = decodeContextHandle(context, handle) as SceneNodeHandle
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_measure")
+    let registration = this.sceneMeasures.get(context)
+    const existing = registration !== undefined
+    if (measure && !registration) {
+      const nodes = new Map<number, { handle: SceneNodeHandle; measure: MeasureFunction }>()
+      const callback = this.opentui.createCallback(
+        (
+          contextId: bigint,
+          slot: number,
+          generation: number,
+          width: number,
+          widthMode: number,
+          height: number,
+          heightMode: number,
+          output: Pointer,
+        ) => {
+          this.getYogaHost().invokeCallback(() => {
+            const entry = nodes.get(slot)
+            if (!entry || entry.handle.contextId !== contextId || entry.handle.generation !== generation) {
+              throw new Error("Native scene returned a stale measurement handle")
+            }
+            const result = entry.measure(width, widthMode, height, heightMode)
+            rejectAsyncCallback(result)
+            const dimensions = new Float32Array([result?.width ?? NaN, result?.height ?? NaN])
+            new Float32Array(toArrayBuffer(output, 0, 8)).set(dimensions)
+          })
+        },
+        nativeCallbacks.ot_scene_measure_callback,
+      )
+      if (!callback.ptr) {
+        callback.close()
+        throw new Error("Failed to create native scene measurement callback")
+      }
+      registration = { callback, nodes }
+      this.sceneMeasures.set(context, registration)
+    }
+    try {
+      nativeResult(
+        "ot_scene_set_measure",
+        this.opentui.symbols.ot_scene_set_measure(pointer, handle, measure ? registration!.callback.ptr : null),
+      )
+    } catch (error) {
+      if (!existing && registration) {
+        registration.callback.close()
+        this.sceneMeasures.delete(context)
+      }
+      throw error
+    }
+    if (measure) {
+      registration!.nodes.set(identity.slot, { handle: identity, measure })
+    } else registration?.nodes.delete(identity.slot)
+  }
+
+  public sceneHasMeasure(context: NativeContextHandle, node: SceneNodeHandle): boolean {
+    const handle = encodeContextHandle(context, node)
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_scene_has_measure")
+    nativeResult("ot_scene_has_measure", this.opentui.symbols.ot_scene_has_measure(pointer, handle, output))
+    return output[0] !== 0
+  }
+
+  public sceneReachesHooks(context: NativeContextHandle, node: SceneNodeHandle): boolean {
+    const handle = encodeContextHandle(context, node)
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_scene_reaches_hooks")
+    nativeResult("ot_scene_reaches_hooks", this.opentui.symbols.ot_scene_reaches_hooks(pointer, handle, output))
+    return output[0] !== 0
+  }
+
+  public scenePainted(context: NativeContextHandle, node: SceneNodeHandle): boolean {
+    const handle = encodeContextHandle(context, node)
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_scene_painted")
+    nativeResult("ot_scene_painted", this.opentui.symbols.ot_scene_painted(pointer, handle, output))
+    return output[0] !== 0
+  }
+
+  public sceneMarkDirty(context: NativeContextHandle, node: SceneNodeHandle): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const pointer = this.nativeContextPointer(context, "ot_scene_mark_dirty")
+    nativeResult("ot_scene_mark_dirty", this.opentui.symbols.ot_scene_mark_dirty(pointer, handle))
+  }
+
+  public sceneMoveNode(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    parent: SceneNodeHandle | null,
+    index: number,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const scratch = this.sceneMoveRecord ?? createSceneNodeRecord()
+    this.sceneMoveRecord = undefined
+    try {
+      const handle = encodeContextHandle(context, node, scratch.handle.record, scratch.handle.words)
+      const destination =
+        parent === null ? null : encodeContextHandle(context, parent, scratch.target.record, scratch.target.words)
+      const childIndex = toSafeFFIU32Length(index, "Scene child index")
+      const pointer = this.nativeContextPointer(context, "ot_scene_move_node")
+      const status = this.opentui.symbols.ot_scene_move_node(pointer, handle, destination, childIndex)
+      // A move returns ObjectLimit for the Yoga depth limit; its other cause, 2^64 placements, cannot occur.
+      if (status === NativeStatus.ObjectLimit)
+        throw new NativeError("ot_scene_move_node", status, "Scene nesting depth exceeds the native limit")
+      nativeResult("ot_scene_move_node", status)
+    } finally {
+      this.sceneMoveRecord ??= scratch
+    }
+  }
+
+  public sceneSetViewport(context: NativeContextHandle, node: SceneNodeHandle, viewport: SceneNodeHandle | null): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const target = viewport === null ? null : encodeContextHandle(context, viewport)
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_viewport")
+    nativeResult("ot_scene_set_viewport", this.opentui.symbols.ot_scene_set_viewport(pointer, handle, target))
+  }
+
+  public sceneSetFocus(context: NativeContextHandle, node: SceneNodeHandle, focused: boolean): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const value = toFFIBool(focused, "Scene focused")
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_focus")
+    nativeResult("ot_scene_set_focus", this.opentui.symbols.ot_scene_set_focus(pointer, handle, value))
+  }
+
+  public sceneGetStyle(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    group: number,
+    kind: number,
+    edge: number,
+  ): { unit: number; value: number } {
+    const layout = nativeLayouts.ot_scene_style_value
+    const handle = encodeContextHandle(context, node)
+    const styleGroup = toSafeFFIU32Length(group, "Scene style group")
+    const styleKind = toSafeFFIU32Length(kind, "Scene style kind")
+    const styleEdge = toSafeFFIU32Length(edge, "Scene style edge")
+    const output = createContextRecord(layout)
+    const values = new Float32Array(output.buffer)
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_style")
+    nativeResult(
+      "ot_scene_get_style",
+      this.opentui.symbols.ot_scene_get_style(pointer, handle, styleGroup, styleKind, styleEdge, output),
+    )
+    return { unit: output[layout.fields.unit.offset / 4], value: values[layout.fields.value.offset / 4] }
+  }
+
+  public sceneSetBoxDetails(context: NativeContextHandle, node: SceneNodeHandle, details: NativeSceneBoxDetails): void {
+    const layout = nativeLayouts.ot_scene_box_details
+    const handle = encodeContextHandle(context, node)
+    const record = createContextRecord(layout)
+    const alignments = ["left", "center", "right"]
+    const topAlignment = alignments.indexOf(details.titleAlignment)
+    const bottomAlignment = alignments.indexOf(details.bottomTitleAlignment)
+    if (topAlignment < 0 || bottomAlignment < 0) throw new TypeError("Unknown Box title alignment")
+    record[layout.fields.title_alignment.offset / 4] = topAlignment
+    record[layout.fields.bottom_title_alignment.offset / 4] = bottomAlignment
+    const color = details.titleColor
+    if (color !== undefined) {
+      record[layout.fields.flags.offset / 4] |= 1
+      new Uint16Array(record.buffer, layout.fields.title_color.offset, layout.fields.title_color.size / 2).set(
+        contextBufferColor(color),
+      )
+    }
+    const chars = details.customBorderChars
+    if (chars !== undefined) {
+      if (!(chars instanceof Uint32Array) || chars.length !== 11) throw new TypeError("Box borders require 11 scalars")
+      record[layout.fields.flags.offset / 4] |= 2
+      record.set(chars, layout.fields.border_characters.offset / 4)
+    }
+    const title = details.title ?? ""
+    const bottomTitle = details.bottomTitle ?? ""
+    if (typeof title !== "string" || typeof bottomTitle !== "string") throw new TypeError("Box titles must be strings")
+    // No JavaScript runs between these encodes and the call, so the drawText buffers can be shared.
+    const topLength = encodeDrawText(title, this.drawTextBytes)
+    const bottomLength = encodeDrawText(bottomTitle, this.drawBottomBytes)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_scene_set_box_details")
+      nativeResult(
+        "ot_scene_set_box_details",
+        this.opentui.symbols.ot_scene_set_box_details(
+          pointer,
+          handle,
+          record,
+          topLength === 0 ? null : this.drawTextBytes,
+          topLength,
+          bottomLength === 0 ? null : this.drawBottomBytes,
+          bottomLength,
+        ),
+      )
+    })
+  }
+
+  public sceneSetSurface(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    buffer: ContextBufferHandle | null,
+  ): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const source = buffer === null ? null : encodeContextHandle(context, buffer)
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_surface")
+    nativeResult("ot_scene_set_surface", this.opentui.symbols.ot_scene_set_surface(pointer, handle, source))
+  }
+
+  /** Consume only native's accepted prefix. Allocation or admission failures leave
+   * the suffix staged so a retry cannot lose writes or replay accepted entries. A record
+   * that native rejects for its node can never apply, so it is dropped and reported once;
+   * paint fields the node staged since the last flush share that record and are dropped too. */
+  public sceneFlush(context: NativeContextHandle, staging: SceneStaging): void {
+    const operation = "ot_scene_flush"
+    const count = staging.count
+    if (count === 0) return
+    const applied = this.sceneFlushApplied ?? new Uint32Array(1)
+    // Keep the acknowledgement isolated through callbacks and reentrant error handling.
+    this.getYogaHost().runMutation(() => {
+      const views = staging._views(context)
+      this.sceneFlushApplied = undefined
+      applied[0] = 0
+      let status: NativeStatus
+      let rejected = 0
+      try {
+        const pointer = this.nativeContextPointer(context, operation)
+        status = this.opentui.symbols.ot_scene_flush(pointer, views, staging.byteLength, applied)
+        if (sceneRecordRejections.has(status) && applied[0] < count) rejected = 1
+      } finally {
+        this.sceneFlushApplied ??= applied
+        staging.consume(applied[0] + rejected)
+      }
+      if (status !== NativeStatus.Ok) {
+        const error = new NativeError(operation, status)
+        error.message += ` after ${applied[0]} of ${count} staged entries`
+        throw error
+      }
+    })
+  }
+
+  public sceneSetText(context: NativeContextHandle, node: SceneNodeHandle, bytes: Uint8Array): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const input = sessionBytes(bytes, "Scene text length")
+    const length = input.byteLength
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_text")
+    nativeResult(
+      "ot_scene_set_text",
+      this.opentui.symbols.ot_scene_set_text(pointer, handle, length === 0 ? null : input, length),
+    )
+  }
+
+  public sceneSetStyledText(context: NativeContextHandle, node: SceneNodeHandle, content: StyledText): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const { bytes, records, count, urlBytes } = this.encodeStyledText(content)
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_styled_text")
+    nativeResult(
+      "ot_scene_set_styled_text",
+      this.opentui.symbols.ot_scene_set_styled_text(
+        pointer,
+        handle,
+        viewOrNull(bytes),
+        bytes.length,
+        count === 0 ? null : records,
+        count,
+        viewOrNull(urlBytes),
+        urlBytes.length,
+      ),
+    )
+  }
+
+  /** The byte the latest finished frame drew at cell (x, y) of a text node, or undefined. */
+  public sceneGetTextByteAt(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    x: number,
+    y: number,
+  ): number | undefined {
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_text_byte_at")
+    nativeResult(
+      "ot_scene_get_text_byte_at",
+      this.opentui.symbols.ot_scene_get_text_byte_at(pointer, encodeContextHandle(context, node), x, y, output),
+    )
+    return output[0] === 0xffff_ffff ? undefined : output[0]
+  }
+
+  private markdownOptions(context: NativeContextHandle, options: NativeMarkdownOptions): Uint32Array {
+    const { fields } = nativeLayouts.ot_markdown_options
+    const record = createContextRecord(nativeLayouts.ot_markdown_options)
+    record[fields.flags.offset / 4] = options.flags
+    record[fields.source_byte_limit.offset / 4] = options.sourceByteLimit ?? 0
+    if (options.syntaxStyle)
+      record.set(encodeContextHandle(context, options.syntaxStyle), fields.syntax_style.offset / 4)
+    const filter = this.encoder.encode((options.hookFilter ?? []).join("\0"))
+    if (filter.length > fields.hook_filter.size) throw new RangeError("Markdown hook filter is too long")
+    new Uint8Array(record.buffer, fields.hook_filter.offset).set(filter)
+    record[fields.hook_filter_byte_count.offset / 4] = filter.length
+    return record
+  }
+
+  private markdownCall(
+    context: NativeContextHandle,
+    operation: string,
+    call: (pointer: Pointer, output: Uint32Array) => NativeStatus,
+  ): NativeMarkdownResult {
+    const output = new Uint32Array(3)
+    this.getYogaHost().runMutation(() =>
+      nativeResult(operation, call(this.nativeContextPointer(context, operation), output)),
+    )
+    const removed = output[2]
+    return { changed: output[0], committed: output[1], removedFrom: removed === 0xffff_ffff ? undefined : removed }
+  }
+
+  public markdownCreate(context: NativeContextHandle, options: NativeMarkdownOptions): ContextMarkdownHandle {
+    const record = this.markdownOptions(context, options)
+    const output = new Uint32Array(handleWords)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_markdown_create")
+      nativeResult("ot_markdown_create", this.opentui.symbols.ot_markdown_create(pointer, record, output))
+    })
+    return decodeContextHandle(context, output) as ContextMarkdownHandle
+  }
+
+  public markdownDestroy(context: NativeContextHandle, doc: ContextMarkdownHandle): void {
+    this.destroyContextObject(context, doc, "ot_markdown_destroy")
+  }
+
+  public markdownSetOptions(
+    context: NativeContextHandle,
+    doc: ContextMarkdownHandle,
+    options: NativeMarkdownOptions,
+  ): NativeMarkdownResult {
+    const record = this.markdownOptions(context, options)
+    const handle = encodeContextHandle(context, doc)
+    return this.markdownCall(context, "ot_markdown_set_options", (pointer, output) =>
+      this.opentui.symbols.ot_markdown_set_options(pointer, handle, record, output),
+    )
+  }
+
+  /** Appends `bytes`, or with `replace` parses them as the whole document. */
+  public markdownWrite(
+    context: NativeContextHandle,
+    doc: ContextMarkdownHandle,
+    bytes: Uint8Array,
+    replace: boolean,
+  ): NativeMarkdownResult {
+    const handle = encodeContextHandle(context, doc)
+    const input = sessionBytes(bytes, "Markdown byte count")
+    const operation = replace ? "ot_markdown_set" : "ot_markdown_append"
+    return this.markdownCall(context, operation, (pointer, output) =>
+      this.opentui.symbols[operation](pointer, handle, viewOrNull(input), input.length, output),
+    )
+  }
+
+  public markdownFinish(context: NativeContextHandle, doc: ContextMarkdownHandle): NativeMarkdownResult {
+    const handle = encodeContextHandle(context, doc)
+    return this.markdownCall(context, "ot_markdown_finish", (pointer, output) =>
+      this.opentui.symbols.ot_markdown_finish(pointer, handle, output),
+    )
+  }
+
+  /** The source's bytes `start` to `end` (default: all), read in place. */
+  public markdownGetSource(context: NativeContextHandle, doc: ContextMarkdownHandle, start = 0, end?: number): string {
+    const bytes = new BigUint64Array(1)
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_markdown_get_source")
+    nativeResult(
+      "ot_markdown_get_source",
+      this.opentui.symbols.ot_markdown_get_source(pointer, encodeContextHandle(context, doc), bytes, count),
+    )
+    const to = Math.min(end ?? count[0], count[0])
+    if (to <= start) return ""
+    return markdownDecoder.decode(new Uint8Array(toArrayBuffer(Number(bytes[0]) as Pointer, start, to - start)))
+  }
+
+  /** The blocks changed since the last read, in document order; reading acknowledges them. */
+  public markdownReadChanges(
+    context: NativeContextHandle,
+    doc: ContextMarkdownHandle,
+    count: number,
+  ): NativeMarkdownBlock[] {
+    const layout = nativeLayouts.ot_markdown_block
+    const words = new Uint32Array((count * layout.size) / 4)
+    const halves = new Uint16Array(words.buffer)
+    const output = new Uint32Array(1)
+    const handle = encodeContextHandle(context, doc)
+    const pointer = this.nativeContextPointer(context, "ot_markdown_read_changes")
+    nativeResult(
+      "ot_markdown_read_changes",
+      this.opentui.symbols.ot_markdown_read_changes(pointer, handle, viewOrNull(words), count, output),
+    )
+    if (output[0] > count) throw new NativeError("ot_markdown_read_changes", NativeStatus.InvalidArgument)
+    const { fields: f } = layout
+    const blocks: NativeMarkdownBlock[] = []
+    for (let at = 0; at < output[0] * (layout.size / 4); at += layout.size / 4) {
+      const parent = words[at + f.parent_index.offset / 4]
+      blocks.push({
+        index: words[at + f.index.offset / 4],
+        parent: parent === 0xffff_ffff ? undefined : parent,
+        kind: halves[at * 2 + f.kind.offset / 2],
+        flags: halves[at * 2 + f.flags.offset / 2],
+        sourceStart: words[at + f.source_start_byte.offset / 4],
+        sourceEnd: words[at + f.source_end_byte.offset / 4],
+        infoStart: words[at + f.info_start_byte.offset / 4],
+        infoEnd: words[at + f.info_end_byte.offset / 4],
+        number: words[at + f.number.offset / 4],
+      })
+    }
+    return blocks
+  }
+
+  /** A paragraph's, heading's or cell's inline source, as an inline hook gets it. */
+  public markdownReadSource(context: NativeContextHandle, doc: ContextMarkdownHandle, block: number): string {
+    const handle = encodeContextHandle(context, doc)
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_markdown_read_source")
+    nativeResult(
+      "ot_markdown_read_source",
+      this.opentui.symbols.ot_markdown_read_source(pointer, handle, block, null, 0, count),
+    )
+    if (count[0] === 0) return ""
+    const bytes = new Uint8Array(count[0])
+    nativeResult(
+      "ot_markdown_read_source",
+      this.opentui.symbols.ot_markdown_read_source(pointer, handle, block, bytes, bytes.length, count),
+    )
+    return markdownDecoder.decode(bytes)
+  }
+
+  /** A leaf's parser output with its styles resolved through the doc's style. */
+  public markdownReadLeaf(context: NativeContextHandle, doc: ContextMarkdownHandle, block: number): NativeMarkdownLeaf {
+    const handle = encodeContextHandle(context, doc)
+    const counts = new Uint32Array(3)
+    const [byteCount, chunkCount, urlCount] = [counts.subarray(0, 1), counts.subarray(1, 2), counts.subarray(2, 3)]
+    const pointer = this.nativeContextPointer(context, "ot_markdown_read_leaf")
+    const read = (
+      bytes: Uint8Array | null,
+      chunks: Uint32Array | null,
+      spans: Uint32Array | null,
+      urls: Uint8Array | null,
+    ) =>
+      nativeResult(
+        "ot_markdown_read_leaf",
+        this.opentui.symbols.ot_markdown_read_leaf(
+          pointer,
+          handle,
+          block,
+          bytes,
+          bytes?.length ?? 0,
+          byteCount,
+          chunks,
+          spans,
+          spans?.length ?? 0,
+          chunkCount,
+          urls,
+          urls?.length ?? 0,
+          urlCount,
+        ),
+      )
+    read(null, null, null, null)
+    const layout = nativeLayouts.ot_styled_text_chunk
+    const stride = layout.size / 4
+    const bytes = new Uint8Array(byteCount[0])
+    const records = new Uint32Array(chunkCount[0] * stride)
+    const spans = new Uint32Array(chunkCount[0])
+    const urls = new Uint8Array(urlCount[0])
+    if (chunkCount[0] > 0) read(viewOrNull(bytes), records, spans, viewOrNull(urls))
+    const colors = new Uint16Array(records.buffer)
+    const chunks: TextChunk[] = []
+    let at = 0
+    for (let index = 0; index < chunkCount[0]; index++) {
+      const base = index * stride
+      const flags = records[base + layout.fields.flags.offset / 4]
+      const end = at + records[base + layout.fields.byte_count.offset / 4]
+      const color = (offset: number) => RGBA.fromArray(colors.slice(base * 2 + offset / 2, base * 2 + offset / 2 + 4))
+      const chunk: TextChunk = { __isChunk: true, text: markdownDecoder.decode(bytes.subarray(at, end)) }
+      if (flags & nativeConstants.OT_SCENE_TEXT_FOREGROUND) chunk.fg = color(layout.fields.foreground.offset)
+      if (flags & nativeConstants.OT_SCENE_TEXT_BACKGROUND) chunk.bg = color(layout.fields.background.offset)
+      chunk.attributes = records[base + layout.fields.attributes.offset / 4]
+      if (flags & nativeConstants.OT_SCENE_TEXT_LINK) {
+        const offset = records[base + layout.fields.link_offset.offset / 4]
+        const url = urls.subarray(offset, offset + records[base + layout.fields.link_byte_count.offset / 4])
+        chunk.link = { url: markdownDecoder.decode(url) }
+      }
+      chunks.push(chunk)
+      at = end
+    }
+    return { chunks, spans }
+  }
+
+  /** Binds a scene text node to a paragraph or heading, which the doc then writes. */
+  public markdownBind(
+    context: NativeContextHandle,
+    doc: ContextMarkdownHandle,
+    block: number,
+    node: SceneNodeHandle,
+  ): void {
+    const handle = encodeContextHandle(context, doc)
+    const target = encodeContextHandle(context, node)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_markdown_bind")
+      nativeResult("ot_markdown_bind", this.opentui.symbols.ot_markdown_bind(pointer, handle, block, target))
+    })
+  }
+
+  private encodeStyledText(content: StyledText, allowLinks = true, preserveChunkOrdinals = false) {
+    if (typeof content !== "object" || content === null || isStyledText(content) !== true) {
+      throw new TypeError("Native scene text requires a string or branded StyledText")
+    }
+    const chunks = content.chunks
+    if (!Array.isArray(chunks)) throw new TypeError("Native scene StyledText requires a chunk array")
+    const count = toSafeFFIU32Length(chunks.length, "Scene styled chunk count")
+    const layout = nativeLayouts.ot_styled_text_chunk
+    const stride = layout.size / 4
+    const records = new Uint32Array(count * stride)
+    const colors = new Uint16Array(records.buffer)
+    const parts: Uint8Array[] = []
+    const urls: Uint8Array[] = []
+    let byteCount = 0
+    let urlByteCount = 0
+    for (let index = 0; index < count; index++) {
+      const chunk = chunks[index]
+      if (typeof chunk !== "object" || chunk === null) throw new TypeError("Invalid native scene StyledText chunk")
+      const { __isChunk, text, fg, bg, attributes, link } = chunk
+      if (__isChunk !== true || typeof text !== "string") throw new TypeError("Invalid native scene StyledText chunk")
+      const foreground = fg === undefined ? undefined : contextBufferColor(fg)
+      const background = bg === undefined ? undefined : contextBufferColor(bg)
+      const attrs = attributes === undefined ? 0 : toSafeFFIU32Length(attributes, "Scene styled chunk attributes")
+      if (attrs > ATTRIBUTE_BASE_MASK) throw new RangeError("Native scene StyledText supports only base attributes")
+      let urlBytes: Uint8Array | undefined
+      if (link !== undefined) {
+        if (!allowLinks) throw new TypeError("Native editor placeholder does not support links")
+        if (typeof link !== "object" || link === null) throw new TypeError("Invalid native scene StyledText link")
+        const url = link.url
+        if (typeof url !== "string") throw new TypeError("Native scene StyledText link requires a URL string")
+        urlBytes = this.encoder.encode(url)
+      }
+      // Encode each chunk separately, preserving legacy replacement of split UTF-16 surrogates.
+      const bytes = this.encoder.encode(text)
+      if (bytes.length === 0 && !preserveChunkOrdinals) continue
+      byteCount = toSafeFFIU32Length(byteCount + bytes.length, "Scene styled text length")
+      const offset = parts.length * stride
+      records[offset + layout.fields.struct_size.offset / 4] = layout.size
+      records[offset + layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+      records[offset + layout.fields.byte_count.offset / 4] = bytes.length
+      records[offset + layout.fields.flags.offset / 4] =
+        (foreground ? 1 : 0) | (background ? 2 : 0) | (urlBytes ? 4 : 0)
+      if (foreground) colors.set(foreground, offset * 2 + layout.fields.foreground.offset / 2)
+      if (background) colors.set(background, offset * 2 + layout.fields.background.offset / 2)
+      records[offset + layout.fields.attributes.offset / 4] = attrs
+      if (urlBytes) {
+        records[offset + layout.fields.link_offset.offset / 4] = urlByteCount
+        records[offset + layout.fields.link_byte_count.offset / 4] = urlBytes.length
+        urlByteCount = toSafeFFIU32Length(urlByteCount + urlBytes.length, "Scene styled URL length")
+        urls.push(urlBytes)
+      }
+      parts.push(bytes)
+    }
+    const bytes = new Uint8Array(byteCount)
+    let offset = 0
+    for (const part of parts) {
+      bytes.set(part, offset)
+      offset += part.length
+    }
+    const urlBytes = new Uint8Array(urlByteCount)
+    offset = 0
+    for (const url of urls) {
+      urlBytes.set(url, offset)
+      offset += url.length
+    }
+    return { bytes, records, count: parts.length, urlBytes }
+  }
+
+  public sceneSetSlider(context: NativeContextHandle, node: SceneNodeHandle, options: NativeSceneSliderOptions): void {
+    const layout = nativeLayouts.ot_scene_slider_options
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const record = new Uint32Array(layout.size / 4)
+    const values = new Float64Array(record.buffer)
+    const colors = new Uint16Array(record.buffer)
+    if (options.orientation !== "horizontal" && options.orientation !== "vertical") {
+      throw new TypeError("Unknown scene slider orientation")
+    }
+    record[layout.fields.struct_size.offset / 4] = layout.size
+    record[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    record[layout.fields.orientation.offset / 4] = options.orientation === "vertical" ? 1 : 0
+    for (const [field, value] of [
+      ["min", options.min],
+      ["max", options.max],
+      ["value", options.value],
+      ["viewport_size", options.viewPortSize],
+    ] as const) {
+      if (!Number.isFinite(value)) throw new RangeError("Scene slider values must be finite numbers")
+      values[layout.fields[field].offset / 8] = value
+    }
+    contextBufferColor(options.foregroundColor, colors, layout.fields.foreground.offset / 2)
+    contextBufferColor(options.backgroundColor, colors, layout.fields.background.offset / 2)
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_slider")
+    nativeResult("ot_scene_set_slider", this.opentui.symbols.ot_scene_set_slider(pointer, handle, record))
+  }
+
+  public sceneGetSliderThumb(context: NativeContextHandle, node: SceneNodeHandle): { size: number; start: number } {
+    const layout = nativeLayouts.ot_scene_slider_thumb
+    const handle = encodeContextHandle(context, node)
+    const output = createContextRecord(layout)
+    const values = new Float64Array(output.buffer)
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_slider_thumb")
+    nativeResult("ot_scene_get_slider_thumb", this.opentui.symbols.ot_scene_get_slider_thumb(pointer, handle, output))
+    return { size: values[layout.fields.size.offset / 8], start: values[layout.fields.start.offset / 8] }
+  }
+
+  public sceneSetArrow(context: NativeContextHandle, node: SceneNodeHandle, options: NativeSceneArrowOptions): void {
+    const layout = nativeLayouts.ot_scene_arrow_options
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const direction = SCENE_ARROW_DIRECTIONS.indexOf(options.direction)
+    if (direction < 0) throw new TypeError("Unknown scene arrow direction")
+    const record = createContextRecord(layout)
+    record[layout.fields.direction.offset / 4] = direction
+    record[layout.fields.attributes.offset / 4] = toSafeFFIU32Length(options.attributes, "Scene arrow attributes")
+    const colors = new Uint16Array(record.buffer)
+    contextBufferColor(options.foregroundColor, colors, layout.fields.foreground.offset / 2)
+    contextBufferColor(options.backgroundColor, colors, layout.fields.background.offset / 2)
+    const text = options.text
+    if (text !== undefined && typeof text !== "string") throw new TypeError("Scene arrow text must be a string")
+    const bytes = text === undefined ? null : sessionBytes(this.encoder.encode(text), "Scene arrow text length")
+    if (bytes && bytes.length > NATIVE_BUFFER_TEXT_BYTES_MAX) throw new RangeError("Scene arrow text is too long")
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_arrow")
+    nativeResult(
+      "ot_scene_set_arrow",
+      this.opentui.symbols.ot_scene_set_arrow(
+        pointer,
+        handle,
+        record,
+        bytes?.length === 0 ? new Uint8Array(1) : bytes,
+        bytes?.length ?? 0,
+      ),
+    )
+  }
+
+  public sceneSetScroll(context: NativeContextHandle, node: SceneNodeHandle, options: NativeSceneScrollOptions): void {
+    const layout = nativeLayouts.ot_scene_scroll_options
+    const bar = nativeLayouts.ot_scene_scroll_bar_options
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const record = createContextRecord(layout)
+    const floats = new Float32Array(record.buffer)
+    const colors = new Uint16Array(record.buffer)
+    const follow = SCENE_SCROLL_FOLLOW.indexOf(options.follow)
+    if (follow < 0) throw new TypeError("Unknown scene scroll follow edge")
+    const fields = layout.fields
+    record[fields.axes.offset / 4] =
+      (options.scrollX ? nativeConstants.OT_SCENE_SCROLL_X : 0) |
+      (options.scrollY ? nativeConstants.OT_SCENE_SCROLL_Y : 0)
+    record[fields.follow.offset / 4] = follow
+    record[fields.culling.offset / 4] = toFFIBool(options.culling, "Scene scroll culling")
+    for (let edge = 0; edge < 4; edge++) floats[fields.padding.offset / 4 + edge] = options.padding[edge]
+    let fills = 0
+    for (const [index, field] of (
+      ["wrapper_background", "viewport_background", "content_background"] as const
+    ).entries()) {
+      const color = options.fills[index]
+      if (!color) continue
+      fills |= 1 << index
+      contextBufferColor(color, colors, fields[field].offset / 2)
+    }
+    record[fields.fills.offset / 4] = fills
+    for (let axis = 0; axis < 2; axis++) {
+      const base = fields.bars.offset + axis * bar.size
+      const value = options.bars[axis]
+      const policy = SCENE_SCROLL_BAR_POLICY.indexOf(value.policy)
+      if (policy < 0) throw new TypeError("Unknown scene scroll bar policy")
+      record[(base + bar.fields.policy.offset) / 4] = policy
+      record[(base + bar.fields.placement.offset) / 4] = toFFIBool(value.overlay, "Scene scroll bar overlay")
+      record[(base + bar.fields.thickness.offset) / 4] = toSafeFFIU32Length(
+        value.thickness,
+        "Scene scroll bar thickness",
+      )
+      record[(base + bar.fields.gap.offset) / 4] = toSafeFFIU32Length(value.gap, "Scene scroll bar gap")
+      record[(base + bar.fields.arrows.offset) / 4] = toFFIBool(value.arrows, "Scene scroll bar arrows")
+      contextBufferColor(value.foregroundColor, colors, (base + bar.fields.track_foreground.offset) / 2)
+      contextBufferColor(value.backgroundColor, colors, (base + bar.fields.track_background.offset) / 2)
+    }
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_scroll")
+    nativeResult("ot_scene_set_scroll", this.opentui.symbols.ot_scene_set_scroll(pointer, handle, record))
+  }
+
+  /** `axis` is 0 for the horizontal bar and 1 for the vertical bar; `end` is 0 for the start arrow. */
+  public sceneSetScrollArrow(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    axis: number,
+    end: number,
+    options: Omit<NativeSceneArrowOptions, "direction">,
+  ): void {
+    const layout = nativeLayouts.ot_scene_arrow_options
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const record = createContextRecord(layout)
+    record[layout.fields.attributes.offset / 4] = toSafeFFIU32Length(options.attributes, "Scene arrow attributes")
+    const colors = new Uint16Array(record.buffer)
+    contextBufferColor(options.foregroundColor, colors, layout.fields.foreground.offset / 2)
+    contextBufferColor(options.backgroundColor, colors, layout.fields.background.offset / 2)
+    const text = options.text
+    const bytes = text === undefined ? null : sessionBytes(this.encoder.encode(text), "Scene arrow text length")
+    if (bytes && bytes.length > NATIVE_BUFFER_TEXT_BYTES_MAX) throw new RangeError("Scene arrow text is too long")
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_scroll_arrow")
+    nativeResult(
+      "ot_scene_set_scroll_arrow",
+      this.opentui.symbols.ot_scene_set_scroll_arrow(
+        pointer,
+        handle,
+        toSafeFFIU32Length(axis, "Scene scroll axis"),
+        toSafeFFIU32Length(end, "Scene scroll arrow end"),
+        record,
+        bytes?.length === 0 ? new Uint8Array(1) : bytes,
+        bytes?.length ?? 0,
+      ),
+    )
+  }
+
+  /** An explicit scroll; a relative axis adds its value to the offset, and `reapply` applies the targets again after
+   * the next frame's layout. Returns the state after it. */
+  public sceneScrollTo(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    x: number,
+    y: number,
+    relativeX: boolean,
+    relativeY: boolean,
+    reapply = false,
+  ): NativeSceneScrollState {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const output = createContextRecord(nativeLayouts.ot_scene_scroll_state)
+    const flags =
+      (relativeX ? nativeConstants.OT_SCENE_SCROLL_RELATIVE_X : 0) |
+      (relativeY ? nativeConstants.OT_SCENE_SCROLL_RELATIVE_Y : 0) |
+      (reapply ? nativeConstants.OT_SCENE_SCROLL_REAPPLY : 0)
+    const pointer = this.nativeContextPointer(context, "ot_scene_scroll_to")
+    nativeResult("ot_scene_scroll_to", this.opentui.symbols.ot_scene_scroll_to(pointer, handle, x, y, flags, output))
+    return readSceneScrollState(output)
+  }
+
+  /** An into-view, anchor, or layout request (see `ot_scene_scroll_request`). Returns the state after it. */
+  public sceneScrollRequest(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    kind: "into-view" | "anchor" | "layout",
+    target: SceneNodeHandle | null,
+    align: "nearest" | "start" | "end" = "nearest",
+    inset = 0,
+  ): NativeSceneScrollState {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const encodedTarget = target === null ? null : encodeContextHandle(context, target)
+    const output = createContextRecord(nativeLayouts.ot_scene_scroll_state)
+    const pointer = this.nativeContextPointer(context, "ot_scene_scroll_request")
+    nativeResult(
+      "ot_scene_scroll_request",
+      this.opentui.symbols.ot_scene_scroll_request(
+        pointer,
+        handle,
+        SCENE_SCROLL_REQUESTS.indexOf(kind),
+        encodedTarget,
+        SCENE_SCROLL_ALIGNS.indexOf(align),
+        toSafeFFIU32Length(inset, "Scene scroll inset"),
+        output,
+      ),
+    )
+    return readSceneScrollState(output)
+  }
+
+  public sceneGetScroll(context: NativeContextHandle, node: SceneNodeHandle): NativeSceneScrollState {
+    const handle = encodeContextHandle(context, node)
+    const output = createContextRecord(nativeLayouts.ot_scene_scroll_state)
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_scroll")
+    nativeResult("ot_scene_get_scroll", this.opentui.symbols.ot_scene_get_scroll(pointer, handle, output))
+    return readSceneScrollState(output)
+  }
+
+  public sceneSetTextOptions(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    options: NativeSceneTextOptions,
+  ): void {
+    const layout = nativeLayouts.ot_scene_text_options
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const record = new Uint32Array(layout.size / 4)
+    const offsets = new Float64Array(record.buffer)
+    record[layout.fields.struct_size.offset / 4] = layout.size
+    record[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const colors = new Uint16Array(record.buffer)
+    contextBufferColor(options.fg, colors, layout.fields.foreground.offset / 2)
+    contextBufferColor(options.bg, colors, layout.fields.background.offset / 2)
+    record[layout.fields.attributes.offset / 4] = toSafeFFIU32Length(options.attributes, "Scene text attributes")
+    const wrapMode = SCENE_TEXT_WRAP_MODES.indexOf(options.wrapMode)
+    if (wrapMode < 0) throw new TypeError("Unknown scene text wrap mode")
+    record[layout.fields.wrap_mode.offset / 4] = wrapMode
+    const textAlign = SCENE_TEXT_ALIGNS.indexOf(options.textAlign)
+    if (textAlign < 0) throw new TypeError("Unknown scene text alignment")
+    record[layout.fields.text_align.offset / 4] = textAlign
+    record[layout.fields.truncate.offset / 4] = toFFIBool(options.truncate, "Scene text truncate")
+    record[layout.fields.first_line_offset.offset / 4] = toSafeFFIU32Length(
+      options.firstLineOffset,
+      "Scene text firstLineOffset",
+    )
+    for (const [field, value] of [
+      ["scroll_x", options.scrollX],
+      ["scroll_y", options.scrollY],
+    ] as const) {
+      if (!Number.isFinite(value) || value < 0 || value > 0x7fffffff) {
+        throw new RangeError("Scene text scroll offsets must be finite numbers in 0..2147483647")
+      }
+      offsets[layout.fields[field].offset / 8] = value
+    }
+    const indicator = options.tabIndicator
+    record[layout.fields.tab_indicator.offset / 4] = toSafeFFIU32Length(
+      typeof indicator === "string" ? (indicator.codePointAt(0) ?? 0) : (indicator ?? 0),
+      "Scene text tab indicator",
+    )
+    if (options.tabIndicatorColor !== undefined) {
+      record[layout.fields.tab_color_set.offset / 4] = 1
+      contextBufferColor(options.tabIndicatorColor, colors, layout.fields.tab_color.offset / 2)
+    }
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_text_options")
+    nativeResult("ot_scene_set_text_options", this.opentui.symbols.ot_scene_set_text_options(pointer, handle, record))
+  }
+
+  public sceneSetTextSelection(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    options: NativeSceneTextSelectionOptions,
+  ): boolean {
+    const layout = nativeLayouts.ot_scene_text_selection_options
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, node)
+    const record = createContextRecord(layout)
+    const operation = ["reset", "set", "update", "colors"].indexOf(options.operation)
+    const behavior = ["cell", "word", "line"].indexOf(options.behavior)
+    if (operation < 0 || behavior < 0) throw new TypeError("Unknown scene text selection operation or behavior")
+    record[layout.fields.operation.offset / 4] = operation
+    record[layout.fields.behavior.offset / 4] = behavior
+    const coordinates = new Int32Array(record.buffer)
+    for (const [field, value] of [
+      ["anchor_x", options.anchorX],
+      ["anchor_y", options.anchorY],
+      ["focus_x", options.focusX],
+      ["focus_y", options.focusY],
+    ] as const) {
+      if (!Number.isFinite(value) || value < -0x80000000 || value > 0x7fffffff) {
+        throw new RangeError("Scene selection coordinates must fit signed 32-bit cells")
+      }
+      coordinates[layout.fields[field].offset / 4] = Math.trunc(value)
+    }
+    const colors = new Uint16Array(record.buffer)
+    const bg = options.bg
+    const fg = options.fg
+    if (bg !== undefined) {
+      record[layout.fields.flags.offset / 4] |= 1
+      contextBufferColor(bg, colors, layout.fields.background.offset / 2)
+    }
+    if (fg !== undefined) {
+      record[layout.fields.flags.offset / 4] |= 2
+      contextBufferColor(fg, colors, layout.fields.foreground.offset / 2)
+    }
+    const changed = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_text_selection")
+    nativeResult(
+      "ot_scene_set_text_selection",
+      this.opentui.symbols.ot_scene_set_text_selection(pointer, handle, record, changed),
+    )
+    return changed[0] !== 0
+  }
+
+  public sceneGetTextSelection(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+  ): { start: number; end: number } | null {
+    const handle = encodeContextHandle(context, node)
+    const output = new BigUint64Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_text_selection")
+    nativeResult(
+      "ot_scene_get_text_selection",
+      this.opentui.symbols.ot_scene_get_text_selection(pointer, handle, output),
+    )
+    const packed = output[0]
+    return packed === 0xffff_ffff_ffff_ffffn
+      ? null
+      : { start: Number(packed >> 32n), end: Number(packed & 0xffff_ffffn) }
+  }
+
+  public sceneGetSelectedText(context: NativeContextHandle, node: SceneNodeHandle): string {
+    const handle = encodeContextHandle(context, node)
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_selected_text")
+    return this.readText("ot_scene_get_selected_text", (bytes, capacity, count) =>
+      this.opentui.symbols.ot_scene_get_selected_text(pointer, handle, bytes, capacity, count),
+    )
+  }
+
+  public sceneGetTextMetrics(context: NativeContextHandle, node: SceneNodeHandle): NativeSceneTextMetrics {
+    return this.sceneTextMetrics(context, encodeContextHandle(context, node))
+  }
+
+  private sceneTextMetrics(context: NativeContextHandle, handle: Uint32Array): NativeSceneTextMetrics {
+    const layout = nativeLayouts.ot_scene_text_info
+    const output = createContextRecord(layout)
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_text_info")
+    nativeResult("ot_scene_get_text_info", this.opentui.symbols.ot_scene_get_text_info(pointer, handle, output))
+    return {
+      byteLength: output[layout.fields.byte_count.offset / 4],
+      textLength: output[layout.fields.text_length.offset / 4],
+      lineCount: output[layout.fields.line_count.offset / 4],
+      virtualLineCount: output[layout.fields.virtual_line_count.offset / 4],
+      widthColsMax: output[layout.fields.width_cols_max.offset / 4],
+    }
+  }
+
+  public sceneGetText(context: NativeContextHandle, node: SceneNodeHandle): string {
+    const handle = encodeContextHandle(context, node)
+    return this.readText("ot_scene_get_text", (bytes, capacity, count) =>
+      this.opentui.symbols.ot_scene_get_text(
+        this.nativeContextPointer(context, "ot_scene_get_text"),
+        handle,
+        bytes,
+        capacity,
+        count,
+      ),
+    )
+  }
+
+  public sceneGetTextLineInfo(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    firstLine = 0,
+    lineCount = MAX_FFI_U32,
+  ): LineInfo {
+    const handle = encodeContextHandle(context, node)
+    const metrics = this.sceneTextMetrics(context, handle)
+    const first = toSafeFFIU32Length(firstLine, "Text first line")
+    // Copy only the requested window, so a viewport read does not scale with the document (main #1462).
+    const capacity = Math.min(
+      toSafeFFIU32Length(lineCount, "Text line count"),
+      Math.max(0, metrics.virtualLineCount - first),
+    )
+    const lines = new Uint32Array(capacity * (nativeLayouts.ot_scene_text_line.size / 4))
+    const count = new Uint32Array(1)
+    nativeResult(
+      "ot_scene_get_text_lines",
+      this.opentui.symbols.ot_scene_get_text_lines(
+        this.nativeContextPointer(context, "ot_scene_get_text_lines"),
+        handle,
+        first,
+        capacity === 0 ? null : lines,
+        capacity,
+        count,
+      ),
+    )
+    if (count[0] !== metrics.virtualLineCount)
+      throw new NativeError("ot_scene_get_text_lines", NativeStatus.InternalError)
+    return decodeContextTextLines(lines, metrics.widthColsMax)
+  }
+
+  public sceneGetLayout(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    observation: boolean | "paint" | "content" = false,
+  ): NativeSceneLayout {
+    const layout = nativeLayouts.ot_scene_layout
+    const scratch = this.sceneLayoutRecord ?? createSceneLayoutRecord()
+    this.sceneLayoutRecord = undefined
+    try {
+      const handle = encodeContextHandle(context, node, scratch.handle.record, scratch.handle.words)
+      const mode =
+        observation === "paint"
+          ? nativeConstants.OT_LAYOUT_PAINT
+          : observation === "content"
+            ? nativeConstants.OT_LAYOUT_CONTENT
+            : toFFIBool(observation, "Scene Yoga layout observation")
+              ? nativeConstants.OT_LAYOUT_YOGA
+              : nativeConstants.OT_LAYOUT_PUBLIC
+      const { output, values, coordinates } = scratch
+      output[layout.fields.struct_size.offset / 4] = layout.size
+      output[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+      const pointer = this.nativeContextPointer(context, "ot_scene_get_layout")
+      nativeResult("ot_scene_get_layout", this.opentui.symbols.ot_scene_get_layout(pointer, handle, mode, output))
+      return decodeSceneLayout(values, coordinates)
+    } finally {
+      this.sceneLayoutRecord ??= scratch
+    }
+  }
+
+  public sceneSetHooks(
+    context: NativeContextHandle,
+    node: SceneNodeHandle,
+    flags: number,
+    generation: bigint,
+    initialWidth: number,
+    initialHeight: number,
+  ): void {
+    const layout = nativeLayouts.ot_scene_hooks
+    this.getYogaHost().assertMutable()
+    const scratch = this.sceneHooksRecord ?? createSceneHooksRecord()
+    this.sceneHooksRecord = undefined
+    try {
+      const handle = encodeContextHandle(context, node, scratch.handle.record, scratch.handle.words)
+      const { record, words, dimensions } = scratch
+      words[layout.fields.struct_size.offset / 4] = layout.size
+      words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+      words[layout.fields.flags.offset / 4] = toSafeFFIU32Length(flags, "Scene hook flags")
+      record[layout.fields.generation.offset / 8] = toFFIU64(generation, "Scene hook generation")
+      for (const [field, value] of [
+        ["initial_width", initialWidth],
+        ["initial_height", initialHeight],
+      ] as const) {
+        if (!Number.isFinite(value) || value < 0 || value > 0x7fffffff) {
+          throw new RangeError("Scene initial dimensions must be finite numbers in 0..2147483647")
+        }
+        dimensions[layout.fields[field].offset / 8] = value
+      }
+      const pointer = this.nativeContextPointer(context, "ot_scene_set_hooks")
+      nativeResult("ot_scene_set_hooks", this.opentui.symbols.ot_scene_set_hooks(pointer, handle, record))
+    } finally {
+      this.sceneHooksRecord ??= scratch
+    }
+  }
+
+  /** Paint options can change between steps; attempt limits remain fixed.
+   * A RECORD acknowledgement passes its recording; null records nothing. */
+  public sceneFrameStep(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    previous: NativeSceneFrameRequest | null,
+    options: NativeSceneFrameOptions,
+    recording: Uint8Array | null = null,
+  ): NativeSceneFrameRequest {
+    const layout = nativeLayouts.ot_scene_frame_options
+    this.getYogaHost().assertMutable()
+    // Keep scratch checked out through callbacks, decoding, and failure cancellation.
+    const scratch = this.sceneFrameRecord ?? createSceneFrameRecord()
+    this.sceneFrameRecord = undefined
+    try {
+      const handle = encodeContextHandle(context, session, scratch.handle.record, scratch.handle.words)
+      const { config, colors, words, geometry } = scratch
+      contextBufferColor(options.background, colors, layout.fields.background.offset / 2)
+      config[layout.fields.use_mouse.offset / 4] = toFFIBool(options.useMouse, "Scene useMouse")
+      config[layout.fields.excluded_hit_num.offset / 4] = toSafeFFIU32Length(
+        options.excludedHitNum,
+        "Scene excluded hit number",
+      )
+      config[layout.fields.max_layout_rounds.offset / 4] = toSafeFFIU32Length(
+        options.maxLayoutRounds,
+        "Scene layout round limit",
+      )
+      config[layout.fields.max_host_requests.offset / 4] = toSafeFFIU32Length(
+        options.maxHostRequests,
+        "Scene host request limit",
+      )
+      config[layout.fields.preserve_unwritten.offset / 4] = toFFIBool(
+        options.preserveUnwritten ?? false,
+        "Scene preserve unwritten cells",
+      )
+      const recordingLength = recording === null ? 0 : toSafeFFIU32Length(recording.byteLength, "Scene recording")
+      const recordingView = recordingLength === 0 ? null : recording
+      const output = encodeSceneFrameRequest(context, previous, scratch)
+      const operation = "ot_scene_frame_step_with_geometry"
+      const measures = this.sceneMeasures.get(context)?.nodes.size
+      if (measures) this.getYogaHost().flushSceneMutations()
+      const pointer = this.nativeContextPointer(context, operation)
+      if (measures) {
+        this.sceneFrameStepWithMeasures(
+          context,
+          pointer,
+          handle,
+          previous === null ? null : output,
+          config,
+          output,
+          recordingView,
+          recordingLength,
+          geometry,
+        )
+      } else {
+        nativeResult(
+          operation,
+          this.opentui.symbols.ot_scene_frame_step_with_geometry(
+            pointer,
+            handle,
+            previous === null ? null : output,
+            config,
+            recordingView,
+            recordingLength,
+            output,
+            geometry,
+          ),
+        )
+      }
+      try {
+        const fields = nativeLayouts.ot_scene_frame_geometry.fields
+        const flags = geometry[fields.flags.offset / 4]
+        return {
+          session: decodeContextHandle(context, scratch.session.record, scratch.session.words) as SessionHandle,
+          root: decodeContextHandle(context, scratch.root.record, scratch.root.words) as SceneNodeHandle,
+          node: decodeContextHandle(context, scratch.node.record, scratch.node.words) as SceneNodeHandle,
+          frameId: output[nativeLayouts.ot_scene_frame_request.fields.frame_id.offset / 8],
+          requestId: output[nativeLayouts.ot_scene_frame_request.fields.request_id.offset / 8],
+          layoutEpoch: output[nativeLayouts.ot_scene_frame_request.fields.layout_epoch.offset / 8],
+          hookGeneration: output[nativeLayouts.ot_scene_frame_request.fields.hook_generation.offset / 8],
+          kind: words[nativeLayouts.ot_scene_frame_request.fields.kind.offset / 4] as NativeSceneFrameRequest["kind"],
+          num: words[nativeLayouts.ot_scene_frame_request.fields.num.offset / 4],
+          width: words[nativeLayouts.ot_scene_frame_request.fields.width.offset / 4],
+          height: words[nativeLayouts.ot_scene_frame_request.fields.height.offset / 4],
+          paintLayout:
+            flags & nativeConstants.OT_SCENE_GEOMETRY_PAINT
+              ? decodeSceneLayout(scratch.geometryValues, scratch.geometryCoordinates, fields.paint.offset)
+              : undefined,
+          publicLayout:
+            flags & nativeConstants.OT_SCENE_GEOMETRY_PUBLIC
+              ? decodeSceneLayout(scratch.geometryValues, scratch.geometryCoordinates, fields.public_layout.offset)
+              : undefined,
+        }
+      } catch (error) {
+        const livePointer = this.nativeContexts.get(context)
+        if (livePointer !== undefined)
+          this.opentui.symbols.ot_scene_frame_cancel(
+            livePointer,
+            handle,
+            output[nativeLayouts.ot_scene_frame_request.fields.frame_id.offset / 8],
+          )
+        throw error
+      }
+    } finally {
+      this.sceneFrameRecord ??= scratch
+    }
+  }
+
+  // Keep callback closure allocation and acceptance tracking off provider-free calls.
+  private sceneFrameStepWithMeasures(
+    context: NativeContextHandle,
+    pointer: Pointer,
+    handle: BigUint64Array,
+    previous: BigUint64Array | null,
+    config: Uint32Array,
+    output: BigUint64Array,
+    recording: Uint8Array | null,
+    recordingLength: number,
+    geometry: Uint32Array,
+  ): void {
+    let accepted = false
+    try {
+      this.getYogaHost().runMutation(() => {
+        nativeResult(
+          "ot_scene_frame_step_with_geometry",
+          this.opentui.symbols.ot_scene_frame_step_with_geometry(
+            pointer,
+            handle,
+            previous,
+            config,
+            recording,
+            recordingLength,
+            output,
+            geometry,
+          ),
+        )
+        accepted = true
+      })
+    } catch (error) {
+      const livePointer = this.nativeContexts.get(context)
+      if (accepted && livePointer !== undefined)
+        this.opentui.symbols.ot_scene_frame_cancel(
+          livePointer,
+          handle,
+          output[nativeLayouts.ot_scene_frame_request.fields.frame_id.offset / 8],
+        )
+      throw error
+    }
+  }
+
+  /** Run a native release now, or after the frame step that paints the Context's open paint recording.
+   * A recording names resources that native code reads only when it paints, so every resource that a
+   * paint hook can draw is released through here. */
+  public releaseAfterPaint(context: NativeContextHandle, release: () => void): void {
+    const releases = releaseWindows.get(context)
+    if (releases) releases.push(release)
+    else release()
+  }
+
+  /** Slots of the exact pending RECORD request, in paint order. */
+  public sceneFrameGetPaintSlots(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    frame: NativeSceneFrameRequest,
+  ): NativeScenePaintSlot[] {
+    const layout = nativeLayouts.ot_scene_paint_slot
+    const fields = layout.fields
+    const node = nativeLayouts.ot_handle.fields
+    const handle = encodeContextHandle(context, session)
+    const ticket = encodeSceneFrameRequest(context, frame)
+    const count = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_scene_frame_get_paint_slots")
+    let scratch = this.scenePaintSlots
+    for (;;) {
+      const capacity = scratch.byteLength / layout.size
+      nativeResult(
+        "ot_scene_frame_get_paint_slots",
+        this.opentui.symbols.ot_scene_frame_get_paint_slots(pointer, handle, ticket, scratch, capacity, count),
+      )
+      if (count[0] <= capacity) break
+      scratch = this.scenePaintSlots = new BigUint64Array((count[0] * layout.size) / 8)
+    }
+    const words = new Uint32Array(scratch.buffer)
+    const values = new Float32Array(scratch.buffer)
+    const coordinates = new Float64Array(scratch.buffer)
+    const slots: NativeScenePaintSlot[] = new Array(count[0])
+    for (let index = 0; index < count[0]; index++) {
+      const base = index * layout.size
+      const flags = words[(base + fields.flags.offset) / 4]
+      slots[index] = {
+        node: {
+          context,
+          contextId: scratch[(base + fields.node.offset + node.context_id.offset) / 8],
+          slot: words[(base + fields.node.offset + node.slot.offset) / 4],
+          generation: words[(base + fields.node.offset + node.generation.offset) / 4],
+        } as SceneNodeHandle,
+        num: words[(base + fields.num.offset) / 4],
+        hooks: words[(base + fields.hooks.offset) / 4],
+        opacity: values[(base + fields.opacity.offset) / 4],
+        paintLayout: decodeSceneLayout(values, coordinates, base + fields.paint.offset),
+        publicLayout:
+          flags & nativeConstants.OT_SCENE_GEOMETRY_PUBLIC
+            ? decodeSceneLayout(values, coordinates, base + fields.public_layout.offset)
+            : undefined,
+      }
+    }
+    return slots
+  }
+
+  public sceneFrameAcquireBufferLease(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    frame: NativeSceneFrameRequest,
+    which: SessionBuffer,
+  ): NativeContextBufferLease {
+    this.getYogaHost().assertMutable()
+    if (which !== "current" && which !== "next") throw new TypeError("Session buffer must be current or next")
+    if (!frame) throw new TypeError("Scene frame ticket is required")
+    return this.acquireBufferLease(context, session, which, frame)
+  }
+
+  /** Every returned status consumes the draft; an admission exception preserves it for retry. */
+  public sceneFrameCommit(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    frame: NativeSceneFrameRequest,
+    force: boolean,
+  ): NativeSessionRenderStatus {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const ticket = encodeSceneFrameRequest(context, frame)
+    const forceRender = toFFIBool(force, "Scene frame commit force")
+    const output = new Uint32Array(1)
+    const pointer = this.nativeContextPointer(context, "ot_scene_frame_commit")
+    nativeResult(
+      "ot_scene_frame_commit",
+      this.opentui.symbols.ot_scene_frame_commit(pointer, handle, ticket, forceRender, output),
+    )
+    return output[0]
+  }
+
+  public sceneFrameCancel(context: NativeContextHandle, session: SessionHandle, frameId: bigint): void {
+    this.getYogaHost().assertMutable()
+    const handle = encodeContextHandle(context, session)
+    const id = toFFIU64(frameId, "Scene frame ID")
+    const pointer = this.nativeContextPointer(context, "ot_scene_frame_cancel")
+    nativeResult("ot_scene_frame_cancel", this.opentui.symbols.ot_scene_frame_cancel(pointer, handle, id))
+  }
+
+  /** `excluded` is a node's public number whose own hits the test skips, or zero. */
+  public sceneHitTest(
+    context: NativeContextHandle,
+    session: SessionHandle,
+    x: number,
+    y: number,
+    excluded = 0,
+  ): number {
+    const handle = encodeContextHandle(context, session)
+    toFFII32(x, "Scene hit x")
+    toFFII32(y, "Scene hit y")
+    toSafeFFIU32Length(excluded, "Scene hit exclusion")
+    // Hit tests never call back into JavaScript, so one output word serves every test.
+    const output = this.hitTestOutput
+    const pointer = this.nativeContextPointer(context, "ot_scene_hit_test_excluding")
+    nativeResult(
+      "ot_scene_hit_test_excluding",
+      this.opentui.symbols.ot_scene_hit_test_excluding(pointer, handle, x, y, excluded, output),
+    )
+    return output[0]
+  }
+
+  /** @internal Tests set this through `createTestRenderer({ nativeSceneFullFrame })`. */
+  public sceneSetDebugFlags(context: NativeContextHandle, session: SessionHandle, flags: number): void {
+    const handle = encodeContextHandle(context, session)
+    const value = toSafeFFIU32Length(flags, "Scene debug flags")
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_debug_flags")
+    nativeResult("ot_scene_set_debug_flags", this.opentui.symbols.ot_scene_set_debug_flags(pointer, handle, value))
+  }
+
+  public sceneGetStats(context: NativeContextHandle, session: SessionHandle): NativeRenderStats {
+    const layout = nativeLayouts.ot_scene_stats
+    const handle = encodeContextHandle(context, session)
+    const output = new BigUint64Array(layout.size / 8)
+    const words = new Uint32Array(output.buffer)
+    const times = new Float64Array(output.buffer)
+    words[layout.fields.struct_size.offset / 4] = layout.size
+    words[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_stats")
+    nativeResult("ot_scene_get_stats", this.opentui.symbols.ot_scene_get_stats(pointer, handle, output))
+    return {
+      nativeLastFrameTime: times[layout.fields.last_frame_time.offset / 8],
+      nativeAverageFrameTime: times[layout.fields.average_frame_time.offset / 8],
+      nativeFrameCount: toNumber(output[layout.fields.frame_count.offset / 8]),
+      cellsUpdated: words[layout.fields.cells_updated.offset / 4],
+      averageCellsUpdated: words[layout.fields.average_cells_updated.offset / 4],
+      nativeRenderTime:
+        words[layout.fields.render_time_valid.offset / 4] !== 0
+          ? times[layout.fields.render_time.offset / 8]
+          : undefined,
+      nativeStdoutWriteTime:
+        words[layout.fields.stdout_write_time_valid.offset / 4] !== 0
+          ? times[layout.fields.stdout_write_time.offset / 8]
+          : undefined,
+      frameWork: readFrameWork(layout, output, words),
+    }
+  }
+
+  public sceneGetCursorState(context: NativeContextHandle, session: SessionHandle): CursorState {
+    const layout = nativeLayouts.ot_scene_cursor_state
+    const handle = encodeContextHandle(context, session)
+    const output = new Uint32Array(layout.size / 4)
+    const colors = new Float32Array(output.buffer)
+    output[layout.fields.struct_size.offset / 4] = layout.size
+    output[layout.fields.abi_version.offset / 4] = nativeConstants.OT_CONTEXT_ABI_VERSION
+    const pointer = this.nativeContextPointer(context, "ot_scene_get_cursor_state")
+    nativeResult("ot_scene_get_cursor_state", this.opentui.symbols.ot_scene_get_cursor_state(pointer, handle, output))
+    return {
+      x: output[layout.fields.x.offset / 4],
+      y: output[layout.fields.y.offset / 4],
+      visible: output[layout.fields.visible.offset / 4] !== 0,
+      style: CURSOR_ID_TO_STYLE[output[layout.fields.style.offset / 4]] ?? "block",
+      blinking: output[layout.fields.blinking.offset / 4] !== 0,
+      color: RGBA.fromValues(
+        colors[layout.fields.r.offset / 4],
+        colors[layout.fields.g.offset / 4],
+        colors[layout.fields.b.offset / 4],
+        colors[layout.fields.a.offset / 4],
+      ),
+    }
+  }
+
+  constructor(libPath?: string) {
+    this.opentui = getOpenTUILib(libPath)
+    this.imageRetainIccCache()
+    this.iccCacheClient = true
+    try {
+      this.setupLogging()
+    } catch (error) {
+      this.dispose()
+      throw error
+    }
+  }
+
+  /** Drains queued Context diagnostics and logs the records at `maxLevel` or more severe; it drops the rest. One call
+   * drains at most one full queue. Records that console handlers add meanwhile wait for the next call. */
+  public logContextDiagnostics(context: NativeContextHandle, maxLevel: LogLevel = LogLevel.Debug): void {
+    const layout = nativeLayouts.ot_diagnostic
+    const fields = nativeLayouts.ot_diagnostic_drain.fields
+    const { records, output, words } = (this.diagnosticDrain ??= createDiagnosticDrainRecord())
+    let pointer: Pointer | undefined = this.nativeContextPointer(context, "ot_context_drain_diagnostics")
+    for (let batch = 0; pointer !== undefined && batch < DIAGNOSTIC_QUEUE_MAX / DIAGNOSTIC_BATCH; batch++) {
+      nativeResult(
+        "ot_context_drain_diagnostics",
+        this.opentui.symbols.ot_context_drain_diagnostics(pointer, records, DIAGNOSTIC_BATCH, output),
+      )
+      const count = words[fields.count.offset / 4]
+      if (count > DIAGNOSTIC_BATCH) throw new RangeError("Invalid diagnostic count")
+      if (count === 0) return
+      // Decode before logging: console handlers can reenter and reuse the shared records.
+      const messages: [LogLevel, string][] = []
+      for (let index = 0; index < count; index++) {
+        const offset = index * layout.size
+        const level = records[(offset + layout.fields.level.offset) / 4]
+        const length = records[(offset + layout.fields.message_len.offset) / 4]
+        if (length > layout.fields.message.size) throw new RangeError("Invalid diagnostic message length")
+        if (level > maxLevel) continue
+        const bytes = new Uint8Array(records.buffer, offset + layout.fields.message.offset, length)
+        messages.push([level, this.decoder.decode(bytes)])
+      }
+      const remaining = words[fields.remaining.offset / 4]
+      for (const [level, message] of messages) this.logMessage(level, message)
+      // Console handlers can destroy the Context.
+      pointer = remaining === 0 ? undefined : this.nativeContexts.get(context)
+    }
+  }
+
+  private logMessage(level: number, message: string): void {
+    console[LOG_METHODS[level] ?? "log"](message)
+  }
+
+  private setupLogging() {
+    if (isWorkerRuntime) return
+    const logCallback = this.opentui.createCallback(
+      (level: number, msgPtr: Pointer, msgLen: number) => {
+        try {
+          if (msgLen === 0 || !msgPtr) {
+            return
+          }
+
+          const msgBuffer = toArrayBuffer(msgPtr, 0, msgLen)
+          const msgBytes = new Uint8Array(msgBuffer)
+          const message = this.decoder.decode(msgBytes)
+
+          this.logMessage(level, message)
+        } catch (error) {
+          console.error("Error in Zig log callback:", error)
+        }
+      },
+      {
+        args: ["u8", "ptr", "u32"],
+        returns: "void",
+      },
+    )
+
+    this.logCallbackWrapper = logCallback
+
+    if (!logCallback.ptr) {
+      throw new Error("Failed to create log callback")
+    }
+
+    this.setLogCallback(logCallback.ptr)
+    processLogLibraries.push(this)
+  }
+
+  private setLogCallback(callbackPtr: Pointer | null) {
+    this.opentui.symbols.setLogCallback(callbackPtr)
+  }
+
+  /** Hands the process log callback to the newest remaining main-thread library, or clears it after the last one. */
+  private releaseProcessLog(): void {
+    const index = processLogLibraries.indexOf(this)
+    if (index < 0) return
+    processLogLibraries.splice(index, 1)
+    if (index < processLogLibraries.length) return
+    this.setLogCallback(processLogLibraries.at(-1)?.logCallbackWrapper?.ptr ?? null)
+  }
+
+  public dispose(): void {
+    if (this.disposed) return
+    // Refuse before any release so a refused dispose leaves the library unchanged.
+    if (this.clipboardServices.size > 0) {
+      throw new Error("Cannot dispose OpenTUI native library while clipboard services are active")
+    }
+    if (this.nativeContexts.size !== this.audioEngines.size + Number(this.editMeasureContext !== undefined)) {
+      throw new NativeError("dispose", NativeStatus.ContextBusy)
+    }
+    this.yogaHost?.dispose()
+    if (this.editMeasureContext) this.releaseContext(this.editMeasureContext)
+    this.editMeasureContext = undefined
+    for (const [engine, context] of this.audioEngines) {
+      this.releaseContext(context)
+      this.audioEngines.delete(engine)
+    }
+    this.disposed = true
+    try {
+      this.releaseProcessLog()
+    } finally {
+      try {
+        if (this.iccCacheClient) {
+          this.iccCacheClient = false
+          this.imageReleaseIccCache()
+        }
+      } finally {
+        try {
+          this.opentui.close()
+        } finally {
+          this.logCallbackWrapper = null
+          this.nativeSpanFeedCallbackWrapper = null
+          this.nativeSpanFeedHandlers.clear()
+        }
+      }
+    }
+  }
+
+  private ensureNativeSpanFeedCallback(): FFICallbackInstance {
+    if (this.nativeSpanFeedCallbackWrapper) {
+      return this.nativeSpanFeedCallbackWrapper
+    }
+
+    const callback = this.opentui.createCallback(
+      (streamPtr: Pointer, eventId: number, arg0: Pointer, arg1: number | bigint) => {
+        const handler = this.nativeSpanFeedHandlers.get(streamPtr)
+        if (handler) {
+          handler(eventId, arg0, arg1)
+        }
+      },
+      {
+        args: ["ptr", "u32", "ptr", "u64"],
+        returns: "void",
+      },
+    )
+
+    this.nativeSpanFeedCallbackWrapper = callback
+
+    if (!callback.ptr) {
+      throw new Error("Failed to create native span feed callback")
+    }
+
+    return callback
+  }
+
+  public clipboardServiceCreate(
+    maxConcurrentOperations: number,
+    maxProviderTransfers: number,
+    waylandSeat?: string,
+  ): ClipboardServiceHandle | null {
+    const seat = waylandSeat === undefined ? null : this.encoder.encode(waylandSeat)
+    const operations = toSafeFFIU32Length(maxConcurrentOperations, "clipboard operation limit")
+    const transfers = toSafeFFIU32Length(maxProviderTransfers, "clipboard provider transfer limit")
+    if (operations === 0 || transfers === 0) return null
+    const service = nextStandaloneHandle() as ClipboardServiceHandle
+    const context = this.tryCreateStandaloneContext(Math.min(operations + 1, 0xffff))
+    if (!context) return null
+    try {
+      const pointer = this.nativeContextPointer(context, "ot_clipboard_service_create")
+      if (
+        this.opentui.symbols.ot_clipboard_service_create(
+          pointer,
+          operations,
+          transfers,
+          seat,
+          seat?.byteLength ?? 0,
+        ) !== 0
+      ) {
+        this.releaseContext(context)
+        return null
+      }
+      this.clipboardServices.set(service, context)
+      return service
+    } catch (error) {
+      this.releaseContext(context)
+      throw error
+    }
+  }
+
+  private clipboardContext(service: ClipboardServiceHandle): Pointer | null {
+    const context = this.clipboardServices.get(service)
+    return context ? this.nativeContextPointer(context, "clipboard") : null
+  }
+
+  private clipboardOperationArgs(operation: ClipboardOperationHandle): [Pointer | null, BigUint64Array] {
+    const value = this.clipboardOperations.get(operation)
+    return value ? [this.clipboardContext(value.service), value.handle] : [null, this.invalidStandaloneHandle]
+  }
+
+  public clipboardServiceBeginShutdown(service: ClipboardServiceHandle): NativeClipboardShutdownStatus {
+    return this.opentui.symbols.ot_clipboard_service_begin_shutdown(this.clipboardContext(service))
+  }
+
+  public clipboardServicePollShutdown(service: ClipboardServiceHandle): NativeClipboardShutdownStatus {
+    return this.opentui.symbols.ot_clipboard_service_poll_shutdown(this.clipboardContext(service))
+  }
+
+  public clipboardServiceDestroy(service: ClipboardServiceHandle): NativeClipboardDestroyStatus {
+    const context = this.clipboardServices.get(service)
+    if (!context) return NativeClipboardDestroyStatus.InvalidHandle
+    const status = this.opentui.symbols.ot_clipboard_service_destroy(this.clipboardContext(service))
+    if (status === NativeClipboardDestroyStatus.Destroyed) {
+      this.releaseContext(context)
+      this.clipboardServices.delete(service)
+      for (const [id, operation] of this.clipboardOperations) {
+        if (operation.service === service) this.clipboardOperations.delete(id)
+      }
+    }
+    return status
+  }
+
+  public clipboardServiceDrain(service: ClipboardServiceHandle): number {
+    return this.opentui.symbols.ot_clipboard_service_drain(this.clipboardContext(service))
+  }
+
+  private clipboardStart(
+    service: ClipboardServiceHandle,
+    start: (...args: unknown[]) => NativeClipboardStartStatus,
+    args: unknown[],
+  ): { status: NativeClipboardStartStatus; operation: ClipboardOperationHandle | null } {
+    if (!this.clipboardServices.has(service))
+      return { status: NativeClipboardStartStatus.InvalidService, operation: null }
+    const operation = nextStandaloneHandle() as ClipboardOperationHandle
+    const handle = new BigUint64Array(nativeLayouts.ot_handle.size / 8)
+    this.clipboardOperations.set(operation, { service, handle })
+    let retained = false
+    try {
+      const status = start(this.clipboardContext(service), ...args, handle)
+      retained = status === NativeClipboardStartStatus.Ok
+      return { status, operation: retained ? operation : null }
+    } finally {
+      if (!retained) this.clipboardOperations.delete(operation)
+    }
+  }
+
+  public clipboardReadOperationStart(
+    service: ClipboardServiceHandle,
+    request: Uint8Array,
+    selection: number,
+    maxBytes: number,
+    maxImagePixels: number,
+    maxConversionBytes: number,
+    timeoutMs: number,
+  ): { status: NativeClipboardStartStatus; operation: ClipboardOperationHandle | null } {
+    return this.clipboardStart(service, this.opentui.symbols.ot_clipboard_read_operation_start, [
+      request,
+      toSafeFFIU32Length(request.byteLength, "clipboard read request"),
+      selection,
+      toSafeFFIU32Length(maxBytes, "clipboard read byte limit"),
+      toSafeFFIU32Length(maxImagePixels, "clipboard image pixel limit"),
+      toSafeFFIU32Length(maxConversionBytes, "clipboard conversion byte limit"),
+      toSafeFFIU32Length(timeoutMs, "clipboard read timeout"),
+    ])
+  }
+
+  public clipboardWriteOperationStart(
+    service: ClipboardServiceHandle,
+    textUtf8: Uint8Array,
+    selection: number,
+    timeoutMs: number,
+  ): { status: NativeClipboardStartStatus; operation: ClipboardOperationHandle | null } {
+    return this.clipboardStart(service, this.opentui.symbols.ot_clipboard_write_operation_start, [
+      textUtf8,
+      toSafeFFIU32Length(textUtf8.byteLength, "clipboard write text"),
+      selection,
+      toSafeFFIU32Length(timeoutMs, "clipboard write timeout"),
+    ])
+  }
+
+  public clipboardClearOperationStart(
+    service: ClipboardServiceHandle,
+    selection: number,
+    timeoutMs: number,
+  ): { status: NativeClipboardStartStatus; operation: ClipboardOperationHandle | null } {
+    return this.clipboardStart(service, this.opentui.symbols.ot_clipboard_clear_operation_start, [
+      selection,
+      toSafeFFIU32Length(timeoutMs, "clipboard clear timeout"),
+    ])
+  }
+
+  public clipboardOperationPoll(operation: ClipboardOperationHandle): NativeClipboardOperationStatus {
+    return this.opentui.symbols.ot_clipboard_operation_poll(...this.clipboardOperationArgs(operation))
+  }
+
+  public clipboardOperationCancel(operation: ClipboardOperationHandle): NativeClipboardCancelStatus {
+    return this.opentui.symbols.ot_clipboard_operation_cancel(...this.clipboardOperationArgs(operation))
+  }
+
+  private clipboardResultLength(
+    symbol: (context: Pointer | null, operation: BigUint64Array, output: Uint32Array) => number,
+    operation: ClipboardOperationHandle,
+  ): { status: NativeClipboardCopyStatus; length: number } {
+    const output = new Uint32Array(1)
+    const status = symbol(...this.clipboardOperationArgs(operation), output)
+    return { status, length: output[0] }
+  }
+
+  public clipboardOperationResultMimeLength(operation: ClipboardOperationHandle): {
+    status: NativeClipboardCopyStatus
+    length: number
+  } {
+    return this.clipboardResultLength(this.opentui.symbols.ot_clipboard_operation_result_mime_length, operation)
+  }
+
+  public clipboardOperationResultMimeCopy(
+    operation: ClipboardOperationHandle,
+    output: Uint8Array,
+  ): NativeClipboardCopyStatus {
+    const capacity = toSafeFFIU32Length(output.byteLength, "clipboard MIME output")
+    return this.opentui.symbols.ot_clipboard_operation_result_mime_copy(
+      ...this.clipboardOperationArgs(operation),
+      output,
+      capacity,
+    )
+  }
+
+  public clipboardOperationResultDataLength(operation: ClipboardOperationHandle): {
+    status: NativeClipboardCopyStatus
+    length: number
+  } {
+    return this.clipboardResultLength(this.opentui.symbols.ot_clipboard_operation_result_data_length, operation)
+  }
+
+  public clipboardOperationResultDataCopy(
+    operation: ClipboardOperationHandle,
+    output: Uint8Array,
+  ): NativeClipboardCopyStatus {
+    const capacity = toSafeFFIU32Length(output.byteLength, "clipboard data output")
+    return this.opentui.symbols.ot_clipboard_operation_result_data_copy(
+      ...this.clipboardOperationArgs(operation),
+      output,
+      capacity,
+    )
+  }
+
+  public clipboardOperationResultErrorCode(operation: ClipboardOperationHandle): {
+    status: NativeClipboardCopyStatus
+    errorCode: number
+  } {
+    const output = new Uint32Array(1)
+    const status = this.opentui.symbols.ot_clipboard_operation_result_error_code(
+      ...this.clipboardOperationArgs(operation),
+      output,
+    )
+    return { status, errorCode: output[0] }
+  }
+
+  public clipboardOperationResultDiagnosticLength(operation: ClipboardOperationHandle): {
+    status: NativeClipboardCopyStatus
+    length: number
+  } {
+    return this.clipboardResultLength(this.opentui.symbols.ot_clipboard_operation_result_diagnostic_length, operation)
+  }
+
+  public clipboardOperationResultDiagnosticCopy(
+    operation: ClipboardOperationHandle,
+    output: Uint8Array,
+  ): NativeClipboardCopyStatus {
+    const capacity = toSafeFFIU32Length(output.byteLength, "clipboard diagnostic output")
+    return this.opentui.symbols.ot_clipboard_operation_result_diagnostic_copy(
+      ...this.clipboardOperationArgs(operation),
+      output,
+      capacity,
+    )
+  }
+
+  public clipboardOperationDestroy(operation: ClipboardOperationHandle): NativeClipboardDestroyStatus {
+    const status = this.opentui.symbols.ot_clipboard_operation_destroy(...this.clipboardOperationArgs(operation))
+    if (status === NativeClipboardDestroyStatus.Destroyed) this.clipboardOperations.delete(operation)
+    return status
+  }
+
+  public getYogaHost(): YogaHost {
+    if (this.disposed) throw new Error("OpenTUI native library is disposed")
+    return (this.yogaHost ??= new YogaHost(this))
+  }
+
+  private yogaMutation<Args extends unknown[], Result>(call: (...args: Args) => Result, ...args: Args): Result {
+    return this.getYogaHost().runMutation(() => call(...args))
+  }
+
+  private yogaChecked(
+    operation: Extract<keyof typeof yogaSymbols, `${string}Checked`>,
+    mutation: boolean,
+    ...args: unknown[]
+  ): void {
+    const call = () => {
+      const signature = yogaSymbols[operation].args
+      for (let index = 0; index < signature.length; index++) {
+        if (signature[index] !== "u32") continue
+        const value = args[index]
+        if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+          throw new YogaError(operation, YogaStatus.InvalidArgument)
+        }
+      }
+      const status = this.opentui.symbols[operation](...args)
+      if (status !== YogaStatus.Ok) throw new YogaError(operation, status)
+    }
+    if (mutation) this.getYogaHost().runMutation(call)
+    else call()
+  }
+
+  public yogaConfigCreate(): Pointer {
+    this.yogaChecked("yogaConfigCreateChecked", true, this.yogaU64)
+    return toPointer(this.yogaU64[0]!)
+  }
+
+  public yogaConfigFree(config: Pointer): void {
+    this.yogaChecked("yogaConfigFreeChecked", true, config)
+  }
+
+  public yogaConfigSetCallbacks(config: Pointer, measure: Pointer, dirtied: Pointer): boolean {
+    return Boolean(this.yogaMutation(this.opentui.symbols.yogaConfigSetCallbacks, config, measure, dirtied))
+  }
+
+  public yogaConfigClearCallbacks(config: Pointer, measure: Pointer): boolean {
+    return Boolean(this.yogaMutation(this.opentui.symbols.yogaConfigClearCallbacks, config, measure))
+  }
+
+  public yogaConfigSetUseWebDefaults(config: Pointer, enabled: boolean): void {
+    this.yogaChecked("yogaConfigSetUseWebDefaultsChecked", true, config, ffiBool(enabled))
+  }
+
+  public yogaConfigGetUseWebDefaults(config: Pointer): boolean {
+    return Boolean(this.opentui.symbols.yogaConfigGetUseWebDefaults(config))
+  }
+
+  public yogaConfigSetPointScaleFactor(config: Pointer, pointScaleFactor: number): void {
+    this.yogaChecked("yogaConfigSetPointScaleFactorChecked", true, config, pointScaleFactor)
+  }
+
+  public yogaConfigGetPointScaleFactor(config: Pointer): number {
+    return this.opentui.symbols.yogaConfigGetPointScaleFactor(config)
+  }
+
+  public yogaConfigSetErrata(config: Pointer, errata: number): void {
+    this.yogaChecked("yogaConfigSetErrataChecked", true, config, errata)
+  }
+
+  public yogaConfigGetErrata(config: Pointer): number {
+    return this.opentui.symbols.yogaConfigGetErrata(config)
+  }
+
+  public yogaConfigSetExperimentalFeatureEnabled(config: Pointer, feature: number, enabled: boolean): void {
+    this.yogaChecked("yogaConfigSetExperimentalFeatureEnabledChecked", true, config, feature, ffiBool(enabled))
+  }
+
+  public yogaConfigIsExperimentalFeatureEnabled(config: Pointer, feature: number): boolean {
+    this.yogaChecked("yogaConfigIsExperimentalFeatureEnabledChecked", false, config, feature, this.yogaU32)
+    return this.yogaU32[0] !== 0
+  }
+
+  public yogaNodeCreateForOpenTUI(): Pointer {
+    this.yogaChecked("yogaNodeCreateForOpenTUIChecked", true, this.yogaU64)
+    return toPointer(this.yogaU64[0]!)
+  }
+
+  public yogaNodeCreateWithConfig(config: Pointer): Pointer {
+    this.yogaChecked("yogaNodeCreateWithConfigChecked", true, config, this.yogaU64)
+    return toPointer(this.yogaU64[0]!)
+  }
+
+  public yogaNodeGetConfig(node: Pointer): Pointer {
+    const config = this.opentui.symbols.yogaNodeGetConfig(node)
+    if (!config) throw new Error("Failed to get Yoga node config")
+    return config
+  }
+
+  public yogaNodeFree(node: Pointer): void {
+    this.yogaChecked("yogaNodeFreeChecked", true, node)
+  }
+
+  public yogaNodeFreeRecursive(node: Pointer): void {
+    this.yogaChecked("yogaNodeFreeRecursiveChecked", true, node)
+  }
+
+  public yogaNodeReset(node: Pointer): void {
+    this.yogaChecked("yogaNodeResetChecked", true, node)
+  }
+
+  public yogaNodeCopyStyle(dstNode: Pointer, srcNode: Pointer): void {
+    this.yogaChecked("yogaNodeCopyStyleChecked", true, dstNode, srcNode)
+  }
+
+  public yogaNodeInsertChild(node: Pointer, child: Pointer, index: number): void {
+    this.yogaChecked("yogaNodeInsertChildChecked", true, node, child, index)
+  }
+
+  public yogaNodeRemoveChild(node: Pointer, child: Pointer): void {
+    this.yogaChecked("yogaNodeRemoveChildChecked", true, node, child)
+  }
+
+  public yogaNodeRemoveAllChildren(node: Pointer): void {
+    this.yogaChecked("yogaNodeRemoveAllChildrenChecked", true, node)
+  }
+
+  public yogaNodeGetChild(node: Pointer, index: number): Pointer | null {
+    this.yogaChecked("yogaNodeGetChildChecked", false, node, index, this.yogaU64)
+    return this.yogaU64[0] ? toPointer(this.yogaU64[0]) : null
+  }
+
+  public yogaNodeGetChildCount(node: Pointer): number {
+    return this.opentui.symbols.yogaNodeGetChildCount(node)
+  }
+
+  public yogaNodeGetParent(node: Pointer): Pointer | null {
+    return this.opentui.symbols.yogaNodeGetParent(node) || null
+  }
+
+  public yogaNodeCalculateLayout(node: Pointer, width: number, height: number, direction: number): void {
+    this.getYogaHost().flushSceneMutations()
+    this.yogaChecked("yogaNodeCalculateLayoutChecked", true, node, width, height, direction)
+  }
+
+  public yogaNodeIsDirty(node: Pointer): boolean {
+    this.yogaChecked("yogaNodeIsDirtyChecked", false, node, this.yogaU32)
+    return this.yogaU32[0] !== 0
+  }
+
+  public yogaNodeMarkDirty(node: Pointer): void {
+    this.yogaChecked("yogaNodeMarkDirtyChecked", true, node)
+  }
+
+  public yogaNodeGetHasNewLayout(node: Pointer): boolean {
+    this.yogaChecked("yogaNodeGetHasNewLayoutChecked", false, node, this.yogaU32)
+    return this.yogaU32[0] !== 0
+  }
+
+  public yogaNodeSetHasNewLayout(node: Pointer, hasNewLayout: boolean): void {
+    this.yogaChecked("yogaNodeSetHasNewLayoutChecked", true, node, ffiBool(hasNewLayout))
+  }
+
+  public yogaNodeSetIsReferenceBaseline(node: Pointer, isReferenceBaseline: boolean): void {
+    this.yogaChecked("yogaNodeSetIsReferenceBaselineChecked", true, node, ffiBool(isReferenceBaseline))
+  }
+
+  public yogaNodeIsReferenceBaseline(node: Pointer): boolean {
+    this.yogaChecked("yogaNodeIsReferenceBaselineChecked", false, node, this.yogaU32)
+    return this.yogaU32[0] !== 0
+  }
+
+  public yogaNodeSetAlwaysFormsContainingBlock(node: Pointer, alwaysFormsContainingBlock: boolean): void {
+    this.yogaChecked("yogaNodeSetAlwaysFormsContainingBlockChecked", true, node, ffiBool(alwaysFormsContainingBlock))
+  }
+
+  public yogaNodeGetAlwaysFormsContainingBlock(node: Pointer): boolean {
+    this.yogaChecked("yogaNodeGetAlwaysFormsContainingBlockChecked", false, node, this.yogaU32)
+    return this.yogaU32[0] !== 0
+  }
+
+  public yogaNodeGetComputedLayout(node: Pointer): NativeYogaLayout {
+    const layout = this.yogaLayout
+    this.yogaChecked("yogaNodeGetComputedLayoutChecked", false, node, layout)
+    return {
+      left: layout[0]!,
+      top: layout[1]!,
+      right: layout[2]!,
+      bottom: layout[3]!,
+      width: layout[4]!,
+      height: layout[5]!,
+    }
+  }
+
+  public yogaNodeLayoutGetEdge(node: Pointer, kind: number, edge: number): number {
+    this.yogaChecked("yogaNodeLayoutGetEdgeChecked", false, node, kind, edge, this.yogaF32)
+    return this.yogaF32[0]!
+  }
+
+  public yogaNodeStyleSetEnum(node: Pointer, kind: number, value: number): void {
+    this.yogaChecked("yogaNodeStyleSetEnumChecked", true, node, kind, value)
+  }
+
+  public yogaNodeStyleGetEnum(node: Pointer, kind: number): number {
+    this.yogaChecked("yogaNodeStyleGetEnumChecked", false, node, kind, this.yogaU32)
+    return this.yogaU32[0]!
+  }
+
+  public yogaNodeStyleSetFloat(node: Pointer, kind: number, value: number): void {
+    this.yogaChecked("yogaNodeStyleSetFloatChecked", true, node, kind, value)
+  }
+
+  public yogaNodeStyleGetFloat(node: Pointer, kind: number): number {
+    this.yogaChecked("yogaNodeStyleGetFloatChecked", false, node, kind, this.yogaF32)
+    return this.yogaF32[0]!
+  }
+
+  public yogaNodeStyleSetBorder(node: Pointer, edge: number, border: number): void {
+    this.yogaChecked("yogaNodeStyleSetBorderChecked", true, node, edge, border)
+  }
+
+  public yogaNodeStyleGetBorder(node: Pointer, edge: number): number {
+    this.yogaChecked("yogaNodeStyleGetBorderChecked", false, node, edge, this.yogaF32)
+    return this.yogaF32[0]!
+  }
+
+  public yogaNodeStyleSetValue(node: Pointer, kind: number, edgeOrGutter: number, unit: number, value: number): void {
+    this.yogaChecked("yogaNodeStyleSetValueChecked", true, node, kind, edgeOrGutter, unit, value)
+  }
+
+  public yogaNodeStyleGetValue(node: Pointer, kind: number, edgeOrGutter: number): number | bigint {
+    this.yogaChecked("yogaNodeStyleGetValueChecked", false, node, kind, edgeOrGutter, this.yogaU64)
+    return this.yogaU64[0]!
+  }
+
+  public yogaNodeSetMeasureFunc(node: Pointer, enabled: boolean): void {
+    this.yogaChecked("yogaNodeSetMeasureFuncChecked", true, node, ffiBool(enabled))
+  }
+
+  public yogaNodeUnsetMeasureFunc(node: Pointer): void {
+    this.yogaChecked("yogaNodeUnsetMeasureFuncChecked", true, node)
+  }
+
+  public yogaNodeHasMeasureFunc(node: Pointer): boolean {
+    // Node's FFI returns bools as 0/1 numbers; normalize so the interface stays truthful.
+    return Boolean(this.opentui.symbols.yogaNodeHasMeasureFunc(node))
+  }
+
+  public yogaNodeSetDirtiedFunc(node: Pointer, enabled: boolean): void {
+    this.yogaChecked("yogaNodeSetDirtiedFuncChecked", true, node, ffiBool(enabled))
+  }
+
+  public yogaNodeUnsetDirtiedFunc(node: Pointer): void {
+    this.yogaChecked("yogaNodeUnsetDirtiedFuncChecked", true, node)
+  }
+
+  public yogaStoreMeasureResult(config: Pointer, width: number, height: number): void {
+    this.opentui.symbols.yogaStoreMeasureResult(config, width, height)
+  }
+
+  public createYogaMeasureCallback(callback: NativeYogaMeasureCallback): FFICallbackInstance {
+    const host = this.getYogaHost()
+    return this.opentui.createCallback(
+      (...args: Parameters<NativeYogaMeasureCallback>) => {
+        host.invokeCallback(() => callback(...args))
+      },
+      {
+        args: ["ptr", "f32", "u32", "f32", "u32"],
+        returns: "void",
+      },
+    )
+  }
+
+  public createYogaDirtiedCallback(callback: NativeYogaDirtiedCallback): FFICallbackInstance {
+    const host = this.getYogaHost()
+    return this.opentui.createCallback(
+      (node: Pointer | null) => {
+        host.invokeCallback(() => callback(node))
+      },
+      {
+        args: ["ptr"],
+        returns: "void",
+      },
+    )
+  }
+
+  /** Always 0: native resources no longer allocate from a process arena. */
+  public getArenaAllocatedBytes(): number {
+    const result = this.opentui.symbols.getArenaAllocatedBytes()
+    return toSafeByteCount(result, "Arena allocated bytes")
+  }
+
+  public getBuildOptions(): BuildOptions {
+    const optionsBuffer = new ArrayBuffer(BuildOptionsStruct.size)
+    this.opentui.symbols.getBuildOptions(optionsBuffer)
+    const options = BuildOptionsStruct.unpack(optionsBuffer)
+
+    return {
+      gpaSafeStats: !!options.gpaSafeStats,
+      gpaMemoryLimitTracking: !!options.gpaMemoryLimitTracking,
+    }
+  }
+
+  /** Stats of the process allocator, which backs native span feeds. Each Context has its own allocator, so Context
+   * resources such as text, buffers, scenes, images, and audio engines are not counted. */
+  public getAllocatorStats(): AllocatorStats {
+    const statsBuffer = new ArrayBuffer(AllocatorStatsStruct.size)
+    this.opentui.symbols.getAllocatorStats(statsBuffer)
+    const stats = AllocatorStatsStruct.unpack(statsBuffer)
+
+    return {
+      totalRequestedBytes: toNumber(stats.totalRequestedBytes),
+      activeAllocations: toNumber(stats.activeAllocations),
+      smallAllocations: toNumber(stats.smallAllocations),
+      largeAllocations: toNumber(stats.largeAllocations),
+      requestedBytesValid: !!stats.requestedBytesValid,
+    }
+  }
+
+  private tryCreateStandaloneContext(objectCapacity: number): NativeContextHandle | null {
+    try {
+      return this.createContext({ objectCapacity, renderCellsMax: 1 })
+    } catch (error) {
+      if (error instanceof NativeError) return null
+      throw error
+    }
+  }
+
+  public createAudioEngine(options?: AudioCreateOptions | null): AudioEngineHandle | null {
+    const optionsBuffer = options == null ? null : AudioCreateOptionsStruct.pack(options)
+    const id = nextStandaloneHandle() as AudioEngineHandle
+    const context = this.tryCreateStandaloneContext(1)
+    if (!context) return null
+    try {
+      const pointer = this.nativeContextPointer(context, "createAudioEngine")
+      if (this.opentui.symbols.createAudioEngine(pointer, optionsBuffer) !== 0) {
+        this.releaseContext(context)
+        return null
+      }
+      this.audioEngines.set(id, context)
+      return id
+    } catch (error) {
+      this.releaseContext(context)
+      throw error
+    }
+  }
+
+  public destroyAudioEngine(engine: AudioEngineHandle): void {
+    const context = this.audioEngines.get(engine)
+    if (!context) return
+    this.releaseContext(context)
+    this.audioEngines.delete(engine)
+  }
+
+  private audioContext(engine: AudioEngineHandle): Pointer | null {
+    const context = this.audioEngines.get(engine)
+    return context ? this.nativeContextPointer(context, "audio") : null
+  }
+
+  public audioRefreshPlaybackDevices(engine: AudioEngineHandle): number {
+    return this.opentui.symbols.audioRefreshPlaybackDevices(this.audioContext(engine))
+  }
+
+  public audioGetPlaybackDeviceCount(engine: AudioEngineHandle): number {
+    return this.opentui.symbols.audioGetPlaybackDeviceCount(this.audioContext(engine))
+  }
+
+  public audioGetPlaybackDeviceName(engine: AudioEngineHandle, index: number): string {
+    const outBuffer = new Uint8Array(512)
+    const bytesWritten = toNumber(
+      this.opentui.symbols.audioGetPlaybackDeviceName(this.audioContext(engine), index, outBuffer, outBuffer.length),
+    )
+    const safeBytesWritten = Math.max(0, Math.min(outBuffer.length, bytesWritten))
+    return this.decoder.decode(outBuffer.subarray(0, safeBytesWritten))
+  }
+
+  public audioIsPlaybackDeviceDefault(engine: AudioEngineHandle, index: number): boolean {
+    return this.opentui.symbols.audioIsPlaybackDeviceDefault(this.audioContext(engine), index)
+  }
+
+  public audioSelectPlaybackDevice(engine: AudioEngineHandle, index: number): number {
+    return this.opentui.symbols.audioSelectPlaybackDevice(this.audioContext(engine), index)
+  }
+
+  public audioClearPlaybackDeviceSelection(engine: AudioEngineHandle): void {
+    this.opentui.symbols.audioClearPlaybackDeviceSelection(this.audioContext(engine))
+  }
+
+  public audioRefreshCaptureDevices(engine: AudioEngineHandle): number {
+    return this.opentui.symbols.audioRefreshCaptureDevices(this.audioContext(engine))
+  }
+
+  public audioGetCaptureDeviceCount(engine: AudioEngineHandle): number {
+    return this.opentui.symbols.audioGetCaptureDeviceCount(this.audioContext(engine))
+  }
+
+  public audioGetCaptureDeviceName(engine: AudioEngineHandle, index: number): string {
+    const outBuffer = new Uint8Array(512)
+    const bytesWritten = toNumber(
+      this.opentui.symbols.audioGetCaptureDeviceName(this.audioContext(engine), index, outBuffer, outBuffer.length),
+    )
+    const safeBytesWritten = Math.max(0, Math.min(outBuffer.length, bytesWritten))
+    return this.decoder.decode(outBuffer.subarray(0, safeBytesWritten))
+  }
+
+  public audioIsCaptureDeviceDefault(engine: AudioEngineHandle, index: number): boolean {
+    return Boolean(this.opentui.symbols.audioIsCaptureDeviceDefault(this.audioContext(engine), index))
+  }
+
+  public audioSelectCaptureDevice(engine: AudioEngineHandle, index: number): number {
+    return this.opentui.symbols.audioSelectCaptureDevice(this.audioContext(engine), index)
+  }
+
+  public audioClearCaptureDeviceSelection(engine: AudioEngineHandle): void {
+    this.opentui.symbols.audioClearCaptureDeviceSelection(this.audioContext(engine))
+  }
+
+  public audioStartCapture(
+    engine: AudioEngineHandle,
+    options: AudioStartOptions | undefined,
+    channels: number,
+    capacityFrames: number,
+  ): number {
+    let optionsBuffer: ArrayBuffer
+    try {
+      const noFixedSizedCallback = options?.noFixedSizedCallback
+      optionsBuffer = AudioStartOptionsStruct.pack(options ?? {})
+      if (noFixedSizedCallback === undefined) {
+        const field = AudioStartOptionsStruct.layoutByName.get("noFixedSizedCallback")
+        if (!field) return -1
+        new DataView(optionsBuffer).setUint8(field.offset, 1)
+      }
+    } catch {
+      return -1
+    }
+    return this.opentui.symbols.audioStartCapture(this.audioContext(engine), optionsBuffer, channels, capacityFrames)
+  }
+
+  public audioStopCapture(engine: AudioEngineHandle): number {
+    return this.opentui.symbols.audioStopCapture(this.audioContext(engine))
+  }
+
+  public audioIsCaptureRunning(engine: AudioEngineHandle): boolean {
+    return Boolean(this.opentui.symbols.audioIsCaptureRunning(this.audioContext(engine)))
+  }
+
+  public audioReadCapture(
+    engine: AudioEngineHandle,
+    outBuffer: Float32Array,
+    frameCount: number,
+  ): { status: number; framesRead: number } {
+    const outFramesReadBuffer = new ArrayBuffer(4)
+    const sampleCapacity = toSafeFFIU32Length(outBuffer.length, "Audio capture output sample capacity")
+    const status = this.opentui.symbols.audioReadCapture(
+      this.audioContext(engine),
+      outBuffer,
+      sampleCapacity,
+      frameCount,
+      outFramesReadBuffer,
+    )
+    if (status !== 0) return { status, framesRead: 0 }
+    return { status, framesRead: new Uint32Array(outFramesReadBuffer)[0] ?? 0 }
+  }
+
+  public audioGetCaptureStats(engine: AudioEngineHandle): { status: number; stats: NativeAudioCaptureStats | null } {
+    const statsBuffer = new ArrayBuffer(AudioCaptureStatsStruct.size)
+    const status = this.opentui.symbols.audioGetCaptureStats(this.audioContext(engine), statsBuffer)
+    if (status !== 0) return { status, stats: null }
+    const stats = AudioCaptureStatsStruct.unpack(statsBuffer)
+    return {
+      status,
+      stats: {
+        framesReceived: typeof stats.framesReceived === "bigint" ? stats.framesReceived : BigInt(stats.framesReceived),
+        framesRead: typeof stats.framesRead === "bigint" ? stats.framesRead : BigInt(stats.framesRead),
+        framesDropped: typeof stats.framesDropped === "bigint" ? stats.framesDropped : BigInt(stats.framesDropped),
+        sampleRate: stats.sampleRate,
+        channels: stats.channels,
+        bufferedFrames: stats.bufferedFrames,
+        capacityFrames: stats.capacityFrames,
+      },
+    }
+  }
+
+  public audioStart(engine: AudioEngineHandle, options?: AudioStartOptions | null): number {
+    let optionsBuffer: ArrayBuffer | null
+    try {
+      optionsBuffer = options == null ? null : AudioStartOptionsStruct.pack(options)
+    } catch {
+      return -1
+    }
+    return this.opentui.symbols.audioStart(this.audioContext(engine), optionsBuffer)
+  }
+
+  public audioStartMixer(engine: AudioEngineHandle): number {
+    return this.opentui.symbols.audioStartMixer(this.audioContext(engine))
+  }
+
+  public audioStop(engine: AudioEngineHandle): number {
+    return this.opentui.symbols.audioStop(this.audioContext(engine))
+  }
+
+  public audioCreateStream(
+    engine: AudioEngineHandle,
+    options: AudioStreamCreateOptions,
+  ): { status: number; streamId: number | null } {
+    if (
+      !isFFIU32(options.groupId) ||
+      !isFFIU32(options.sampleRate ?? 0) ||
+      !isFFIU32(options.channels ?? 0) ||
+      !Object.values(NativeAudioStreamFormat).includes(options.format)
+    ) {
+      return { status: -1, streamId: null }
+    }
+    const optionsBuffer = new Uint8Array(AudioStreamCreateOptionsStruct.pack(options))
+    const outBuffer = new Uint32Array(1)
+    const status = this.opentui.symbols.audioCreateStream(this.audioContext(engine), optionsBuffer, outBuffer)
+    if (status !== 0) return { status, streamId: null }
+    return { status, streamId: outBuffer[0] ?? null }
+  }
+
+  public audioWriteStream(engine: AudioEngineHandle, streamId: number, data: Uint8Array): number {
+    const dataLength = toSafeFFIU32Length(data.byteLength, "Audio stream data length")
+    return this.opentui.symbols.audioWriteStream(this.audioContext(engine), streamId, data, dataLength)
+  }
+
+  public audioEndStream(engine: AudioEngineHandle, streamId: number): number {
+    return this.opentui.symbols.audioEndStream(this.audioContext(engine), streamId)
+  }
+
+  public audioRestartStream(engine: AudioEngineHandle, streamId: number): number {
+    return this.opentui.symbols.audioRestartStream(this.audioContext(engine), streamId)
+  }
+
+  public audioSetStreamVolume(engine: AudioEngineHandle, streamId: number, volume: number): number {
+    return this.opentui.symbols.audioSetStreamVolume(this.audioContext(engine), streamId, volume)
+  }
+
+  public audioSetStreamPan(engine: AudioEngineHandle, streamId: number, pan: number): number {
+    return this.opentui.symbols.audioSetStreamPan(this.audioContext(engine), streamId, pan)
+  }
+
+  public audioSetStreamGroup(engine: AudioEngineHandle, streamId: number, groupId: number): number {
+    if (!isFFIU32(groupId)) return -1
+    return this.opentui.symbols.audioSetStreamGroup(this.audioContext(engine), streamId, groupId)
+  }
+
+  public audioGetStreamStats(engine: AudioEngineHandle, streamId: number): NativeAudioStreamStats | null {
+    const storage = this.ffiStructStorage.audioStreamStats
+    const status = this.opentui.symbols.audioGetStreamStats(this.audioContext(engine), streamId, storage.ffiView)
+    if (status !== 0) return null
+    const stats = AudioStreamStatsStruct.unpackInto(storage.view, storage.result) as NativeAudioStreamStats
+    return { ...stats }
+  }
+
+  public audioCloseStream(
+    engine: AudioEngineHandle,
+    streamId: number,
+    reason: NativeAudioStreamCloseReason,
+  ): { status: number; stats: NativeAudioStreamStats | null } {
+    const storage = this.ffiStructStorage.audioStreamStats
+    const status = this.opentui.symbols.audioCloseStream(this.audioContext(engine), streamId, reason, storage.ffiView)
+    if (status !== 0) return { status, stats: null }
+    const stats = AudioStreamStatsStruct.unpackInto(storage.view, storage.result) as NativeAudioStreamStats
+    return { status, stats: { ...stats } }
+  }
+
+  public audioLoad(engine: AudioEngineHandle, data: Uint8Array): { status: number; soundId: number | null } {
+    const outBuffer = new ArrayBuffer(4)
+    const dataLength = toSafeFFIU32Length(data.byteLength, "Audio data length")
+    const status = this.opentui.symbols.audioLoad(this.audioContext(engine), data, dataLength, outBuffer)
+    if (status !== 0) {
+      return { status, soundId: null }
+    }
+    const view = new Uint32Array(outBuffer)
+    return { status, soundId: view[0] }
+  }
+
+  public audioUnload(engine: AudioEngineHandle, soundId: number): number {
+    return this.opentui.symbols.audioUnload(this.audioContext(engine), soundId)
+  }
+
+  public audioPlay(
+    engine: AudioEngineHandle,
+    soundId: number,
+    options?: AudioVoiceOptions,
+  ): { status: number; voiceId: number | null } {
+    if (options?.groupId !== undefined && !isFFIU32(options.groupId)) return { status: -1, voiceId: null }
+    const outBuffer = new ArrayBuffer(4)
+    const optionsBuffer = options ? AudioVoiceOptionsStruct.pack(options) : null
+    const status = this.opentui.symbols.audioPlay(this.audioContext(engine), soundId, optionsBuffer, outBuffer)
+    if (status !== 0) {
+      return { status, voiceId: null }
+    }
+    const view = new Uint32Array(outBuffer)
+    return { status, voiceId: view[0] }
+  }
+
+  public audioStopVoice(engine: AudioEngineHandle, voiceId: number): number {
+    return this.opentui.symbols.audioStopVoice(this.audioContext(engine), voiceId)
+  }
+
+  public audioSetVoiceGroup(engine: AudioEngineHandle, voiceId: number, groupId: number): number {
+    if (!isFFIU32(groupId)) return -1
+    return this.opentui.symbols.audioSetVoiceGroup(this.audioContext(engine), voiceId, groupId)
+  }
+
+  public audioCreateGroup(engine: AudioEngineHandle, name: string): { status: number; groupId: number | null } {
+    const outBuffer = new ArrayBuffer(4)
+    const nameBytes = this.encoder.encode(name)
+    const nameLength = toSafeFFIU32Length(nameBytes.byteLength, "Audio group name length")
+    const status = this.opentui.symbols.audioCreateGroup(this.audioContext(engine), nameBytes, nameLength, outBuffer)
+    if (status !== 0) {
+      return { status, groupId: null }
+    }
+    const view = new Uint32Array(outBuffer)
+    return { status, groupId: view[0] }
+  }
+
+  public audioSetGroupVolume(engine: AudioEngineHandle, groupId: number, volume: number): number {
+    return this.opentui.symbols.audioSetGroupVolume(this.audioContext(engine), groupId, volume)
+  }
+
+  public audioSetMasterVolume(engine: AudioEngineHandle, volume: number): number {
+    return this.opentui.symbols.audioSetMasterVolume(this.audioContext(engine), volume)
+  }
+
+  public audioMixToBuffer(
+    engine: AudioEngineHandle,
+    outBuffer: Float32Array,
+    frameCount: number,
+    channels: number,
+  ): number {
+    return this.opentui.symbols.audioMixToBuffer(this.audioContext(engine), outBuffer, frameCount, channels)
+  }
+
+  public audioEnableTap(engine: AudioEngineHandle, enabled: boolean, capacityFrames: number): number {
+    return this.opentui.symbols.audioEnableTap(this.audioContext(engine), ffiBool(enabled), capacityFrames)
+  }
+
+  public audioReadTap(
+    engine: AudioEngineHandle,
+    outBuffer: Float32Array,
+    frameCount: number,
+    channels: number,
+  ): { status: number; framesRead: number } {
+    const outFramesReadBuffer = new ArrayBuffer(4)
+    const status = this.opentui.symbols.audioReadTap(
+      this.audioContext(engine),
+      outBuffer,
+      frameCount,
+      channels,
+      outFramesReadBuffer,
+    )
+    if (status !== 0) {
+      return { status, framesRead: 0 }
+    }
+    const view = new Uint32Array(outFramesReadBuffer)
+    return { status, framesRead: view[0] ?? 0 }
+  }
+
+  public audioGetStats(engine: AudioEngineHandle): AudioStats | null {
+    const statsBuffer = new ArrayBuffer(AudioStatsStruct.size)
+    const status = this.opentui.symbols.audioGetStats(this.audioContext(engine), statsBuffer)
+    if (status !== 0) {
+      return null
+    }
+    const stats = AudioStatsStruct.unpack(statsBuffer)
+    return {
+      soundsLoaded: stats.soundsLoaded,
+      voicesActive: stats.voicesActive,
+      framesMixed: typeof stats.framesMixed === "bigint" ? stats.framesMixed : BigInt(stats.framesMixed),
+      lockMisses: stats.lockMisses,
+      lastPeak: stats.lastPeak,
+      lastRms: stats.lastRms,
+    }
+  }
+
+  public registerNativeSpanFeedStream(stream: Pointer, handler: NativeSpanFeedEventHandler): void {
+    const callback = this.ensureNativeSpanFeedCallback()
+    this.nativeSpanFeedHandlers.set(stream, handler)
+    this.opentui.symbols.streamSetCallback(stream, callback.ptr)
+  }
+
+  public unregisterNativeSpanFeedStream(stream: Pointer): void {
+    this.opentui.symbols.streamSetCallback(stream, null)
+    this.nativeSpanFeedHandlers.delete(stream)
+  }
+
+  public createNativeSpanFeed(options?: NativeSpanFeedOptions | null): Pointer {
+    const optionsBuffer = options == null ? null : NativeSpanFeedOptionsStruct.pack(options)
+    const streamPtr = this.opentui.symbols.createNativeSpanFeed(optionsBuffer)
+    if (!streamPtr) {
+      throw new Error("Failed to create stream")
+    }
+    return streamPtr
+  }
+
+  public attachNativeSpanFeed(stream: Pointer): number {
+    return this.opentui.symbols.attachNativeSpanFeed(stream)
+  }
+
+  public destroyNativeSpanFeed(stream: Pointer): number {
+    const status = this.opentui.symbols.destroyNativeSpanFeed(stream)
+    if (status === 0) this.nativeSpanFeedHandlers.delete(stream)
+    return status
+  }
+
+  public streamWrite(stream: Pointer, data: Uint8Array | string): number {
+    const bytes = typeof data === "string" ? this.encoder.encode(data) : data
+    return this.opentui.symbols.streamWrite(stream, viewOrNull(bytes), bytes.byteLength)
+  }
+
+  public streamCommit(stream: Pointer): number {
+    return this.opentui.symbols.streamCommit(stream)
+  }
+
+  public streamDrainSpans(stream: Pointer, outBuffer: Uint8Array, maxSpans: number): number {
+    if (!Number.isInteger(maxSpans) || maxSpans < 0 || maxSpans > outBuffer.byteLength / SpanInfoStruct.size) {
+      throw new RangeError("Span drain buffer is too small")
+    }
+    const count = this.opentui.symbols.streamDrainSpans(stream, outBuffer, maxSpans)
+    return toNumber(count)
+  }
+
+  public streamReleaseSpan(stream: Pointer, slotIndex: number, releaseId: bigint): number {
+    return this.opentui.symbols.streamReleaseSpan(stream, slotIndex, releaseId)
+  }
+
+  public streamClose(stream: Pointer): number {
+    return this.opentui.symbols.streamClose(stream)
+  }
+
+  public streamGetStats(stream: Pointer): NativeSpanFeedStats | null {
+    const statsBuffer = new ArrayBuffer(NativeSpanFeedStatsStruct.size)
+    const status = this.opentui.symbols.streamGetStats(stream, statsBuffer)
+    if (status !== 0) {
+      return null
+    }
+    const stats = NativeSpanFeedStatsStruct.unpack(statsBuffer)
+    return {
+      bytesWritten: typeof stats.bytesWritten === "bigint" ? stats.bytesWritten : BigInt(stats.bytesWritten),
+      spansCommitted: typeof stats.spansCommitted === "bigint" ? stats.spansCommitted : BigInt(stats.spansCommitted),
+      chunks: stats.chunks,
+      pendingSpans: stats.pendingSpans,
+      outstandingSpans: stats.outstandingSpans,
+      outstandingBytes: BigInt(stats.outstandingBytes),
+    }
+  }
+
+  public streamReserve(stream: Pointer, minLen: number): { status: number; info: ReserveInfo | null } {
+    const reserveBuffer = new ArrayBuffer(ReserveInfoStruct.size)
+    const status = this.opentui.symbols.streamReserve(stream, minLen, reserveBuffer)
+    if (status !== 0) {
+      return { status, info: null }
+    }
+    return { status, info: ReserveInfoStruct.unpack(reserveBuffer) }
+  }
+
+  public streamCommitReserved(stream: Pointer, length: number): number {
+    return this.opentui.symbols.streamCommitReserved(stream, length)
+  }
+
+  private imageStatus(operation: string, status: number): number {
+    const result = imageStatusCodes.get(status)
+    if (result !== undefined) return result
+    nativeResult(operation, status)
+    return 0
+  }
+
+  private imageCall(context: NativeContextHandle, operation: string, call: (pointer: Pointer) => number): number {
+    return this.getYogaHost().runMutation(() =>
+      this.imageStatus(operation, call(this.nativeContextPointer(context, operation))),
+    )
+  }
+
+  private imageOutput(
+    context: NativeContextHandle,
+    operation: string,
+    call: (pointer: Pointer, output: Uint32Array) => number,
+  ): { status: number; handle: ImageHandle | null } {
+    const output = new Uint32Array(handleWords)
+    const status = this.imageCall(context, operation, (pointer) => call(pointer, output))
+    if (status !== 0) return { status, handle: null }
+    return { status, handle: decodeContextHandle(context, output) as ImageHandle }
+  }
+
+  private imageInfoOutput(
+    context: NativeContextHandle,
+    operation: string,
+    call: (pointer: Pointer, output: Uint32Array) => number,
+  ): { status: number; info: NativeImageInfo } {
+    const layout = nativeLayouts.ot_image_info
+    const output = new Uint32Array(layout.size / 4)
+    const status = this.imageCall(context, operation, (pointer) => call(pointer, output))
+    const fields = layout.fields
+    return {
+      status,
+      info: {
+        width: output[fields.width.offset / 4],
+        height: output[fields.height.offset / 4],
+        sourceWidth: output[fields.source_width.offset / 4],
+        sourceHeight: output[fields.source_height.offset / 4],
+        format: output[fields.format.offset / 4],
+        colorStatus: output[fields.color_status.offset / 4],
+        orientation: output[fields.orientation.offset / 4],
+        hasAlpha: output[fields.has_alpha.offset / 4],
+      },
+    }
+  }
+
+  public imageInfo(context: NativeContextHandle, data: Uint8Array): { status: number; info: NativeImageInfo } {
+    const bytes = sessionBytes(data, "Image data byte length")
+    const length = BigInt(bytes.byteLength)
+    return this.imageInfoOutput(context, "ot_image_inspect", (pointer, output) =>
+      this.opentui.symbols.ot_image_inspect(pointer, bytes, length, output),
+    )
+  }
+
+  public imageDecode(context: NativeContextHandle, data: Uint8Array): { status: number; handle: ImageHandle | null } {
+    const bytes = sessionBytes(data, "Image data byte length")
+    const length = BigInt(bytes.byteLength)
+    return this.imageOutput(context, "ot_image_decode", (pointer, output) =>
+      this.opentui.symbols.ot_image_decode(pointer, bytes, length, output),
+    )
+  }
+
+  public imageCreateFromRgba(
+    context: NativeContextHandle,
+    pixels: Uint8Array,
+    width: number,
+    height: number,
+    stride: number,
+  ): { status: number; handle: ImageHandle | null } {
+    return this.imageCreateFromPixels(context, pixels, width, height, stride, 0, 0)
+  }
+
+  public imageCreateFromPixels(
+    context: NativeContextHandle,
+    pixels: Uint8Array,
+    width: number,
+    height: number,
+    stride: number,
+    format: number,
+    alpha: number,
+  ): { status: number; handle: ImageHandle | null } {
+    const bytes = sessionBytes(pixels, "Image pixel byte length")
+    const length = BigInt(bytes.byteLength)
+    toSafeFFIU32Length(width, "Image width")
+    toSafeFFIU32Length(height, "Image height")
+    toSafeFFIU32Length(stride, "Image stride")
+    toSafeFFIU32Length(format, "Image pixel format")
+    toSafeFFIU32Length(alpha, "Image alpha")
+    return this.imageOutput(context, "ot_image_create_pixels", (pointer, output) =>
+      this.opentui.symbols.ot_image_create_pixels(pointer, bytes, length, width, height, stride, format, alpha, output),
+    )
+  }
+
+  public imageUpdatePixels(
+    image: ImageHandle,
+    pixels: Uint8Array,
+    stride: number,
+    format: number,
+    alpha: number,
+  ): number {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    const bytes = sessionBytes(pixels, "Image pixel byte length")
+    const length = BigInt(bytes.byteLength)
+    toSafeFFIU32Length(stride, "Image stride")
+    toSafeFFIU32Length(format, "Image pixel format")
+    toSafeFFIU32Length(alpha, "Image alpha")
+    return this.imageCall(context, "ot_image_update_pixels", (pointer) =>
+      this.opentui.symbols.ot_image_update_pixels(pointer, handle, bytes, length, stride, format, alpha),
+    )
+  }
+
+  public imageDestroy(image: ImageHandle): void {
+    this.destroyContextImage(image.context, image)
+  }
+
+  public imageRetain(image: ImageHandle): { status: number; handle: ImageHandle | null } {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    return this.imageOutput(context, "ot_image_retain", (pointer, output) =>
+      this.opentui.symbols.ot_image_retain(pointer, handle, output),
+    )
+  }
+
+  public imageRetainIccCache(): void {
+    this.opentui.symbols.imageRetainIccCache()
+  }
+
+  public imageReleaseIccCache(): void {
+    this.opentui.symbols.imageReleaseIccCache()
+  }
+
+  public imageGetInfo(image: ImageHandle): { status: number; info: NativeImageInfo } {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    return this.imageInfoOutput(context, "ot_image_get_info", (pointer, output) =>
+      this.opentui.symbols.ot_image_get_info(pointer, handle, output),
+    )
+  }
+
+  public imageEnsureEncodedPng(image: ImageHandle): number {
+    return this.imageCopyPng(image, new Uint8Array()).status
+  }
+
+  public imageCopyPng(image: ImageHandle, destination: Uint8Array): { status: number; byteCount: number } {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    const bytes = sessionBytes(destination, "Image PNG output byte length")
+    const capacity = BigInt(bytes.byteLength)
+    const count = new BigUint64Array(1)
+    const status = this.imageCall(context, "ot_image_copy_png", (pointer) =>
+      this.opentui.symbols.ot_image_copy_png(pointer, handle, bytes, capacity, count),
+    )
+    return { status, byteCount: Number(count[0]) }
+  }
+
+  public imageTakePixels(image: ImageHandle): {
+    status: number
+    lease: ContextImagePixelsHandle | null
+    pointer: Pointer | null
+    byteCount: number
+  } {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    const layout = nativeLayouts.ot_image_pixels
+    const output = new BigUint64Array(layout.size / 8)
+    const status = this.imageCall(context, "ot_image_take_pixels", (pointer) =>
+      this.opentui.symbols.ot_image_take_pixels(pointer, handle, output),
+    )
+    if (status !== 0) return { status, lease: null, pointer: null, byteCount: 0 }
+    try {
+      return {
+        status,
+        lease: decodeContextHandle(context, output) as ContextImagePixelsHandle,
+        pointer: toPointer(output[layout.fields.pixels.offset / 8]),
+        byteCount: Number(output[layout.fields.byte_count.offset / 8]),
+      }
+    } catch (error) {
+      this.opentui.symbols.ot_image_pixels_release(
+        this.nativeContextPointer(context, "ot_image_pixels_release"),
+        output,
+      )
+      throw error
+    }
+  }
+
+  public imageReleasePixels(lease: ContextImagePixelsHandle): void {
+    const context = lease.context
+    const handle = encodeContextHandle(context, lease)
+    this.getYogaHost().runMutation(() => {
+      const pointer = this.nativeContextPointer(context, "ot_image_pixels_release")
+      nativeResult("ot_image_pixels_release", this.opentui.symbols.ot_image_pixels_release(pointer, handle))
+    })
+  }
+
+  public imageClone(image: ImageHandle, context?: NativeContextHandle): { status: number; handle: ImageHandle | null } {
+    const sourceContext = image.context
+    const handle = encodeContextHandle(sourceContext, image)
+    return this.imageOutput(context ?? sourceContext, "ot_image_clone", (pointer, output) =>
+      this.opentui.symbols.ot_image_clone(
+        pointer,
+        this.nativeContextPointer(sourceContext, "ot_image_clone"),
+        handle,
+        output,
+      ),
+    )
+  }
+
+  public imageCopyPixels(image: ImageHandle, destination: Uint8Array, stride: number, bgra: boolean): number {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    const bytes = sessionBytes(destination, "Image pixel output byte length")
+    const length = BigInt(bytes.byteLength)
+    toSafeFFIU32Length(stride, "Image stride")
+    const format = toFFIBool(bgra, "Image BGRA")
+    return this.imageCall(context, "ot_image_copy_pixels", (pointer) =>
+      this.opentui.symbols.ot_image_copy_pixels(pointer, handle, bytes, length, stride, format),
+    )
+  }
+
+  public imageResize(
+    image: ImageHandle,
+    width: number,
+    height: number,
+    filter: number,
+  ): { status: number; handle: ImageHandle | null } {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    toSafeFFIU32Length(width, "Image width")
+    toSafeFFIU32Length(height, "Image height")
+    toSafeFFIU32Length(filter, "Image resize filter")
+    return this.imageOutput(context, "ot_image_resize", (pointer, output) =>
+      this.opentui.symbols.ot_image_resize(pointer, handle, width, height, filter, output),
+    )
+  }
+
+  public imageExtract(
+    image: ImageHandle,
+    left: number,
+    top: number,
+    width: number,
+    height: number,
+  ): { status: number; handle: ImageHandle | null } {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    toSafeFFIU32Length(left, "Image left")
+    toSafeFFIU32Length(top, "Image top")
+    toSafeFFIU32Length(width, "Image width")
+    toSafeFFIU32Length(height, "Image height")
+    return this.imageOutput(context, "ot_image_extract", (pointer, output) =>
+      this.opentui.symbols.ot_image_extract(pointer, handle, left, top, width, height, output),
+    )
+  }
+
+  public imageExtend(
+    image: ImageHandle,
+    top: number,
+    right: number,
+    bottom: number,
+    left: number,
+    background: Uint8Array,
+  ): { status: number; handle: ImageHandle | null } {
+    if (!(background instanceof Uint8Array)) return { status: 7, handle: null }
+    const bytes = sessionBytes(background, "Image background byte length")
+    if (bytes.byteLength !== 4) return { status: 7, handle: null }
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    toSafeFFIU32Length(top, "Image top")
+    toSafeFFIU32Length(right, "Image right")
+    toSafeFFIU32Length(bottom, "Image bottom")
+    toSafeFFIU32Length(left, "Image left")
+    return this.imageOutput(context, "ot_image_extend", (pointer, output) =>
+      this.opentui.symbols.ot_image_extend(pointer, handle, top, right, bottom, left, bytes, output),
+    )
+  }
+
+  public imageTransform(image: ImageHandle, operation: number): { status: number; handle: ImageHandle | null } {
+    const context = image.context
+    const handle = encodeContextHandle(context, image)
+    toSafeFFIU32Length(operation, "Image transform")
+    return this.imageOutput(context, "ot_image_transform", (pointer, output) =>
+      this.opentui.symbols.ot_image_transform(pointer, handle, operation, output),
+    )
+  }
+
+  public imageComposite(
+    base: ImageHandle,
+    overlay: ImageHandle,
+    left: number,
+    top: number,
+    blend: number,
+    opacity: number,
+  ): { status: number; handle: ImageHandle | null } {
+    const context = base.context
+    const baseHandle = encodeContextHandle(context, base)
+    const overlayHandle = encodeContextHandle(context, overlay)
+    toFFII32(left, "Image composite left")
+    toFFII32(top, "Image composite top")
+    toSafeFFIU32Length(blend, "Image blend mode")
+    if (!isFFIU32(opacity) || opacity > 255) throw new RangeError("Image opacity must be an integer from 0 to 255")
+    return this.imageOutput(context, "ot_image_composite", (pointer, output) =>
+      this.opentui.symbols.ot_image_composite(pointer, baseHandle, overlayHandle, left, top, blend, opacity, output),
+    )
+  }
+}
+
+let opentuiLibPath: string | undefined
+let opentuiLib: RenderLib | undefined
+let renderLibResolved = false
+
+export function setRenderLibPath(libPath: string) {
+  if (opentuiLibPath !== libPath) {
+    if (renderLibResolved) {
+      throw new Error("setRenderLibPath() must be called before resolveRenderLib()")
+    }
+    if (opentuiLib instanceof FFIRenderLib) {
+      opentuiLib.dispose()
+    }
+    opentuiLibPath = libPath
+    opentuiLib = undefined
+  }
+}
+
+export function resolveRenderLib(): RenderLib {
+  if (!opentuiLib) {
+    try {
+      opentuiLib = new FFIRenderLib(opentuiLibPath)
+    } catch (error) {
+      const source = opentuiLibPath ? "" : targetLibSource
+      throw new Error(
+        `Failed to initialize OpenTUI render library${source}: ${error instanceof Error ? error.message : "Unknown error"}`,
+      )
+    }
+  }
+  renderLibResolved = true
+  return opentuiLib
+}
+
+// Try eager loading
+try {
+  opentuiLib = new FFIRenderLib(opentuiLibPath)
+} catch (error) {}

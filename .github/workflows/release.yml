@@ -1,0 +1,785 @@
+name: Release
+
+# A push of a vX.Y.Z tag releases that version: `bun run release` pushes the tag with its "Release
+# vX.Y.Z" commit. The Windows signing in Azure trusts only runs on a tag.
+#
+# A push to main, or to a maintenance branch of an older line such as 0.5.x, that raises the version
+# in packages/core/package.json releases it when the version has no tag yet: a release commit merged
+# from the pull request that the release button opens. That run tags the commit itself, and needs Azure
+# to trust main and the maintenance branches.
+#
+# A vX.Y.Z-dry.N tag is a dry run. A tag that contains "snapshot" publishes a snapshot.
+on:
+  push:
+    branches: [main, "[0-9]+.[0-9]+.x"]
+    # Path filters do not apply to tag pushes.
+    paths: [packages/core/package.json]
+    tags:
+      - "v*"
+      - "*snapshot*"
+
+# Read-only by default, so a dependency's install script cannot push. A job that writes asks for it.
+permissions:
+  contents: read
+
+jobs:
+  # Decides whether this push is a release, and extracts the version and the dry-run flag.
+  prepare:
+    name: Prepare Release
+    if: ${{ !contains(github.ref_name, 'snapshot') }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      # Pushes the release tag.
+      contents: write
+    outputs:
+      release: ${{ steps.extract.outputs.release }}
+      version: ${{ steps.extract.outputs.version }}
+      fullTag: ${{ steps.extract.outputs.fullTag }}
+      isDryRun: ${{ steps.extract.outputs.isDryRun }}
+      releaseTitle: ${{ steps.extract.outputs.releaseTitle }}
+      distTag: ${{ steps.history.outputs.distTag }}
+      makeLatest: ${{ steps.history.outputs.makeLatest || 'false' }}
+      previousTag: ${{ steps.history.outputs.previousTag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # Every push of packages/core/package.json to a release branch runs this job. Only a version change
+      # needs Bun.
+      - name: Read versions
+        id: versions
+        if: github.ref_type == 'branch'
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          current=$(jq -r .version packages/core/package.json)
+          # A push that creates a branch, such as a new maintenance branch, has no previous commit.
+          if [[ "$BEFORE" =~ ^0+$ ]]; then
+            echo "A new branch is not a release"
+            previous=$current
+          else
+            git fetch --quiet --no-tags --depth=1 origin "$BEFORE"
+            previous=$(git show "$BEFORE:packages/core/package.json" | jq -r .version)
+          fi
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        if: steps.versions.outputs.current != steps.versions.outputs.previous
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Extract version and dry-run flag
+        id: extract
+        env:
+          CURRENT: ${{ steps.versions.outputs.current }}
+          PREVIOUS: ${{ steps.versions.outputs.previous }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG=${GITHUB_REF#refs/tags/v}
+            if [[ "$TAG" =~ -dry\. ]]; then
+              IS_DRY_RUN=true
+              VERSION=$(echo "$TAG" | sed -E 's/-dry\.[0-9]+$//')
+              RELEASE_TITLE="Release v$TAG (DRY RUN)"
+              echo "This is a DRY RUN release"
+            else
+              IS_DRY_RUN=false
+              VERSION="$TAG"
+              RELEASE_TITLE="Release v$TAG"
+              echo "This is a PRODUCTION release"
+            fi
+          else
+            # A version that does not go up, such as a reverted release commit, is not a release. A
+            # failure of the comparison fails the job.
+            NEWER=false
+            if [ "$CURRENT" != "$PREVIOUS" ]; then
+              NEWER=$(bun -e 'import { compareVersions } from "./scripts/npm-publish.ts"; console.log(compareVersions(process.env.CURRENT ?? "", process.env.PREVIOUS ?? "") > 0)')
+            fi
+            if [ "$NEWER" != true ]; then
+              echo "The version went from $PREVIOUS to $CURRENT, so this push is not a release"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # A maintenance branch releases only its own line.
+            if [[ "$GITHUB_REF_NAME" =~ ^([0-9]+)\.([0-9]+)\.x$ && "$CURRENT" != "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}."* ]]; then
+              echo "::error::$CURRENT is not a version of $GITHUB_REF_NAME"
+              exit 1
+            fi
+            # `bun run release` pushes the tag with the commit, and the run of the tag push releases it.
+            # This also skips a rerun of all jobs after the tag step below; rerun the failed jobs instead.
+            if git ls-remote --exit-code --tags origin "refs/tags/v$CURRENT" > /dev/null; then
+              echo "v$CURRENT is already tagged, so the run of its tag push releases it"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            TAG="$CURRENT"
+            IS_DRY_RUN=false
+            VERSION="$TAG"
+            RELEASE_TITLE="Release v$TAG"
+            echo "The version went from $PREVIOUS to $TAG. This is a PRODUCTION release"
+          fi
+
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "fullTag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "isDryRun=$IS_DRY_RUN" >> "$GITHUB_OUTPUT"
+          echo "releaseTitle=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
+
+          echo "Version (for validation): $VERSION"
+          echo "Full Tag (for artifacts): $TAG"
+          echo "Is Dry Run: $IS_DRY_RUN"
+          echo "Release Title: $RELEASE_TITLE"
+
+      # A release from a branch push tags its commit before the build, so it stops early when the tag
+      # cannot be created. Needs the "Main tags" ruleset to let GITHUB_TOKEN create v* tags. A tag pushed
+      # with GITHUB_TOKEN starts no workflow.
+      - name: Tag the release commit
+        if: github.ref_type == 'branch' && steps.extract.outputs.isDryRun == 'false'
+        env:
+          TAG: v${{ steps.extract.outputs.fullTag }}
+        run: |
+          set -euo pipefail
+          # The commit of the tag: an annotated tag lists it as the peeled ^{} line, which sorts last.
+          existing=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | sort -k2 | tail -n 1 | cut -f1)
+          if [ -z "$existing" ]; then
+            git push origin "$GITHUB_SHA:refs/tags/$TAG"
+          elif [ "$existing" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG already exists at $existing, not at $GITHUB_SHA"
+            exit 1
+          fi
+
+      # The newest release goes to npm's latest tag and is the latest GitHub release. A patch of an older
+      # line goes to latest-X.Y instead, and its release notes start at the release before it. Every
+      # release tags its commit before it builds, so concurrent releases see each other here.
+      - name: Find the previous release
+        id: history
+        if: steps.extract.outputs.isDryRun == 'false'
+        env:
+          VERSION: ${{ steps.extract.outputs.version }}
+        run: |
+          set -euo pipefail
+          tags=$(git ls-remote --tags --refs origin 'refs/tags/v*' | sed -n 's#.*refs/tags/\(v[0-9]*\.[0-9]*\.[0-9]*\)$#\1#p' | sort -V)
+          previous_tag=$(echo "$tags" | awk -v current="v$VERSION" '$0 == current { print previous } { previous = $0 }')
+          if [ "$(echo "$tags" | tail -n 1)" = "v$VERSION" ]; then
+            dist_tag=latest
+          else
+            dist_tag="latest-${VERSION%.*}"
+          fi
+          echo "npm dist-tag: $dist_tag. Previous release: ${previous_tag:-none}"
+          echo "distTag=$dist_tag" >> "$GITHUB_OUTPUT"
+          echo "makeLatest=$([ "$dist_tag" = latest ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "previousTag=$previous_tag" >> "$GITHUB_OUTPUT"
+
+  # Version validation check
+  validate-version:
+    name: Validate Version
+    if: ${{ needs.prepare.outputs.release == 'true' }}
+    needs: prepare
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Check version matches package.json files
+        run: |
+          TAG_VERSION="${{ needs.prepare.outputs.version }}"
+          echo "Validating version: $TAG_VERSION"
+
+          # Check package.json versions (exclude web, not published to npm)
+          FAILED=false
+          for pkg in packages/*/; do
+            if [ -f "$pkg/package.json" ]; then
+              if [ "$(basename "$pkg")" = "web" ]; then
+                echo "INFO: Skipping $pkg (not published to npm)"
+                continue
+              fi
+              PKG_VERSION=$(node -p "require('./$pkg/package.json').version")
+              if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+                echo "❌ Package $pkg version ($PKG_VERSION) does not match tag version ($TAG_VERSION)"
+                FAILED=true
+              else
+                echo "✅ Package $pkg version matches: $PKG_VERSION"
+              fi
+            fi
+          done
+
+          # The Rust crates are not published, but prepare-release gives them the same version.
+          RUST_VERSIONS=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/rust/Cargo.toml; grep -A1 -E '^name = "opentui(-ssh|-sys)?"$' packages/rust/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          if [ "$(echo $RUST_VERSIONS)" != "$TAG_VERSION $TAG_VERSION $TAG_VERSION $TAG_VERSION" ]; then
+            echo "❌ packages/rust versions ($(echo $RUST_VERSIONS)) do not match tag version ($TAG_VERSION)"
+            FAILED=true
+          else
+            echo "✅ packages/rust versions match: $TAG_VERSION"
+          fi
+
+          if [ "$FAILED" = true ]; then
+            echo ""
+            echo "Version validation FAILED!"
+            echo "Please update package.json versions to match the tag version: $TAG_VERSION"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All package versions match tag version: $TAG_VERSION"
+
+  # The heavy CI runs after merge. A release waits for the run of its commit instead of repeating it: a release from
+  # main shares its push with Build Core and Build Packages, and a vX.Y.Z tag points at a commit on main that already
+  # passed. Build Native runs beside it, but nothing is signed or published until both runs passed, so a broken
+  # commit never reaches npm or a GitHub release.
+  ci-gate:
+    name: Verify CI on the release commit
+    if: ${{ needs.prepare.outputs.release == 'true' }}
+    needs: prepare
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.sha }}
+    steps:
+      - name: Skip the check for a dry run
+        if: ${{ needs.prepare.outputs.isDryRun == 'true' }}
+        run: echo "A dry run publishes nothing, so it does not wait for CI"
+
+      - name: Wait for the heavy CI of this commit
+        if: ${{ needs.prepare.outputs.isDryRun != 'true' }}
+        run: |
+          set -eu
+          for workflow in build-core.yml build-packages.yml; do
+            echo "Waiting for $workflow on $SHA"
+            start=$SECONDS
+            deadline=$((SECONDS + 2400))
+            while :; do
+              # A tag push has no head_branch, so this selects the run of the branch push that carried the commit.
+              line=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$SHA&per_page=20" \
+                --jq '[.workflow_runs[] | select(.event == "push" and .head_branch != null)] | first | if . == null then "none" else "\(.status) \(.conclusion)" end')
+              case "$line" in
+                "completed success")
+                  echo "$workflow passed"
+                  break
+                  ;;
+                "completed "*)
+                  echo "::error::$workflow finished $line for $SHA"
+                  exit 1
+                  ;;
+                "none")
+                  # A tag can point at a commit that never had CI, such as one from before this workflow existed.
+                  if [ "$((SECONDS - start))" -ge 120 ]; then
+                    echo "::error::$workflow has no push run for $SHA"
+                    exit 1
+                  fi
+                  ;;
+              esac
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "::error::$workflow did not pass for $SHA in time"
+                exit 1
+              fi
+              sleep 20
+            done
+          done
+
+  # Build native libraries and packages. Their artifacts stay in this run, so the build does not wait for ci-gate.
+  build-native:
+    name: Build Native
+    if: ${{ needs.prepare.outputs.release == 'true' }}
+    needs: [prepare, validate-version]
+    uses: ./.github/workflows/build-native.yml
+    with:
+      version: ${{ needs.prepare.outputs.fullTag }}
+
+  # Build example executables
+  build-examples:
+    name: Build Examples
+    if: ${{ needs.prepare.outputs.release == 'true' }}
+    needs: [prepare, sign-windows-artifacts]
+    uses: ./.github/workflows/build-examples.yml
+    with:
+      version: ${{ needs.prepare.outputs.fullTag }}
+      npmPackagesArtifact: ${{ needs.sign-windows-artifacts.outputs.npmPackagesArtifact }}
+
+  # Tests the packages before signing, so the tests run while signing runs. Signing replaces only the
+  # Windows DLLs, which the tests do not load, but it unzips and rezips every package on Windows.
+  smoke-test:
+    name: Smoke Test Packages
+    if: ${{ needs.prepare.outputs.release == 'true' }}
+    needs: [prepare, build-native]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Extract and test npm packages
+        uses: ./.github/actions/extract-npm-packages
+        with:
+          artifact: npm-packages-${{ needs.prepare.outputs.fullTag }}
+          smoke-test: "true"
+
+  # Publish to npm
+  npm-publish:
+    name: NPM Publish
+    if: ${{ needs.prepare.outputs.release == 'true' }}
+    needs: [prepare, ci-gate, sign-windows-artifacts, smoke-test]
+    uses: ./.github/workflows/npm-latest-release.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      version: ${{ needs.prepare.outputs.fullTag }}
+      isDryRun: ${{ needs.prepare.outputs.isDryRun == 'true' }}
+      npmPackagesArtifact: ${{ needs.sign-windows-artifacts.outputs.npmPackagesArtifact }}
+      smokeTest: false
+      distTag: ${{ needs.prepare.outputs.distTag }}
+
+  # Signing waits for ci-gate, and so does every job after it. npm-publish and github-release name it too.
+  sign-windows-artifacts:
+    name: Sign Windows DLL Artifacts
+    if: ${{ needs.prepare.outputs.release == 'true' }}
+    needs: [prepare, ci-gate, build-native]
+    runs-on: blacksmith-8vcpu-windows-2025
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      # The signed packages go to a new artifact. upload-artifact deletes an artifact before it replaces
+      # it, and the smoke tests can be downloading the unsigned one then.
+      npmPackagesArtifact: ${{ needs.prepare.outputs.isDryRun == 'true' && format('npm-packages-{0}', needs.prepare.outputs.fullTag) || format('npm-packages-signed-{0}', needs.prepare.outputs.fullTag) }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+      AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
+      AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+
+    steps:
+      - name: Skip code signing for dry runs
+        if: needs.prepare.outputs.isDryRun == 'true'
+        run: |
+          echo "Dry run release, skipping Windows code signing"
+
+      - name: Download native binaries artifact
+        if: needs.prepare.outputs.isDryRun != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: native-binaries-${{ needs.prepare.outputs.fullTag }}
+          path: artifacts/native
+
+      - name: Download npm packages artifact
+        if: needs.prepare.outputs.isDryRun != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-packages-${{ needs.prepare.outputs.fullTag }}
+          path: artifacts/npm
+
+      - name: Extract Windows DLL artifacts
+        if: needs.prepare.outputs.isDryRun != 'true'
+        shell: pwsh
+        run: |
+          $artifactRoot = Join-Path $env:GITHUB_WORKSPACE "artifacts"
+          $signedNativeRoot = Join-Path $env:GITHUB_WORKSPACE "signed-native"
+          $signedNpmRoot = Join-Path $env:GITHUB_WORKSPACE "signed-npm-packages"
+          New-Item -ItemType Directory -Force -Path $signedNativeRoot | Out-Null
+          New-Item -ItemType Directory -Force -Path $signedNpmRoot | Out-Null
+
+          Expand-Archive -Path (Join-Path $artifactRoot "native\native-windows-x64.zip") -DestinationPath $signedNativeRoot -Force
+          Expand-Archive -Path (Join-Path $artifactRoot "native\native-windows-arm64.zip") -DestinationPath $signedNativeRoot -Force
+          Expand-Archive -Path (Join-Path $artifactRoot "npm\npm-packages.zip") -DestinationPath $signedNpmRoot -Force
+
+      - name: Azure login
+        if: needs.prepare.outputs.isDryRun != 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows DLLs
+        if: needs.prepare.outputs.isDryRun != 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ env.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
+          files: |
+            ${{ github.workspace }}\signed-native\native-windows-x64\opentui.dll
+            ${{ github.workspace }}\signed-native\native-windows-arm64\opentui.dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify Windows DLL signatures
+        if: needs.prepare.outputs.isDryRun != 'true'
+        shell: pwsh
+        run: |
+          $files = @(
+            "${{ github.workspace }}\signed-native\native-windows-x64\opentui.dll",
+            "${{ github.workspace }}\signed-native\native-windows-arm64\opentui.dll"
+          )
+
+          foreach ($file in $files) {
+            $sig = Get-AuthenticodeSignature $file
+            if ($sig.Status -ne "Valid") {
+              throw "Invalid signature for ${file}: $($sig.Status)"
+            }
+          }
+
+      - name: Copy signed DLLs into npm packages
+        if: needs.prepare.outputs.isDryRun != 'true'
+        shell: pwsh
+        run: |
+          $pairs = @(
+            @{
+              Source = "${{ github.workspace }}\signed-native\native-windows-x64\opentui.dll"
+              Destination = "${{ github.workspace }}\signed-npm-packages\npm-packages\core-native-packages\core-win32-x64\opentui.dll"
+            },
+            @{
+              Source = "${{ github.workspace }}\signed-native\native-windows-arm64\opentui.dll"
+              Destination = "${{ github.workspace }}\signed-npm-packages\npm-packages\core-native-packages\core-win32-arm64\opentui.dll"
+            }
+          )
+
+          foreach ($pair in $pairs) {
+            Copy-Item -Path $pair.Source -Destination $pair.Destination -Force
+
+            $sourceHash = (Get-FileHash $pair.Source -Algorithm SHA256).Hash
+            $destinationHash = (Get-FileHash $pair.Destination -Algorithm SHA256).Hash
+
+            if ($sourceHash -ne $destinationHash) {
+              throw "Signed DLL copy mismatch: $($pair.Source) -> $($pair.Destination)"
+            }
+          }
+
+      - name: Repack signed windows outputs
+        if: needs.prepare.outputs.isDryRun != 'true'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ github.workspace }}\signed-native\native-windows-x64" -DestinationPath "${{ github.workspace }}\artifacts\native\native-windows-x64.zip" -Force
+          Compress-Archive -Path "${{ github.workspace }}\signed-native\native-windows-arm64" -DestinationPath "${{ github.workspace }}\artifacts\native\native-windows-arm64.zip" -Force
+          Compress-Archive -Path "${{ github.workspace }}\signed-npm-packages\npm-packages" -DestinationPath "${{ github.workspace }}\artifacts\npm\npm-packages.zip" -Force
+
+      - name: Upload signed native binaries artifact
+        if: needs.prepare.outputs.isDryRun != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-binaries-${{ needs.prepare.outputs.fullTag }}
+          path: |
+            artifacts/native/native-darwin-x64.zip
+            artifacts/native/native-darwin-arm64.zip
+            artifacts/native/native-linux-x64.zip
+            artifacts/native/native-linux-arm64.zip
+            artifacts/native/native-linux-x64-musl.zip
+            artifacts/native/native-linux-arm64-musl.zip
+            artifacts/native/native-windows-x64.zip
+            artifacts/native/native-windows-arm64.zip
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      - name: Upload signed npm packages artifact
+        if: needs.prepare.outputs.isDryRun != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-packages-signed-${{ needs.prepare.outputs.fullTag }}
+          path: artifacts/npm/npm-packages.zip
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  snapshot-prepare:
+    name: Prepare NPM Snapshot
+    if: ${{ contains(github.ref_name, 'snapshot') }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Generate snapshot version
+        id: version
+        run: |
+          COMMIT_SHA="${GITHUB_SHA::8}"
+          VERSION="0.0.0-$(date -u +%Y%m%d)-${COMMIT_SHA}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Using snapshot version: $VERSION"
+
+  snapshot-build:
+    name: Build NPM Snapshot
+    if: ${{ contains(github.ref_name, 'snapshot') }}
+    needs: snapshot-prepare
+    uses: ./.github/workflows/build-native.yml
+    with:
+      version: ${{ needs.snapshot-prepare.outputs.version }}
+      prepareVersion: ${{ needs.snapshot-prepare.outputs.version }}
+
+  # npm supports one Trusted Publisher workflow per package, so snapshots
+  # and stable releases share this top-level caller and publish workflow.
+  snapshot-publish:
+    name: Publish NPM Snapshot
+    if: ${{ contains(github.ref_name, 'snapshot') }}
+    needs: [snapshot-prepare, snapshot-build]
+    uses: ./.github/workflows/npm-latest-release.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      version: ${{ needs.snapshot-prepare.outputs.version }}
+      prepareVersion: ${{ needs.snapshot-prepare.outputs.version }}
+      isDryRun: false
+
+  # Waits until npm serves every package that npm-publish published. npm can take many minutes after
+  # `npm publish` succeeds: 25 for @opentui/three@0.5.15. The GitHub release does not wait for it. A step
+  # that installs the release, such as an opencode bump, has to start after it.
+  npm-served:
+    name: Wait for npm
+    if: ${{ needs.prepare.outputs.release == 'true' && needs.prepare.outputs.isDryRun == 'false' }}
+    needs: [prepare, sign-windows-artifacts, npm-publish]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      # The packages that npm-publish published, to compare npm's contents with.
+      - name: Extract npm packages
+        uses: ./.github/actions/extract-npm-packages
+        with:
+          artifact: ${{ needs.sign-windows-artifacts.outputs.npmPackagesArtifact }}
+
+      - name: Wait until npm serves every package
+        run: bun scripts/npm-publish.ts wait
+
+  # The release commit records the API of the release in api/X.Y.Z.txt. A release pull request computes it when it
+  # opens, so a change merged before the pull request leaves it wrong. This compares it with what npm serves.
+  api-history:
+    name: Verify API History
+    if: ${{ needs.prepare.outputs.release == 'true' && needs.prepare.outputs.isDryRun == 'false' }}
+    needs: [prepare, npm-served]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Compare api/ with the published packages
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "A prerelease has no API history"
+            exit 0
+          fi
+          if [ ! -f "api/$VERSION.txt" ]; then
+            echo "::error::api/$VERSION.txt is missing. Run 'bun packages/web/scripts/api.ts backfill --from $VERSION --to $VERSION' on main and commit it."
+            exit 1
+          fi
+          bun packages/web/scripts/api.ts verify "$VERSION"
+
+  # The site documents the release that npm serves as latest at /docs, so it deploys once npm serves this one. A
+  # workflow_dispatch event from GITHUB_TOKEN starts a run, unlike most events. The deploy builds from the head
+  # of main and npm's latest dist-tag, so a release of an older line deploys an unchanged /docs.
+  docs:
+    name: Deploy Docs
+    if: ${{ needs.prepare.outputs.release == 'true' && needs.prepare.outputs.isDryRun == 'false' }}
+    needs: [prepare, npm-served]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      actions: write
+
+    steps:
+      - name: Start the Pages deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref main
+
+  # Create GitHub release with assets
+  github-release:
+    name: Create GitHub Release
+    if: ${{ needs.prepare.outputs.release == 'true' }}
+    needs: [prepare, ci-gate, build-examples, npm-publish]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      # Creates the release and uploads its assets.
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Organize release assets
+        run: |
+          set -e
+          WORK_DIR=$(pwd)
+          mkdir -p "$WORK_DIR/release-assets"
+
+          FULL_TAG="${{ needs.prepare.outputs.fullTag }}"
+          echo "Organizing release assets for tag: $FULL_TAG"
+          echo "Working directory: $WORK_DIR"
+
+          # Verify artifact directories exist
+          test -d "artifacts/native-binaries-$FULL_TAG" || (echo "❌ native-binaries artifact directory not found!" && exit 1)
+          test -d "artifacts/example-executables-$FULL_TAG" || (echo "❌ example-executables artifact directory not found!" && exit 1)
+
+          # Copy native binaries (unzip and rezip with versioned names)
+          echo "Processing native binaries..."
+          cd "artifacts/native-binaries-$FULL_TAG"
+
+          for zip_file in native-*.zip; do
+            if [ -f "$zip_file" ]; then
+              platform=$(echo "$zip_file" | sed 's/native-//' | sed 's/.zip//')
+              echo "  Processing $platform..."
+              unzip -q "$zip_file"
+              
+              # Repackage with versioned name
+              dir_name=$(echo "$zip_file" | sed 's/.zip//')
+              if [ -d "$dir_name" ]; then
+                cd "$dir_name"
+                zip -r "$WORK_DIR/release-assets/opentui-native-v${FULL_TAG}-${platform}.zip" .
+                cd ..
+                
+                # Verify the output
+                test -f "$WORK_DIR/release-assets/opentui-native-v${FULL_TAG}-${platform}.zip" || (echo "❌ Failed to create native $platform release asset!" && exit 1)
+                echo "  ✅ opentui-native-v${FULL_TAG}-${platform}.zip created"
+              else
+                echo "❌ Directory $dir_name not found after unzip!" && exit 1
+              fi
+            fi
+          done
+
+          cd "$WORK_DIR"
+
+          # Copy example executables (unzip and rezip with versioned names)
+          echo "Processing example executables..."
+          cd "artifacts/example-executables-$FULL_TAG"
+
+          for zip_file in examples-*.zip; do
+            if [ -f "$zip_file" ]; then
+              platform=$(echo "$zip_file" | sed 's/examples-//' | sed 's/.zip//')
+              echo "  Processing $platform..."
+              unzip -q "$zip_file"
+              
+              # Repackage with versioned name
+              dir_name=$(echo "$zip_file" | sed 's/.zip//')
+              if [ -d "$dir_name" ]; then
+                cd "$dir_name"
+                zip -r "$WORK_DIR/release-assets/opentui-examples-v${FULL_TAG}-${platform}.zip" .
+                cd ..
+                
+                # Verify the output
+                test -f "$WORK_DIR/release-assets/opentui-examples-v${FULL_TAG}-${platform}.zip" || (echo "❌ Failed to create examples $platform release asset!" && exit 1)
+                echo "  ✅ opentui-examples-v${FULL_TAG}-${platform}.zip created"
+              else
+                echo "❌ Directory $dir_name not found after unzip!" && exit 1
+              fi
+            fi
+          done
+
+          cd "$WORK_DIR"
+
+          # Verify all expected release assets exist
+          # These are the matching symbols from the build job, never a Debug
+          # rebuild. Keep them as release assets beyond CI artifact expiration.
+          for target in darwin-x64 darwin-arm64 linux-x64 linux-arm64 linux-x64-musl linux-arm64-musl win32-x64 win32-arm64; do
+            source="artifacts/native-symbols-$FULL_TAG/native-symbols-$target.zip"
+            test -s "$source"
+            cp "$source" "release-assets/opentui-symbols-v${FULL_TAG}-${target}.zip"
+          done
+          echo ""
+          echo "Verifying all release assets..."
+          EXPECTED_ASSETS=20  # 8 native targets + 8 symbol archives + 4 examples
+          ACTUAL_ASSETS=$(ls -1 release-assets/*.zip 2>/dev/null | wc -l | tr -d ' ')
+
+          if [ "$ACTUAL_ASSETS" -ne "$EXPECTED_ASSETS" ]; then
+            echo "❌ Expected $EXPECTED_ASSETS release assets, found $ACTUAL_ASSETS"
+            ls -lah release-assets/ || echo "No release assets found"
+            exit 1
+          fi
+
+          echo "✅ All $ACTUAL_ASSETS release assets prepared:"
+          echo "   - 8 native binaries (all targets)"
+          echo "   - 8 matching native symbol archives (all targets)"
+          echo "   - 4 example executables (darwin-x64, darwin-arm64, linux-x64, windows-x64)"
+          ls -lah release-assets/
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      # The release commit carries the release notes (packages/web/src/content/docs/releases). They open the
+      # GitHub release, and GitHub appends its list of pull requests. Without notes the file is empty.
+      - name: Write release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: bun packages/web/scripts/release-notes.ts github "$VERSION" --out release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          # A release from main is not a tag push, so name the tag. The prepare job created it.
+          tag_name: v${{ needs.prepare.outputs.fullTag }}
+          name: ${{ needs.prepare.outputs.releaseTitle }}
+          make_latest: ${{ needs.prepare.outputs.makeLatest }}
+          previous_tag: ${{ needs.prepare.outputs.previousTag }}
+          files: release-assets/*.zip
+          body_path: release-notes.md
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ needs.prepare.outputs.isDryRun == 'true' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true

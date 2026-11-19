@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/opentui-sys", "crates/opentui", "crates/opentui-ssh"]
+resolver = "3"
+
+[workspace.package]
+version = "0.9.3"
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+let_underscore_must_use = "deny"
+missing_safety_doc = "deny"
