@@ -1,14 +1,6 @@
-<p align="center">
-  <a href="https://opentui.com">
-    <img alt="OpenTUI logo" src="https://opentui.com/opentui-logo-auto.svg" width="270" />
-  </a>
-</p>
+# QYVORA TUI
 
-<div align="center">
-    <a href="https://www.npmjs.com/package/@opentui/core"><img alt="npm version" src="https://img.shields.io/npm/v/@opentui/core?style=flat-square" /></a>
-    <a href="https://github.com/anomalyco/opentui/actions/workflows/build-core.yml"><img alt="Core build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opentui/build-core.yml?style=flat-square&branch=main" /></a>
-    <a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
-</div>
+QYVORA TUI is QYVORA's fork of [OpenTUI](https://github.com/anomalyco/opentui), used as the terminal UI foundation for QYVORA products. It preserves upstream OpenTUI architecture and MIT licensing while carrying QYVORA package identity and release controls.
 
 OpenTUI is a library to build terminal user interfaces.
 
@@ -18,9 +10,7 @@ OpenTUI is a library to build terminal user interfaces.
 - You add selects, inputs, and scroll boxes with keyboard and mouse controls.
 - You can play sounds, show images, play videos, and render 3D graphics.
 
-OpenCode uses OpenTUI in production for millions of users.
-
-[Website](https://opentui.com) | [Documentation](https://opentui.com/docs) | [Packages](https://opentui.com/packages)
+Upstream: [anomalyco/opentui](https://github.com/anomalyco/opentui) | [OpenTUI docs](https://opentui.com/docs)
 
 ## Packages
 
@@ -39,17 +29,15 @@ OpenCode uses OpenTUI in production for millions of users.
 - [`@opentui/web`](packages/web) - Private workspace with the documentation website and the AI agent skill.
 - [`packages/rust`](packages/rust) - Unpublished Rust bindings for the native C ABI and a framework built on them.
 
-## AI agent skill
+## Upstream AI agent skill
 
-Install the OpenTUI documentation as a skill for your AI coding assistant with [`npx skills`](https://skills.sh):
+Upstream OpenTUI documentation can be installed as a skill with [`npx skills`](https://skills.sh):
 
 ```bash
 npx skills add https://opentui.com --skill opentui
 ```
 
-Add `-g` to install the skill globally. The skill matches the latest release, and `npx skills update` moves it to each
-new release. Install from `https://opentui.com/docs/next` to follow the main branch. A skill installed with
-`npx skills add anomalyco/opentui` follows the main branch; run the command above to switch it to releases.
+This installs upstream OpenTUI docs; QYVORA-specific behavior should be documented in QYVORA repositories. Disable Astro/web telemetry in local docs workflows with `ASTRO_TELEMETRY_DISABLED=1` or `DO_NOT_TRACK=1`.
 
 ## Development
 
@@ -77,8 +65,8 @@ To link the source packages into a Bun-managed project, install that project's d
 
 ## Contributing
 
-OpenTUI is open for contributions.
+This repository is a QYVORA-maintained fork. Preserve upstream MIT notices and attribution when porting or adapting upstream OpenTUI changes.
 
 ## License
 
-OpenTUI is licensed under the [MIT License](LICENSE).
+MIT License. Copyright (c) 2026 QYVORA and upstream OpenTUI contributors. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
