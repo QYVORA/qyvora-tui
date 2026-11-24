@@ -1,43 +1,45 @@
 {
-    "name": "@qyvora/qyvora-tui",
-    "private": true,
-    "license": "MIT",
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/QYVORA/qyvora-tui.git"
-    },
-    "packageManager": "bun@1.4.1",
-    "workspaces": [
-        "packages/*",
-        "packages/solid/examples"
-    ],
-    "scripts": {
-        "build": "cd packages/native && bun run build && cd ../core && bun scripts/build.ts --native --skip-zig && bun run build:lib && cd ../qrcode && bun run build && cd ../three && bun run build && cd ../solid && bun run build && cd ../react && bun run build && cd ../keymap && bun run build && cd ../ssh && bun run build",
-        "build:examples": "cd packages/examples && bun run build",
-        "check:sources": "bun scripts/check-sources.ts",
-        "clean": "bun scripts/clean.ts",
-        "examples:node": "node packages/examples/scripts/run-node26.mjs",
-        "fmt": "oxfmt --write .",
-        "fmt:check": "oxfmt --check .",
-        "lint": "oxlint .",
-        "lint:ci": "oxlint . --deny-warnings",
-        "lint:fix": "oxlint --fix .",
-        "pre-publish": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "publish": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "publish:core": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "publish:qrcode": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "publish:three": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "publish:react": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "publish:solid": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "publish:keymap": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "publish:ssh": "echo disabled: external publishing is not configured for QYVORA && exit 1",
-        "prepare-release": "echo disabled: external release is not configured for QYVORA && exit 1",
-        "release": "echo disabled: external release is not configured for QYVORA && exit 1",
-        "release-notes": "echo disabled: external release is not configured for QYVORA && exit 1",
-        "test": "bun run --filter '@opentui/native' --filter '@opentui/core' --filter '@opentui/qrcode' --filter '@opentui/three' --filter '@opentui/solid' --filter '@opentui/react' --filter '@opentui/keymap' --filter '@opentui/ssh' --if-present test"
-    },
-    "devDependencies": {
-        "oxfmt": "0.41.0",
-        "oxlint": "1.56.0"
-    }
+  "name": "@qyvora/qyvora-tui",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QYVORA/qyvora-tui.git"
+  },
+  "packageManager": "bun@1.4.1",
+  "workspaces": [
+    "packages/*",
+    "packages/solid/examples"
+  ],
+  "scripts": {
+    "build": "cd packages/native && bun run build && cd ../core && bun scripts/build.ts --native --skip-zig && bun run build:lib && cd ../qrcode && bun run build && cd ../three && bun run build && cd ../solid && bun run build && cd ../react && bun run build && cd ../keymap && bun run build && cd ../ssh && bun run build",
+    "build:chat": "cd packages/qyvora-chat && bun run build",
+    "build:examples": "cd packages/examples && bun run build",
+    "check:sources": "bun scripts/check-sources.ts",
+    "clean": "bun scripts/clean.ts",
+    "examples:node": "node packages/examples/scripts/run-node26.mjs",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "lint:ci": "oxlint . --deny-warnings",
+    "lint:fix": "oxlint --fix .",
+    "pre-publish": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "publish": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "publish:core": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "publish:qrcode": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "publish:three": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "publish:react": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "publish:solid": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "publish:keymap": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "publish:ssh": "echo disabled: external publishing is not configured for QYVORA && exit 1",
+    "prepare-release": "echo disabled: external release is not configured for QYVORA && exit 1",
+    "release": "echo disabled: external release is not configured for QYVORA && exit 1",
+    "release-notes": "echo disabled: external release is not configured for QYVORA && exit 1",
+    "test": "bun run --filter '@qyvora/qyvora-chat' --filter '@opentui/native' --filter '@opentui/core' --filter '@opentui/qrcode' --filter '@opentui/three' --filter '@opentui/solid' --filter '@opentui/react' --filter '@opentui/keymap' --filter '@opentui/ssh' --if-present test",
+    "typecheck": "bun run --filter '@qyvora/qyvora-chat' --if-present typecheck && bun run --filter '@opentui/core' --if-present typecheck"
+  },
+  "devDependencies": {
+    "oxfmt": "0.41.0",
+    "oxlint": "1.56.0"
+  }
 }

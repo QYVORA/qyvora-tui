@@ -1,0 +1,43 @@
+{
+  "name": "@qyvora/qyvora-chat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QYVORA AI chat terminal interface built on the QYVORA OpenTUI fork",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QYVORA/qyvora-tui.git",
+    "directory": "packages/qyvora-chat"
+  },
+  "type": "module",
+  "bin": {
+    "qyvora-ai-tui": "src/app/main.ts"
+  },
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "dev": "bun src/app/main.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5"
+  },
+  "optionalDependencies": {
+    "@opentui/core-darwin-arm64": "0.9.3",
+    "@opentui/core-darwin-x64": "0.9.3",
+    "@opentui/core-linux-arm64": "0.9.3",
+    "@opentui/core-linux-arm64-musl": "0.9.3",
+    "@opentui/core-linux-x64": "0.9.3",
+    "@opentui/core-linux-x64-musl": "0.9.3",
+    "@opentui/core-win32-arm64": "0.9.3",
+    "@opentui/core-win32-x64": "0.9.3"
+  },
+  "engines": {
+    "bun": ">=1.4.1"
+  }
+}
