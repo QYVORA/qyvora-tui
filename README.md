@@ -2,6 +2,8 @@
 
 QYVORA TUI is QYVORA's fork of [OpenTUI](https://github.com/anomalyco/opentui), used as the terminal UI foundation for QYVORA products. It preserves upstream OpenTUI architecture and MIT licensing while carrying QYVORA package identity and release controls.
 
+**Readiness:** `INTERNAL` supporting terminal UI component, not a standalone public product and no public readiness claim. See the [Product Registry](../../../../knowledge/qyvora-docs/07-products/PRODUCT-REGISTRY.md).
+
 OpenTUI is a library to build terminal user interfaces.
 
 - It is written in Zig.
